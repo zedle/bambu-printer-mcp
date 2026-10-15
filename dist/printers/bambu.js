@@ -656,7 +656,7 @@ export class BambuImplementation {
         const loaded = manualHeatingRequirements(status, inspection.model, inspection.nozzleDiameters[0], usedMaterials[0]);
         const mapping = Array(inspection.materials.length).fill(-1);
         inspection.usedFilamentPositions.forEach(position => { mapping[position] = loaded.amsMapping?.[0] ?? 254; });
-        const requirements = { ...inspection, useAMS: loaded.useAMS, amsMapping: mapping, usedNozzleIndices: loaded.usedNozzleIndices, requireLoadedFilament: true };
+        const requirements = { ...inspection, useAMS: loaded.useAMS, amsMapping: mapping, usedNozzleIndices: loaded.usedNozzleIndices, requireLoadedFilament: true, printStart: true };
         const { hmsWarnings } = validatePrinterState(status, requirements);
         return { requirements, hmsWarnings };
     }
@@ -934,7 +934,7 @@ export class BambuImplementation {
                 throw new Error("Legacy gcode_file printing requires a single plate_1.gcode. Export only the selected plate or use a .3mf project_file export.");
             }
         }
-        const mappedRequirements = { ...inspection, amsMapping: baseMapping, useAMS: options.useAMS !== false };
+        const mappedRequirements = { ...inspection, amsMapping: baseMapping, useAMS: options.useAMS !== false, printStart: true, timelapse: options.timelapse ?? false };
         const initialStatus = await this.getSafetyStatus(host, serial, token);
         this.validatePrintState(initialStatus, inspection, mappedRequirements, legacyContainer);
         assertUnsignedPrintAccepted(initialStatus);

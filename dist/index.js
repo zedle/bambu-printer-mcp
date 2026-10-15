@@ -1301,7 +1301,7 @@ class BambuPrinterMCPServer {
             }
             if (!useAMS)
                 mapping = externalSpoolMapping(inspection.model, inspection);
-            const requirements = { ...inspection, amsMapping: mapping, useAMS };
+            const requirements = { ...inspection, amsMapping: mapping, useAMS, printStart: true, timelapse: args?.timelapse !== undefined ? Boolean(args.timelapse) : false };
             const initialStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
             validatePrinterState(initialStatus, requirements);
             const bedClearance = await this.bambu.confirmPrintPreflight(devId, initialStatus, inspection);

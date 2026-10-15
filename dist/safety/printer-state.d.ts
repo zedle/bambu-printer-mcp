@@ -35,6 +35,12 @@ export interface PrinterStateRequirements {
     filamentIds?: string[];
     /** Per filament: the preset name (filament_settings_id without its " @..." machine suffix). */
     filamentNames?: string[];
+    /** A print start: Bambu Studio's printer-state checks before sending a job apply (state-gates.ts). */
+    printStart?: boolean;
+    /** The job records a timelapse (print starts). */
+    timelapse?: boolean;
+    /** The job's highest chamber target (from the inspection). */
+    maxChamberTemperature?: number;
 }
 export interface ReportedNozzle {
     index: number;

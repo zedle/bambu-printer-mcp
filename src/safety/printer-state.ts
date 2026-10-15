@@ -3,6 +3,7 @@ import { PUSHINFO_TIMEOUT_MS, lanPrinterReport, lastPushAllAt, notePushAll, push
 import { nextSequenceId } from "../sequence-id.js";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
 import { filamentProhibition } from "./filament-rules.js";
+import { printStartGates } from "./state-gates.js";
 import { DEPUTY_EXTRUDER_ID, DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, printerTypeModel, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
 
 /** A safety check must run within this long of asking the printer for its state (Studio's PUSHINFO_TIMEOUT). */
@@ -149,6 +150,12 @@ export interface PrinterStateRequirements {
   filamentIds?: string[];
   /** Per filament: the preset name (filament_settings_id without its " @..." machine suffix). */
   filamentNames?: string[];
+  /** A print start: Bambu Studio's printer-state checks before sending a job apply (state-gates.ts). */
+  printStart?: boolean;
+  /** The job records a timelapse (print starts). */
+  timelapse?: boolean;
+  /** The job's highest chamber target (from the inspection). */
+  maxChamberTemperature?: number;
 }
 export interface ReportedNozzle { index: number; diameter: number; type?: string; flow?: string; stat?: number }
 interface ReportedFilament { position: number; material: string; trayIndex: number; nozzleMin?: number; nozzleMax?: number }
@@ -402,6 +409,14 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
   const model = normalizeModel(requirements.model);
   if (!model || !identity.model || model !== identity.model) throw new Error(`Printer model identity mismatch: requested ${requirements.model}, observed ${identity.model ?? "unknown"}.`);
   const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false, requirements.uploadOnly === true);
+  if (requirements.printStart && requirements.requireIdle !== false && !requirements.uploadOnly) {
+    const positions = requirements.usedFilamentPositions ?? (requirements.materials ?? []).map((_, index) => index);
+    hmsWarnings.push(...printStartGates(raw, {
+      model, filamentCount: requirements.materials?.length, timelapse: requirements.timelapse === true,
+      maxChamberTemperature: requirements.maxChamberTemperature,
+      trays: requirements.useAMS ? positions.map(position => requirements.amsMapping?.[position]).filter((tray): tray is number => tray !== undefined) : [],
+    }));
+  }
   if (requirements.requireLoadedFilament && (raw.ams?.tray_now !== undefined || Array.isArray(raw.ams?.ams))) {
     const current = finiteNumber(raw.ams?.tray_now);
     if (current === 255) throw new Error("The nozzle is explicitly reported unloaded. Load the declared filament before starting or resuming this G-code job.");
