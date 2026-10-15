@@ -156,6 +156,17 @@ test('known dual-nozzle printers reject a scalar legacy report that cannot estab
 test('two external spool reports cannot silently select whichever happens to match', () => {
   assert.throws(() => check(fresh({vir_slot:[{id:'254',tray_type:'PLA'},{id:'255',tray_type:'PETG'}]})),/external|material|ambiguous/i);
 });
+test('H2C external spool 254 is its left holder even while the right holder 255 is reported too', () => {
+  const serial='31BTEST';
+  const h2c=vir_slot=>fresh({model_id:'O1C2',modules:[{name:'ota',sn:serial}],vir_slot},{serial});
+  const job=(materials=['PLA'])=>req({model:'h2c',serial,nozzleDiameters:[],materials,useAMS:false});
+  // Observed: 254 holds the PLA, 255 is empty.
+  assert.doesNotThrow(() => check(h2c([{id:'254',tray_type:'PLA'},{id:'255',tray_type:''}]),job()));
+  assert.throws(() => check(h2c([{id:'254',tray_type:'PETG'},{id:'255',tray_type:'PLA'}]),job()),/material/i);
+  for(const slots of [[{id:'254',tray_type:'PLA'},{id:'254',tray_type:'PLA'}],[{id:'255',tray_type:'PLA'},{id:'253',tray_type:'PLA'}],
+    [{id:'254',tray_type:'PLA'},{id:'255',tray_type:''},{id:'256',tray_type:''}]])
+    assert.throws(() => check(h2c(slots),job()),/external|ambiguous|material/i);
+});
 test('old raw observations and fresh partial error reports cannot satisfy a new request', async () => {
   const printer = rawPrinter((_payload,emit) => emit({print:{command:'push_status',gcode_state:'IDLE',model_id:'C12'}}));
   printer.emit('rawMessage','device/01PTEST/report',Buffer.from(JSON.stringify({print:{command:'push_status',gcode_state:'IDLE',model_id:'C12',print_error:0,hms:[]}})));

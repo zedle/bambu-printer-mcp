@@ -218,11 +218,14 @@ function trayRange(value: unknown, label: string): number | undefined {
   if (number === undefined || number <= 0) throw new Error(`Reported filament ${label} temperature is malformed.`);
   return number;
 }
-function externalTray(raw: Record<string,any>): Record<string,any> | undefined {
+function externalTray(raw: Record<string,any>, model: string): Record<string,any> | undefined {
   const slots = raw.vir_slot;
   if (Array.isArray(slots)) {
     const selected = slots.filter((slot:any) => Number(slot?.id) === 254);
+    // The H2C reports one external holder per nozzle (254 deputy/left, 255 main/right; verified: its left
+    // extruder loads from 0xFE). The mapping names 254, so that one slot is it; duplicates or extras stay ambiguous.
     if (slots.length === 1 && selected.length === 1) return selected[0];
+    if (model === "h2c" && selected.length === 1 && slots.length === 2 && slots.every((slot:any) => [254,255].includes(Number(slot?.id)))) return selected[0];
     if (slots.length > 0) throw new Error("External spool report is ambiguous for this nozzle; cannot verify the selected material.");
   }
   return object(raw.vt_tray) ? raw.vt_tray : undefined;
@@ -308,7 +311,7 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
       if (!Number.isInteger(position) || position < 0 || !material) throw new Error(`A known declared material is required for filament position ${position}.`);
       const trayIndex = requirements.useAMS ? requirements.amsMapping?.[position] : 254;
       if (trayIndex === undefined || !Number.isInteger(trayIndex) || trayIndex < 0 || trayIndex > 254) throw new Error(`Complete AMS mapping is required for filament position ${position}.`);
-      const tray = trayIndex === 254 ? externalTray(raw) : mappedTray(raw,trayIndex);
+      const tray = trayIndex === 254 ? externalTray(raw,model) : mappedTray(raw,trayIndex);
       const reportedType = typeof tray?.tray_type === "string" ? tray.tray_type.trim() : "";
       if (reportedType && normalizeMaterial(reportedType) !== material) throw new Error(`Reported material ${reportedType} in slot ${trayIndex} contradicts declared ${materials[position]}.`);
       const nozzleMin = trayRange(tray?.nozzle_temp_min,"minimum");
