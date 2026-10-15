@@ -72,6 +72,14 @@ export declare function buildCleanPrintError(raw: Record<string, any> | undefine
 export declare function buildCleanPrintErrorUiop(printError: number, sequenceId?: string): {
     system: Record<string, unknown>;
 };
+/**
+ * Bambu Studio's resume: command_task_resume (`resume`, param "") after a pause the person made, command_hms_resume
+ * (`resume` with the print_error in decimal as `err`, param "reserve" and the report's job_id) for a job paused by
+ * an error, which is what its error dialog's Resume buttons send.
+ */
+export declare function buildResumeCommand(raw: Record<string, any> | undefined, sequenceId?: string): {
+    print: Record<string, unknown>;
+};
 /** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
 export declare function dispatchStatusLabel(dispatch: "started" | "unconfirmed"): "success" | "dispatched_unconfirmed";
 type DispatchVerdict = {
@@ -154,7 +162,9 @@ export declare class BambuImplementation {
     private print3mfPrepared;
     cancelJob(host: string, serial: string, token: string, dispatch?: () => Promise<any>): Promise<any>;
     pauseJob(host: string, serial: string, token: string, dispatch?: () => Promise<any>): Promise<any>;
-    resumeJob(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>) => Promise<any>): Promise<any>;
+    resumeJob(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: {
+        print: Record<string, unknown>;
+    }) => Promise<any>): Promise<any>;
     clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: {
         print: Record<string, unknown>;
     } | {

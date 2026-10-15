@@ -250,7 +250,7 @@ const hexCode = (value) => value.toString(16).toUpperCase().padStart(8, "0").rep
 // printer refusing an unsigned command (firmware 01.08.05+ outside LAN Only + Developer Mode), not a reason the
 // printer can't print. Every other fatal entry still blocks.
 const NON_FAULT_FATAL_HMS = new Set(["0500-0500-0001-0007"]);
-function validateErrors(raw, requireIdle, uploadOnly = false) {
+function validateErrors(raw, requireIdle, uploadOnly = false, resumableError) {
     const state = typeof raw.gcode_state === "string" ? raw.gcode_state.toUpperCase() : "UNKNOWN";
     // FAILED is how Bambu firmware reports a stopped or failed job; the printer is idle and takes a new job (as from
     // Bambu Studio). Like FINISH it may leave a part on the bed, so it goes through the same bed-clearance check.
@@ -268,6 +268,10 @@ function validateErrors(raw, requireIdle, uploadOnly = false) {
     if (printError !== undefined && Number.isInteger(printError) && printError > 0 && printError <= 0xffffffff &&
         (requireIdle || uploadOnly) && (printError & 0xf000) === PRINT_ERROR_STOP_CLASS) {
         warnings.push(`print_error ${hexCode(printError)} (${printError === 0x0300400c ? "the previous task was canceled" : "the previous task stopped"})`);
+    }
+    else if (!requireIdle && !uploadOnly && printError !== undefined && printError !== 0 && printError === resumableError) {
+        // A pause for this error that Bambu Studio's error dialog offers Resume for (hms-actions.ts).
+        warnings.push(`print_error ${hexCode(printError)} (the job is paused for it; resuming answers it like Bambu Studio's Resume button)`);
     }
     else if (printError !== 0)
         throw new Error(`Printer reports a print error${printError !== undefined ? ` (${hexCode(printError)})` : " or did not report its error state"}.`);
@@ -431,7 +435,7 @@ export function validatePrinterState(status, requirements) {
     const model = normalizeModel(requirements.model);
     if (!model || !identity.model || model !== identity.model)
         throw new Error(`Printer model identity mismatch: requested ${requirements.model}, observed ${identity.model ?? "unknown"}.`);
-    const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false, requirements.uploadOnly === true);
+    const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false, requirements.uploadOnly === true, requirements.resumableError);
     if (requirements.printStart && requirements.requireIdle !== false && !requirements.uploadOnly) {
         const positions = requirements.usedFilamentPositions ?? (requirements.materials ?? []).map((_, index) => index);
         hmsWarnings.push(...printStartGates(raw, {

@@ -13,6 +13,7 @@ import { readSafe3mfArchive } from "../safety/archive.js";
 import { inspectPrintFile } from "../safety/print-file.js";
 import { normalizeModel, validateTemperature } from "../safety/limits.js";
 import { validatePrinterState, manualHeatingRequirements } from "../safety/printer-state.js";
+import { printErrorResumable } from "../safety/hms-actions.js";
 import { DEPUTY_EXTRUDER_ID, MAIN_EXTRUDER_ID, externalSpoolMapping, extruderCount, isExternalTray, printerTypeModel } from "../safety/models.js";
 import { normalizeBridgeAmsTrayValue, studioTrayMapping } from "../ams-mapping.js";
 import { assertBedSupported, studioBedType, studioPrintOptions, usedExtruderCount, usedFilamentTypes } from "./print-options.js";
@@ -144,6 +145,18 @@ export function buildCleanPrintError(raw, sequenceId = nextSequenceId()) {
 export function buildCleanPrintErrorUiop(printError, sequenceId = nextSequenceId()) {
     return { system: { command: "uiop", sequence_id: sequenceId, name: "print_error", action: "close", source: 1, type: "dialog",
             err: (printError >>> 0).toString(16).toUpperCase().padStart(8, "0") } };
+}
+/**
+ * Bambu Studio's resume: command_task_resume (`resume`, param "") after a pause the person made, command_hms_resume
+ * (`resume` with the print_error in decimal as `err`, param "reserve" and the report's job_id) for a job paused by
+ * an error, which is what its error dialog's Resume buttons send.
+ */
+export function buildResumeCommand(raw, sequenceId = nextSequenceId()) {
+    const printError = Number(raw?.print_error ?? 0);
+    if (Number.isInteger(printError) && printError > 0) {
+        return { print: { command: "resume", err: String(printError), param: "reserve", job_id: String(raw?.job_id ?? ""), sequence_id: sequenceId } };
+    }
+    return { print: { command: "resume", param: "", sequence_id: sequenceId } };
 }
 /** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
 export function dispatchStatusLabel(dispatch) {
@@ -1063,12 +1076,25 @@ export class BambuImplementation {
             const checked = this.checkedJobs.get(`${host}\n${serial}`);
             if (!checked)
                 throw new Error("Resume requires a job inspected and started by this server instance. Verify other jobs on the printer before resuming them there.");
+            let command;
             const beforeDispatch = async () => {
                 assertActive();
                 const status = await this.getSafetyStatus(host, serial, token);
-                validatePrinterState(status, { ...checked.requirements, requireIdle: false });
+                const printError = Number(status.raw?.print_error ?? 0);
+                // Bambu Studio resumes a job paused by an error only from the error's dialog, and only when the dialog offers
+                // Resume for that code (hms_action list); a plain resume is for a pause the person made.
+                const resumable = Number.isInteger(printError) && printError > 0 && printErrorResumable(serial, printError) ? printError : undefined;
+                validatePrinterState(status, { ...checked.requirements, requireIdle: false, resumableError: resumable });
                 if (status.raw.gcode_state !== "PAUSE")
                     throw new Error("Resume requires a freshly reported paused job.");
+                // MachineObject::check_resume_condition: job_attr bits 4-7 above 1 is a processing task (laser, cutting).
+                const jobAttr = Number(status.raw.job_attr);
+                if (Number.isInteger(jobAttr) && ((jobAttr >>> 4) & 0xf) > 1)
+                    throw new Error("This is a processing task (such as laser); like Bambu Studio, it can only be resumed on the printer.");
+                const next = buildResumeCommand(status.raw, command?.print.sequence_id);
+                if (command && JSON.stringify(command) !== JSON.stringify(next))
+                    throw new Error("The printer's error state changed before resuming. Check get_printer_status and retry.");
+                command = next;
                 const stem = (value) => path.posix.basename(value).replace(/(?:\.gcode)?\.3mf$|\.gcode$/i, "");
                 const names = [status.raw.gcode_file, status.raw.subtask_name].filter(value => typeof value === "string");
                 if (!names.some(value => stem(value) === stem(checked.remotePath)))
@@ -1078,10 +1104,11 @@ export class BambuImplementation {
             await beforeDispatch();
             const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
             assertActive();
-            const result = { status: "success", message: "Resume command sent successfully." };
+            const answered = command.print.err !== undefined ? { answeredError: Number(command.print.err) } : {};
+            const result = { status: "success", message: "Resume command sent successfully.", ...answered };
             if (dispatch)
-                return withDispatchedReply(result, await dispatch(assertActive, beforeDispatch));
-            const sent = await sendCommand(printer, new UpdateStateCommand({ state: "resume" }));
+                return withDispatchedReply(result, await dispatch(assertActive, beforeDispatch, command));
+            const sent = await sendCommand(printer, command);
             return withCommandReply(result, sent.reply, sent.waitedMs);
         });
     }

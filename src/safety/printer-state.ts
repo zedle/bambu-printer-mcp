@@ -150,6 +150,8 @@ export interface PrinterStateRequirements {
   filamentIds?: string[];
   /** Per filament: the preset name (filament_settings_id without its " @..." machine suffix). */
   filamentNames?: string[];
+  /** Resume only: the paused job's print_error that the printer offers Resume for (hms-actions.ts). */
+  resumableError?: number;
   /** A print start: Bambu Studio's printer-state checks before sending a job apply (state-gates.ts). */
   printStart?: boolean;
   /** The job records a timelapse (print starts). */
@@ -266,7 +268,7 @@ const hexCode = (value: number) => value.toString(16).toUpperCase().padStart(8, 
 // printer can't print. Every other fatal entry still blocks.
 const NON_FAULT_FATAL_HMS = new Set(["0500-0500-0001-0007"]);
 
-function validateErrors(raw: Record<string,any>, requireIdle: boolean, uploadOnly = false): string[] {
+function validateErrors(raw: Record<string,any>, requireIdle: boolean, uploadOnly = false, resumableError?: number): string[] {
   const state = typeof raw.gcode_state === "string" ? raw.gcode_state.toUpperCase() : "UNKNOWN";
   // FAILED is how Bambu firmware reports a stopped or failed job; the printer is idle and takes a new job (as from
   // Bambu Studio). Like FINISH it may leave a part on the bed, so it goes through the same bed-clearance check.
@@ -280,6 +282,9 @@ function validateErrors(raw: Record<string,any>, requireIdle: boolean, uploadOnl
   if (printError !== undefined && Number.isInteger(printError) && printError > 0 && printError <= 0xffffffff &&
       (requireIdle || uploadOnly) && (printError & 0xf000) === PRINT_ERROR_STOP_CLASS) {
     warnings.push(`print_error ${hexCode(printError)} (${printError === 0x0300400c ? "the previous task was canceled" : "the previous task stopped"})`);
+  } else if (!requireIdle && !uploadOnly && printError !== undefined && printError !== 0 && printError === resumableError) {
+    // A pause for this error that Bambu Studio's error dialog offers Resume for (hms-actions.ts).
+    warnings.push(`print_error ${hexCode(printError)} (the job is paused for it; resuming answers it like Bambu Studio's Resume button)`);
   } else if (printError !== 0) throw new Error(`Printer reports a print error${printError !== undefined ? ` (${hexCode(printError)})` : " or did not report its error state"}.`);
   if (!Array.isArray(raw.hms)) throw new Error("Printer HMS error state is missing or malformed.");
   for (const entry of raw.hms) {
@@ -408,7 +413,7 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
   const identity = observedIdentity(raw, String(status.serial ?? ""));
   const model = normalizeModel(requirements.model);
   if (!model || !identity.model || model !== identity.model) throw new Error(`Printer model identity mismatch: requested ${requirements.model}, observed ${identity.model ?? "unknown"}.`);
-  const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false, requirements.uploadOnly === true);
+  const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false, requirements.uploadOnly === true, requirements.resumableError);
   if (requirements.printStart && requirements.requireIdle !== false && !requirements.uploadOnly) {
     const positions = requirements.usedFilamentPositions ?? (requirements.materials ?? []).map((_, index) => index);
     hmsWarnings.push(...printStartGates(raw, {

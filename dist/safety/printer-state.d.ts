@@ -35,6 +35,8 @@ export interface PrinterStateRequirements {
     filamentIds?: string[];
     /** Per filament: the preset name (filament_settings_id without its " @..." machine suffix). */
     filamentNames?: string[];
+    /** Resume only: the paused job's print_error that the printer offers Resume for (hms-actions.ts). */
+    resumableError?: number;
     /** A print start: Bambu Studio's printer-state checks before sending a job apply (state-gates.ts). */
     printStart?: boolean;
     /** The job records a timelapse (print starts). */

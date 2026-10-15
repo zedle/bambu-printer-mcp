@@ -3664,8 +3664,9 @@ class BambuPrinterMCPServer {
           case "resume_print":
             result = await this.bambu.resumeJob(host, bambuSerial, bambuToken,
               nativeControls
-                ? (assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
-                    messageJson: JSON.stringify({ print: { command: "resume", param: "", sequence_id: nextSequenceId() } }), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
+                // The resume form Studio picks from the fresh report (plain, or answering the error that paused the job).
+                ? (assertActive, beforeDispatch, command) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
+                    messageJson: JSON.stringify(command), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
                 : undefined);
             break;
 

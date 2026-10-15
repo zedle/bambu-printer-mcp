@@ -424,6 +424,46 @@ test("a matching inspected paused job can resume after a fresh safety check", as
   assert.equal(events[2].payload.print.command, "resume");
 });
 
+test("a job paused by an error resumes only where Studio's error dialog offers Resume, answering that error", async (t) => {
+  const file = await fixture(t);
+  const hmsDir = await fs.mkdtemp(path.join(os.tmpdir(), "bambu-hms-"));
+  t.after(() => fs.rm(hmsDir, { recursive: true, force: true }));
+  // Studio's downloaded action list for this serial prefix: 0700-8012 offers Resume (2), 0700-8013 only OK (11).
+  await fs.writeFile(path.join(hmsDir, `hms_action_${serial.slice(0, 3)}.json`), JSON.stringify({ data: [
+    { actions: [2, 6], device: serial.slice(0, 3), ecode: "07008012" }, { actions: [11], device: serial.slice(0, 3), ecode: "07008013" }] }));
+  const previous = process.env.BAMBU_HMS_DIR;
+  process.env.BAMBU_HMS_DIR = hmsDir;
+  t.after(() => { if (previous === undefined) delete process.env.BAMBU_HMS_DIR; else process.env.BAMBU_HMS_DIR = previous; });
+  const { printer, events } = isolatedPrinter();
+  const started = await printer.print3mf(host, serial, token, { projectName: "resume", filePath: file, bambuModel: "p1s", useAMS: false });
+  const paused = changes => async () => safetyStatus({ state: "PAUSE", gcode_file: started.remoteProjectPath, job_id: "5551212", ...changes });
+  events.length = 0;
+  printer.getSafetyStatus = paused({ print_error: 0x0700_8012 });
+  const result = await printer.resumeJob(host, serial, token);
+  const { sequence_id, ...resume } = events.find(({ action }) => action === "publish").payload.print;
+  assert.deepEqual(resume, { command: "resume", err: String(0x0700_8012), param: "reserve", job_id: "5551212" });
+  assert.equal(result.answeredError, 0x0700_8012);
+  // The signed route gets the same command from the same check.
+  let signed;
+  await printer.resumeJob(host, serial, token, async (_active, beforeDispatch, command) => { await beforeDispatch(); signed = command; return { status: "success" }; });
+  assert.equal(signed.print.err, String(0x0700_8012));
+  // No Resume button for the code, or a code the list doesn't know: still refused.
+  for (const code of [0x0700_8013, 0x0700_8099]) {
+    printer.getSafetyStatus = paused({ print_error: code });
+    events.length = 0;
+    await assert.rejects(printer.resumeJob(host, serial, token), /print error/);
+    assert.deepEqual(events.filter(({ action }) => action === "publish"), []);
+  }
+  // A paused processing task (job_attr bits 4-7 above 1) resumes only on the printer, as in Studio.
+  printer.getSafetyStatus = paused({ job_attr: 0x20 });
+  await assert.rejects(printer.resumeJob(host, serial, token), /processing task/);
+  // A plain pause keeps Studio's plain resume.
+  printer.getSafetyStatus = paused({});
+  events.length = 0;
+  await printer.resumeJob(host, serial, token);
+  assert.equal(events.find(({ action }) => action === "publish").payload.print.param, "");
+});
+
 for (const [name, changes, error] of [
   ["a different paused job", { gcode_file: "cache/unverified.gcode", subtask_name: "another job" }, /identity|artifact|match/i],
   ["a changed nozzle", { nozzle: "0.6" }, /nozzle|diameter/i],
