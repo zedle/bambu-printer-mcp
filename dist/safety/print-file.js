@@ -20,6 +20,11 @@ function normalizeBed(value) {
         return 'cool plate supertack';
     if (['smooth pei plate', 'high temp plate', 'high temperature plate', 'hot plate'].includes(text))
         return 'smooth pei plate';
+    // Bambu Studio's plate ids next to its display names (plate_N.json writes the id, the header the name).
+    if (['engineering plate', 'eng plate', 'ep plate', 'engineering'].includes(text))
+        return 'engineering plate';
+    if (['cool plate', 'pc plate', 'cool'].includes(text))
+        return 'cool plate';
     return text;
 }
 function metadataValues(metadata, keys) {
@@ -662,5 +667,14 @@ export async function inspectPrintFile(filePath, options) {
         return fail('selected G-code contains no printable commands');
     if (!used.size)
         materials.forEach((_, index) => used.add(index));
-    return { model, nozzleDiameters, materials, usedFilamentPositions: [...used].sort((a, b) => a - b), plateInternalPath, sha256, maxNozzleTemperature, maxBedTemperature, maxChamberTemperature, bedType, selectsAms, nozzleTypes, nozzleFlows };
+    // Descriptive per-filament header fields for print dispatch metadata (never used as thermal evidence).
+    const perFilament = (key) => {
+        const values = metadataValues(headers, [key]).map(list).find(entries => entries.length === materials.length && entries.every(Boolean));
+        return values;
+    };
+    const filamentMap = perFilament('filament_map')?.map(Number);
+    return { model, nozzleDiameters, materials, usedFilamentPositions: [...used].sort((a, b) => a - b), plateInternalPath, sha256, maxNozzleTemperature, maxBedTemperature, maxChamberTemperature, bedType, selectsAms, nozzleTypes, nozzleFlows,
+        ...(filamentMap && filamentMap.every(value => Number.isInteger(value) && value >= 1 && value <= nozzleDiameters.length) ? { filamentMap } : {}),
+        ...(perFilament('filament_ids') ? { filamentIds: perFilament('filament_ids') } : {}),
+        ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {}) };
 }

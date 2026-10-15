@@ -16,6 +16,11 @@ export interface PrintFileInspection {
   selectsAms: boolean;
   nozzleTypes?: string[];
   nozzleFlows?: string[];
+  /** Per filament, from the plate header: physical extruder (1 = left, 2 = right on dual-nozzle printers). */
+  filamentMap?: number[];
+  /** Per filament, from the plate header: Bambu filament ids (e.g. GFL99) and #RRGGBB colours. */
+  filamentIds?: string[];
+  filamentColours?: string[];
 }
 type Metadata = Record<string, unknown>;
 const NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
@@ -31,6 +36,9 @@ function normalizeBed(value: unknown): string | undefined {
   if (['textured pei plate','textured plate'].includes(text)) return 'textured pei plate';
   if (['supertack plate','cool plate supertack'].includes(text)) return 'cool plate supertack';
   if (['smooth pei plate','high temp plate','high temperature plate','hot plate'].includes(text)) return 'smooth pei plate';
+  // Bambu Studio's plate ids next to its display names (plate_N.json writes the id, the header the name).
+  if (['engineering plate','eng plate','ep plate','engineering'].includes(text)) return 'engineering plate';
+  if (['cool plate','pc plate','cool'].includes(text)) return 'cool plate';
   return text;
 }
 function metadataValues(metadata: Metadata[], keys: string[]): unknown[] {
@@ -470,5 +478,14 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
   }
   if(!commandCount) return fail('selected G-code contains no printable commands');
   if(!used.size) materials.forEach((_,index)=>used.add(index));
-  return {model,nozzleDiameters,materials,usedFilamentPositions:[...used].sort((a,b)=>a-b),plateInternalPath,sha256,maxNozzleTemperature,maxBedTemperature,maxChamberTemperature,bedType,selectsAms,nozzleTypes,nozzleFlows};
+  // Descriptive per-filament header fields for print dispatch metadata (never used as thermal evidence).
+  const perFilament = (key: string): string[] | undefined => {
+    const values = metadataValues(headers, [key]).map(list).find(entries => entries.length === materials.length && entries.every(Boolean));
+    return values;
+  };
+  const filamentMap = perFilament('filament_map')?.map(Number);
+  return {model,nozzleDiameters,materials,usedFilamentPositions:[...used].sort((a,b)=>a-b),plateInternalPath,sha256,maxNozzleTemperature,maxBedTemperature,maxChamberTemperature,bedType,selectsAms,nozzleTypes,nozzleFlows,
+    ...(filamentMap && filamentMap.every(value => Number.isInteger(value) && value >= 1 && value <= nozzleDiameters.length) ? { filamentMap } : {}),
+    ...(perFilament('filament_ids') ? { filamentIds: perFilament('filament_ids') } : {}),
+    ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {})};
 }

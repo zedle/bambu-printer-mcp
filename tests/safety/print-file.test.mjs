@@ -521,6 +521,14 @@ test('H2C filament-variant project tables resolve through the selected variant',
   const disagreeing=job(['220','230','230','220','230','230']);delete disagreeing['Metadata/project_settings.config'].filament_extruder_variant;
   await assert.rejects(inspect(t,'',{model:'h2c'},disagreeing),/malformed/i);
 });
+test('Studio plate ids and display names name the same plate',async t=>{
+  for(const [name,id,option] of [['Engineering Plate','eng_plate','engineering_plate'],['Cool Plate','pc_plate','cool_plate'],['Textured PEI Plate','textured_plate','textured_plate'],['High Temp Plate','hot_plate','hot_plate']]) {
+    const r=await inspect(t,'',{model:'p1s',bedType:option},{'Metadata/plate_1.gcode':header()+`; curr_bed_type = ${name}\nM104 S220\n`,'Metadata/plate_1.json':{bed_type:id}});
+    assert.ok(r.bedType,name);
+  }
+  await assert.rejects(inspect(t,'',{model:'p1s'},{'Metadata/plate_1.gcode':header()+'; curr_bed_type = Engineering Plate\nM104 S220\n','Metadata/plate_1.json':{bed_type:'textured_plate'}}),/contradictory bed type/);
+  await assert.rejects(inspect(t,'',{model:'p1s',bedType:'textured_plate'},{'Metadata/plate_1.gcode':header()+'; curr_bed_type = Engineering Plate\nM104 S220\n','Metadata/plate_1.json':{bed_type:'eng_plate'}}),/bed type/);
+});
 test('config layer_change_gcode does not close startup but a real layer marker does',async t=>{
   const config='; CONFIG_BLOCK_START\n; layer_change_gcode = ; layer num/total_layer_count: {layer_num+1}/[total_layer_count]\\nM104 S220\n; CONFIG_BLOCK_END\n';
   await inspect(t,h2cHeader()+config+'; EXECUTABLE_BLOCK_START\n'+h2cStartup+'; MACHINE_START_GCODE_END\n',{model:'h2c'});

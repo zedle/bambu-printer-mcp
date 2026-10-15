@@ -3,6 +3,8 @@
 ## Unreleased
 
 ### Changed
+- Send Bambu Studio's cloud mapping fields with BambuNetwork prints, built from the checked tray mapping: `ams_mapping` with external trays as -1, `ams_mapping2` as {ams_id, slot_id} (external {254|255, 0}), and `ams_mapping_info` with type, id, colours and the task nozzle from the file's `filament_map`. Without them the printer ran AMS jobs as `use_ams: false`.
+- Recognise Studio's Engineering and Cool plate ids (`eng_plate`, `pc_plate`) next to their display names, so files for those plates no longer fail inspection as contradictory.
 - Open the printer's cloud channel before a cloud `start_print` as well (subscription, version, certificates): without it the plugin fails the job with -3140 (`ENC_FLAG_NOT_READY`).
 - Block printing only on fatal HMS entries (severity 1), print errors and malformed or unknown-severity entries. Serious and common entries no longer block; they come back as `hmsWarnings` (cloud print results include them), like Bambu Studio, which starts prints with them listed and lets the printer refuse a job it cannot run.
 - Start the BambuNetwork agent in Bambu Studio's order: register the plugin's `slicer_base64.cer` client certificate (`BAMBU_NETWORK_CERT_DIR`, else Bambu Studio's `resources/cert`, else the bridge runtime) and the client headers before `net.start`. Without them the agent signed in but never connected to Bambu's cloud, so cloud printing and control could not work.

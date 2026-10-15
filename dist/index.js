@@ -734,6 +734,29 @@ function nativeAmsMapping2(mapping) {
         return { ams_id: Math.floor(value / 4), slot_id: value % 4 };
     }));
 }
+/**
+ * Bambu Studio's cloud print mapping fields for a checked positional tray mapping (SelectMachine.cpp,
+ * DevMapping.cpp): ams_mapping lists external trays as -1; ams_mapping2 gives {ams_id, slot_id} with external
+ * trays as {254|255, 0} and AMS-HT units as {unit, 0}; ams_mapping_info adds type, id, colours and the cloud task
+ * nozzle (right 0, left 1, from the file's filament_map). Without them the printer runs the job as use_ams false.
+ */
+function studioCloudMappings(mapping, inspection, trayColour) {
+    const v0 = mapping.map(tray => (tray === 254 || tray === 255 ? -1 : tray));
+    const v1 = mapping.map(tray => tray < 0 ? { ams_id: 255, slot_id: 255 } : tray >= 128 ? { ams_id: tray, slot_id: 0 } : { ams_id: Math.floor(tray / 4), slot_id: tray % 4 });
+    v1.forEach((entry, position) => { if (mapping[position] === 254 || mapping[position] === 255)
+        v1[position] = { ams_id: mapping[position], slot_id: 0 }; });
+    const info = mapping.map((tray, position) => {
+        if (tray < 0)
+            return { ams: -1, targetColor: "", filamentId: "", filamentType: "" };
+        const nozzle = inspection.nozzleDiameters.length === 2 ? inspection.filamentMap?.[position] : undefined;
+        return {
+            ams: tray, targetColor: trayColour(tray) ?? "", filamentId: inspection.filamentIds?.[position] ?? "", filamentType: inspection.materials[position] ?? "",
+            ...(nozzle === 1 ? { nozzleId: 1 } : nozzle === 2 ? { nozzleId: 0 } : {}),
+            sourceColor: inspection.filamentColours?.[position] ?? "",
+        };
+    });
+    return { v0, v1, info };
+}
 function redactPrintParams(params) {
     return {
         ...params,
@@ -1173,6 +1196,13 @@ class BambuPrinterMCPServer {
             const { hmsWarnings } = validatePrinterState(confirmedStatus, requirements);
             this.bambu.assertBedClearance(confirmedStatus, bedClearance);
             const amsMapping = stringifyBridgeJson(mapping);
+            const trayColour = (tray) => {
+                const raw = confirmedStatus?.raw ?? {};
+                const slot = tray === 254 || tray === 255 ? (raw.vir_slot ?? []).find((entry) => Number(entry?.id) === tray)
+                    : (raw.ams?.ams ?? []).find((unit) => Number(unit?.id) === (tray >= 128 ? tray : Math.floor(tray / 4)))?.tray?.find((entry) => Number(entry?.id) === (tray >= 128 ? 0 : tray % 4));
+                return typeof slot?.tray_color === "string" ? slot.tray_color : undefined;
+            };
+            const cloudMappings = useAMS && mapping ? studioCloudMappings(mapping, inspection, trayColour) : undefined;
             const remoteFileName = uniquePrintName(threeMFPath);
             const params = {
                 dev_id: devId,
@@ -1188,9 +1218,9 @@ class BambuPrinterMCPServer {
                 ftp_file: String(args?.ftp_file || ""),
                 ftp_file_md5: String(args?.ftp_file_md5 || ""),
                 nozzle_mapping: stringifyBridgeJson(args?.nozzle_mapping) || "",
-                ams_mapping: amsMapping || "",
-                ams_mapping2: stringifyBridgeJson(args?.ams_mapping2) || "",
-                ams_mapping_info: stringifyBridgeJson(args?.ams_mapping_info) || "",
+                ams_mapping: cloudMappings ? JSON.stringify(cloudMappings.v0) : amsMapping || "",
+                ams_mapping2: cloudMappings ? JSON.stringify(cloudMappings.v1) : "",
+                ams_mapping_info: cloudMappings ? JSON.stringify(cloudMappings.info) : "",
                 nozzles_info: stringifyBridgeJson(args?.nozzles_info) || "",
                 connection_type: connectionType,
                 comments: String(args?.comments || ""),
