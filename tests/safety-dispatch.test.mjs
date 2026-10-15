@@ -1029,6 +1029,23 @@ test("manual positive heating requires confirmation but heater-off does not", as
   assert.match(events.find(event => event.action === "publish").payload.print.param, /M104 S0/);
 });
 
+test("LAN stop, pause and skip_objects go out at QoS 1 like Bambu Studio, other commands at QoS 0", async () => {
+  const printer = new BambuImplementation(async () => true);
+  const sent = [];
+  const client = {
+    config: { serialNumber: serial },
+    mqttClient: { publish: (topic, payload, options, callback) => { sent.push({ topic, print: JSON.parse(payload).print, qos: options.qos }); callback(); } },
+    publish: async payload => { sent.push({ print: payload.print, qos: 0 }); },
+  };
+  printer.getPrinter = async () => client;
+  await printer.cancelJob(host, serial, token);
+  await printer.pauseJob(host, serial, token);
+  await printer.skipObjects(host, serial, token, [3]);
+  await printer.setPrintSpeed(host, serial, token, "silent");
+  assert.deepEqual(sent.map(({ print, qos, topic }) => [print.command, qos, topic]), [
+    ["stop", 1, `device/${serial}/request`], ["pause", 1, `device/${serial}/request`], ["skip_objects", 1, `device/${serial}/request`], ["print_speed", 0, undefined]]);
+});
+
 test("hardware errors cannot be cleared without human confirmation", async () => {
   const { printer, events } = isolatedPrinter(safetyStatus({ print_error: 123, hms: [{ attr: 1, code: 0x20001 }] }));
   const prompts = [];

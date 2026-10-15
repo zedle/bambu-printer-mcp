@@ -393,7 +393,7 @@ function pendingRepliesFor(printer: any): Map<string, (reply: CommandReply) => v
  * sequence_id. A refusal (result "fail", a non-zero err_code) throws; no reply is not an error (older firmware
  * doesn't answer every command). `waitedMs` is 0 when no reply could be awaited (a client without events).
  */
-async function sendCommand(printer: any, command: Record<string, any> | BambuNodeCommand): Promise<{ reply?: CommandReply; waitedMs: number }> {
+async function sendCommand(printer: any, command: Record<string, any> | BambuNodeCommand, qos: 0 | 1 = 0): Promise<{ reply?: CommandReply; waitedMs: number }> {
   const message = typeof (command as BambuNodeCommand).invoke === "function"
     ? await bambuNodeMessage(command as BambuNodeCommand)
     : command as Record<string, any>;
@@ -403,7 +403,7 @@ async function sendCommand(printer: any, command: Record<string, any> | BambuNod
   const sequenceId = String(message[section].sequence_id);
   const waitMs = commandReplyWaitMs();
   if (waitMs === 0 || typeof printer?.on !== "function") {
-    await printer.publish(message);
+    await publishWithQos(printer, message, qos);
     await sleep(COMMAND_SETTLE_MS);
     return { waitedMs: 0 };
   }
@@ -414,7 +414,7 @@ async function sendCommand(printer: any, command: Record<string, any> | BambuNod
     timer = setTimeout(() => resolve(undefined), waitMs);
   });
   try {
-    await printer.publish(message);
+    await publishWithQos(printer, message, qos);
     const reply = await replied;
     assertCommandAccepted(reply);
     return { reply, waitedMs: reply ? 0 : waitMs };
@@ -422,6 +422,23 @@ async function sendCommand(printer: any, command: Record<string, any> | BambuNod
     clearTimeout(timer);
     pending.delete(sequenceId);
   }
+}
+
+/**
+ * Publish at Bambu Studio's QoS: it sends stop, pause, resume, skip_objects, set_nozzle_temp, set_ctt and the hms
+ * commands with QoS 1 (publish_json(j, 1)), everything else with 0. bambu-node's publish has no QoS option, so QoS 1
+ * goes through its MQTT client on the same request topic.
+ */
+async function publishWithQos(printer: any, message: Record<string, any>, qos: 0 | 1): Promise<void> {
+  const client = printer?.mqttClient;
+  const serial = printer?.config?.serialNumber;
+  if (qos !== 1 || !client || typeof client.publish !== "function" || typeof serial !== "string" || !serial) {
+    await printer.publish(message);
+    return;
+  }
+  const topic = `device/${serial}/request`;
+  await new Promise<void>((resolve, reject) => client.publish(topic, JSON.stringify(message), { qos: 1 },
+    (error?: Error) => error ? reject(new Error(`Error publishing to topic '${topic}': ${error.message}`)) : resolve()));
 }
 
 /** A dispatch callback's result (a signed command) may carry the printer's reply; copy it onto this result. */
@@ -1205,7 +1222,7 @@ export class BambuImplementation {
 
     try {
       if (dispatch) return await dispatch();
-      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "stop" }));
+      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "stop" }), 1);
       this.checkedJobs.delete(`${host}\n${serial}`);
       return withCommandReply({ status: "success", message: "Cancel command sent successfully." }, sent.reply, sent.waitedMs);
     } catch (error) {
@@ -1217,7 +1234,7 @@ export class BambuImplementation {
     const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
     try {
       if (dispatch) return await dispatch();
-      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "pause" }));
+      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "pause" }), 1);
       return withCommandReply({ status: "success", message: "Pause command sent successfully." }, sent.reply, sent.waitedMs);
     } catch (error) {
       throw new Error(`Failed to pause print: ${(error as Error).message}`);
@@ -1255,7 +1272,7 @@ export class BambuImplementation {
       const answered = command!.print.err !== undefined ? { answeredError: Number(command!.print.err) } : {};
       const result = { status: "success", message: "Resume command sent successfully.", ...answered };
       if (dispatch) return withDispatchedReply(result, await dispatch(assertActive, beforeDispatch, command!));
-      const sent = await sendCommand(printer!, command!);
+      const sent = await sendCommand(printer!, command!, 1);
       return withCommandReply(result, sent.reply, sent.waitedMs);
     });
   }
@@ -1343,7 +1360,7 @@ export class BambuImplementation {
   private async sendControl(host: string, serial: string, token: string, command: ControlCommand,
     dispatch?: (command: ControlCommand) => Promise<any>): Promise<SentControl> {
     if (dispatch) return { dispatched: await dispatch(command) };
-    return sendCommand(await this.getPrinter(host, serial, token), JSON.parse(command.messageJson));
+    return sendCommand(await this.getPrinter(host, serial, token), JSON.parse(command.messageJson), command.qos);
   }
 
   async setAirductMode(host: string, serial: string, token: string, mode: string,
@@ -1461,7 +1478,7 @@ export class BambuImplementation {
       for (const command of commands) {
         sent = dispatch
           ? { dispatched: await dispatch(command, assertActive, beforeDispatch) }
-          : await sendCommand(printer!, JSON.parse(command.messageJson));
+          : await sendCommand(printer!, JSON.parse(command.messageJson), command.qos);
       }
       const sentCommands = commands.map(command => command.gcode?.trim() ?? JSON.stringify(JSON.parse(command.messageJson).print));
       return withSentReply({ status: "success", message: `Temperature command sent for ${normalizedComponent}.`, command: sentCommands.join("; ") }, sent);
@@ -1571,7 +1588,7 @@ export class BambuImplementation {
         command: "skip_objects",
         obj_list: normalizedObjectIds,
       },
-    });
+    }, 1);
 
     return withCommandReply({
       status: "success",
