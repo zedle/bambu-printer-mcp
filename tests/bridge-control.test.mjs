@@ -15,6 +15,11 @@ function fakeBridge(responses = {}) {
     if (method === "net.send_message") return { ok: true, value: responses.sendResult ?? 0 };
     return { ok: true, value: 0 };
   };
+  bridge.request = async (method) => {
+    calls.push({ method });
+    if (method === "bridge.poll_events") return { ok: true, events: responses.events ?? [{ name: "on_printer_connected", payload: { topic_str: "31BTEST" } }] };
+    return { ok: true };
+  };
   return { bridge, calls };
 }
 
@@ -23,10 +28,13 @@ test("cloud control signs in, waits for the server, subscribes once and sends ms
   const message = JSON.stringify({ print: { command: "clean_print_error", sequence_id: "0" } });
   assert.equal(await bridge.sendPrinterMessage("31BTEST", message), 0);
   assert.deepEqual(calls.map(call => call.method), ["net.is_user_login", "net.is_server_connected", "net.is_server_connected",
-    "net.start_subscribe", "net.add_subscribe", "net.send_message"]);
-  assert.deepEqual(calls[3].payload, { module: "app" });
-  assert.deepEqual(calls[4].payload, { devs: ["31BTEST"] });
-  assert.deepEqual(calls[5].payload, { dev_id: "31BTEST", msg: message, qos: 1, flag: 0 });
+    "net.set_on_server_connected_fn", "net.set_on_printer_connected_fn", "net.set_on_subscribe_failure_fn", "net.set_on_message_fn",
+    "net.set_user_selected_machine", "net.start_subscribe", "net.add_subscribe", "bridge.poll_events", "net.send_message"]);
+  const payload = method => calls.find(call => call.method === method).payload;
+  assert.deepEqual(payload("net.set_user_selected_machine"), { dev_id: "31BTEST" });
+  assert.deepEqual(payload("net.start_subscribe"), { module: "app" });
+  assert.deepEqual(payload("net.add_subscribe"), { devs: ["31BTEST"] });
+  assert.deepEqual(payload("net.send_message"), { dev_id: "31BTEST", msg: message, qos: 1, flag: 0 });
   calls.length = 0;
   await bridge.sendPrinterMessage("31BTEST", message);
   assert.deepEqual(calls.map(call => call.method), ["net.is_user_login", "net.is_server_connected", "net.send_message"], "subscription is reused");
@@ -39,4 +47,7 @@ test("cloud control refuses without a signed-in account, and reports a plugin re
   const refused = fakeBridge({ sendResult: -2 });
   await assert.rejects(refused.bridge.sendPrinterMessage("31BTEST", "{}"), /refused the printer command \(send_message returned -2\)/);
   await assert.rejects(fakeBridge().bridge.sendPrinterMessage(" ", "{}"), /dev_id is required/);
+  const unbound = fakeBridge({ events: [{ name: "on_subscribe_failure", payload: {} }] });
+  await assert.rejects(unbound.bridge.sendPrinterMessage("31BTEST", "{}"), /refused the subscription/);
+  assert.ok(!unbound.calls.some(call => call.method === "net.send_message"));
 });

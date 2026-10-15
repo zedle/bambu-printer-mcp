@@ -378,10 +378,25 @@ export class BambuNetworkBridge {
     }
     if (!connected) throw new Error("The BambuNetwork bridge did not connect to Bambu's cloud within 20 seconds; nothing was sent.");
     if (!this.subscribedDevices.has(devId)) {
+      // Studio's DeviceManager order: register the plugin callbacks, select the machine, subscribe, then wait for
+      // on_printer_connected. Without the callbacks and selection, send_message returns -2 (CONNECT_FAILED).
+      for (const fn of ["set_on_server_connected_fn", "set_on_printer_connected_fn", "set_on_subscribe_failure_fn", "set_on_message_fn"]) {
+        assertBridgeOk(await this.callWithAgent(`net.${fn}`, {}, options), `net.${fn}`);
+      }
+      assertBridgeOk(await this.callWithAgent("net.set_user_selected_machine", { dev_id: devId }, options), "net.set_user_selected_machine");
       assertBridgeOk(await this.callWithAgent("net.start_subscribe", { module: "app" }, options), "net.start_subscribe");
       assertBridgeOk(await this.callWithAgent("net.add_subscribe", { devs: [devId] }, options), "net.add_subscribe");
+      let printerConnected = false;
+      for (let attempt = 0; attempt < 30 && !printerConnected; attempt++) {
+        const polled = await this.request("bridge.poll_events", { limit: 256 }, options) as { events?: Array<{ name?: string; payload?: Record<string, unknown> }> };
+        for (const event of polled?.events ?? []) {
+          if (event.name === "on_subscribe_failure") throw new Error(`Bambu's cloud refused the subscription to printer ${devId}; is it bound to the signed-in account?`);
+          if (event.name === "on_printer_connected" || (event.name === "on_message" && event.payload?.dev_id === devId)) printerConnected = true;
+        }
+        if (!printerConnected) await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      if (!printerConnected) throw new Error(`Bambu's cloud did not connect to printer ${devId} within 15 seconds; nothing was sent.`);
       this.subscribedDevices.add(devId);
-      await new Promise(resolve => setTimeout(resolve, 2000));
     }
     const response = await this.callWithAgent("net.send_message", { dev_id: devId, msg: messageJson, qos: options.qos ?? 1, flag: 0 }, options);
     assertBridgeOk(response, "net.send_message");
