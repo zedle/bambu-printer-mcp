@@ -365,6 +365,25 @@ export class BambuNetworkBridge {
    * without them crashes it (pthread_mutex_lock in bambu_network_send_message). Returns the plugin's result (0 = ok).
    */
   async sendPrinterMessage(devId: string, messageJson: string, options: BambuNetworkBridgeOptions & { qos?: number } = {}): Promise<number> {
+    await this.ensurePrinterChannel(devId, options);
+    let code = -2;
+    // -2 (CONNECT_FAILED) right after subscribing means the channel is still settling: retry briefly.
+    for (let attempt = 0; attempt < 4 && code === -2; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, 2000));
+      const response = await this.callWithAgent("net.send_message", { dev_id: devId, msg: messageJson, qos: options.qos ?? 1, flag: 0 }, options);
+      assertBridgeOk(response, "net.send_message");
+      code = bridgeValueAsNumber(response, "net.send_message");
+    }
+    if (code !== 0) throw new Error(`Bambu's network plugin refused the printer command (send_message returned ${code}).`);
+    return code;
+  }
+
+  /**
+   * Open the cloud channel to a printer as Bambu Studio does, once per agent: sign-in check, cloud connection,
+   * callbacks, machine selection, subscription, the printer's first messages, then the certificates the plugin
+   * signs with. Cloud prints need it too: without it start_print fails with -3140 (ENC_FLAG_NOT_READY).
+   */
+  async ensurePrinterChannel(devId: string, options: BambuNetworkBridgeOptions = {}): Promise<void> {
     if (!devId.trim()) throw new Error("A printer dev_id is required for BambuNetwork control.");
     const login = await this.callWithAgent("net.is_user_login", {}, options);
     if ((login as { value?: unknown })?.value !== true) {
@@ -411,16 +430,6 @@ export class BambuNetworkBridge {
       await new Promise(resolve => setTimeout(resolve, 3000));
       this.subscribedDevices.add(devId);
     }
-    let code = -2;
-    // -2 (CONNECT_FAILED) right after subscribing means the channel is still settling: retry briefly.
-    for (let attempt = 0; attempt < 4 && code === -2; attempt++) {
-      if (attempt) await new Promise(resolve => setTimeout(resolve, 2000));
-      const response = await this.callWithAgent("net.send_message", { dev_id: devId, msg: messageJson, qos: options.qos ?? 1, flag: 0 }, options);
-      assertBridgeOk(response, "net.send_message");
-      code = bridgeValueAsNumber(response, "net.send_message");
-    }
-    if (code !== 0) throw new Error(`Bambu's network plugin refused the printer command (send_message returned ${code}).`);
-    return code;
   }
 
   async callWithAgent(

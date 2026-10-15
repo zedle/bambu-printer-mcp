@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- Open the printer's cloud channel before a cloud `start_print` as well (subscription, version, certificates): without it the plugin fails the job with -3140 (`ENC_FLAG_NOT_READY`).
 - Block printing only on fatal HMS entries (severity 1), print errors and malformed or unknown-severity entries. Serious and common entries no longer block; they come back as `hmsWarnings` (cloud print results include them), like Bambu Studio, which starts prints with them listed and lets the printer refuse a job it cannot run.
 - Start the BambuNetwork agent in Bambu Studio's order: register the plugin's `slicer_base64.cer` client certificate (`BAMBU_NETWORK_CERT_DIR`, else Bambu Studio's `resources/cert`, else the bridge runtime) and the client headers before `net.start`. Without them the agent signed in but never connected to Bambu's cloud, so cloud printing and control could not work.
 - Run hardware actions unattended by default so agents can drive the printer: print starts, heating, finished-bed clearance and error clearing no longer ask for confirmation. `BAMBU_REQUIRE_CONFIRMATION=1` asks a person for every one of them. File inspection, fresh printer-state, nozzle, material and HMS checks run either way.

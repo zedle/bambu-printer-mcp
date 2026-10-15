@@ -348,6 +348,7 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
         raw:{model:${JSON.stringify(model)},gcode_state:'IDLE',nozzle_diameter:${JSON.stringify(String(nozzleDiameters[0]))},device:{nozzle:{info:${JSON.stringify(nozzleDiameters.map((diameter, id) => ({ id, diameter, type: "HH01", stat: 0 })))}}},print_error:0,hms:[],...${JSON.stringify(ams ? { ams } : {})},...reported},
         observation:{source:'mqtt',requestedAt:now,receivedAt:now,identitySource:'report'}};
     };
+    BambuNetworkBridge.prototype.ensurePrinterChannel = async (devId) => { log({ action: 'bridge-channel', devId }); };
     BambuNetworkBridge.prototype.ensureAgent = async () => {
       ${blockBridgeInitialization ? `log({action:'agent-wait'}); while (!fs.existsSync(${JSON.stringify(releasePath)})) await new Promise(resolve => setTimeout(resolve,10));` : ""}
       return { agent: 0, handshake: { ok: true } };

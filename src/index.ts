@@ -1656,6 +1656,8 @@ class BambuPrinterMCPServer {
         this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
         return { ...nativeResult, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping };
       }
+      // Cloud prints need the printer's channel open (its version and signing state): -3140 ENC_FLAG_NOT_READY otherwise.
+      if (bridgeMethod === "net.start_print") await this.bambuNetwork.ensurePrinterChannel(devId, this.bridgeOptionsFromArgs(args, "print_3mf_bambu_network"));
       const bridgeResult = await this.bambuNetwork.callWithAgent(
         bridgeMethod,
         { client_job_id: clientJobId, params },

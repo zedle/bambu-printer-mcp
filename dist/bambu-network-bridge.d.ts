@@ -64,6 +64,12 @@ export declare class BambuNetworkBridge {
     sendPrinterMessage(devId: string, messageJson: string, options?: BambuNetworkBridgeOptions & {
         qos?: number;
     }): Promise<number>;
+    /**
+     * Open the cloud channel to a printer as Bambu Studio does, once per agent: sign-in check, cloud connection,
+     * callbacks, machine selection, subscription, the printer's first messages, then the certificates the plugin
+     * signs with. Cloud prints need it too: without it start_print fails with -3140 (ENC_FLAG_NOT_READY).
+     */
+    ensurePrinterChannel(devId: string, options?: BambuNetworkBridgeOptions): Promise<void>;
     callWithAgent(method: string, payload?: JsonObject, options?: BambuNetworkBridgeOptions): Promise<unknown>;
     stop(): Promise<void>;
     private ensureStarted;
