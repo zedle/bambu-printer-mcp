@@ -186,7 +186,8 @@ test('control commands take the form Studio picks for each printer', async () =>
   const protocol = name => control.controlProtocol(mockStatus(name).raw, name.toLowerCase());
   const print = command => JSON.parse(command.messageJson).print;
   // Bed: set_bed_temp only where fun bit 39 is set (H2S, X2D, P2S); the X1C and this H2D report get M140.
-  assert.deepEqual(print(control.temperatureCommand(protocol('H2S'), 'bed', 60)), { command: 'set_bed_temp', temp: 60, sequence_id: print(control.temperatureCommand(protocol('H2S'), 'bed', 60)).sequence_id });
+  const { sequence_id: _ignored, ...bed } = print(control.temperatureCommand(protocol('H2S'), 'bed', 60));
+  assert.deepEqual(bed, { command: 'set_bed_temp', temp: 60 });
   for (const name of ['X1CMULTIAMS', 'H2D', 'A1', 'P1PNOAMS']) {
     const command = control.temperatureCommand(protocol(name), 'bed', 60);
     assert.deepEqual([print(command).command, print(command).param], ['gcode_line', 'M140 S60\n'], name);
