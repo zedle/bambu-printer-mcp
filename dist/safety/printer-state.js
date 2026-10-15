@@ -204,11 +204,15 @@ function validateErrors(raw, requireIdle) {
         throw new Error(`Printer state ${state} is not safely idle.`);
     if (!requireIdle && !["IDLE", "FINISH", "RUNNING", "PAUSE"].includes(state))
         throw new Error(`Printer state ${state} is unknown or failed.`);
-    if (finiteNumber(raw.print_error) !== 0)
-        throw new Error("Printer reports a print error or did not report its error state.");
+    const warnings = [];
+    const printError = finiteNumber(raw.print_error);
+    // 0300-400C "The task was canceled." is the record of a stop, not a fault: it stays until the next job starts.
+    if (printError === 0x0300400c)
+        warnings.push("print_error 0300-400C (the previous task was canceled)");
+    else if (printError !== 0)
+        throw new Error(`Printer reports a print error${printError !== undefined ? ` (${printError.toString(16).toUpperCase().padStart(8, "0").replace(/^(.{4})/, "$1-")})` : " or did not report its error state"}.`);
     if (!Array.isArray(raw.hms))
         throw new Error("Printer HMS error state is missing or malformed.");
-    const warnings = [];
     for (const entry of raw.hms) {
         const code = finiteNumber(entry?.code);
         const attr = finiteNumber(entry?.attr);

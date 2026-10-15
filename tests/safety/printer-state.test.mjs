@@ -109,6 +109,9 @@ test('known maintenance reminders do not block, but faults beside them and unkno
     assert.deepEqual(check(fresh({hms:[{attr,code}]})).hmsWarnings.map(w=>w.endsWith('(common)')), [true]);
   assert.deepEqual(check(fresh({hms:reminders})).hmsWarnings, ['HMS 0501-0400-0003-0002 (maintenance reminder)','HMS 0501-0400-0003-0004 (maintenance reminder)']);
   assert.throws(() => check(fresh({print_error:1,hms:reminders})), /error/i);
+  // A canceled task (0300-400C) stays reported until the next job; it is a warning, other print errors block.
+  assert.deepEqual(check(fresh({gcode_state:'FAILED',print_error:0x0300400C})).hmsWarnings, ['print_error 0300-400C (the previous task was canceled)']);
+  assert.throws(() => check(fresh({gcode_state:'FAILED',print_error:0x0300400D})), /print error \(0300-400D\)/);
 });
 const ams = {ams:[{id:'0',tray:[{id:'0',tray_type:'PLA',nozzle_temp_min:'190',nozzle_temp_max:'240'},{id:'1',tray_type:'PETG',nozzle_temp_min:'220',nozzle_temp_max:'270'}]}]};
 test('AMS requirements use positional mappings and selected slot material, including external 254', () => {
