@@ -1,4 +1,5 @@
 import { type CommandReply } from "./command-reply.js";
+import { PrinterReport } from "./printer-report.js";
 export declare const BRIDGE_PRINT_METHODS: Set<string>;
 /**
  * A print request reached the bridge, but no answer came back (timeout, bridge exit). The plugin may still upload
@@ -58,6 +59,10 @@ export declare class BambuNetworkBridge {
     private inferredExpectedNetworkVersion?;
     private subscribedDevices;
     private localChannels;
+    /** Each printer's state restored from the plugin's on_message / on_local_message pushes (printer-report.ts). */
+    private printerReports;
+    /** Recent printer messages that aren't status pushes (command replies), kept so a reply polled once isn't lost. */
+    private recentReplies;
     resolveBridgeCommand(override?: string): string;
     resolveConfigDir(override?: string): string;
     resolveCountryCode(override?: string): string;
@@ -91,6 +96,14 @@ export declare class BambuNetworkBridge {
         waitedMs: number;
     }>;
     private pollEvents;
+    /**
+     * Every printer message the plugin hands back (on_message from the cloud, on_local_message from its LAN session)
+     * updates that printer's restored state, as Studio's DeviceManager does with the same callbacks; command replies
+     * are kept for a minute for reply matching.
+     */
+    private ingestEvents;
+    /** The printer's state as restored from the plugin's pushes (empty until a full report arrives through it). */
+    printerReport(devId: string): PrinterReport;
     private drainEvents;
     /** The printer's reply to `sequenceId` among the plugin's message events, polled until `waitMs` runs out. */
     awaitPrinterReply(devId: string, sequenceId: string, waitMs: number, options?: BambuNetworkBridgeOptions): Promise<CommandReply | undefined>;

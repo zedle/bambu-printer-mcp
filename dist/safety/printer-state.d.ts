@@ -1,7 +1,13 @@
 import { BambuClient } from "bambu-node";
 /** The model a serial prefix belongs to (Studio's sn_prefix). Identity evidence only together with a fresh report. */
 export declare function serialModel(serial: string): string | undefined;
-/** Only raw reports received after this request are evidence. Never read printer.data here. */
+/**
+ * A fresh report for a safety check: the printer's state restored the way Bambu Studio does it (printer-report.ts),
+ * from a full report at most one full-push interval (3 s, Studio's REQUEST_PUSH_MIN_TIME) older than this request,
+ * with at least one push merged after the request. Studio sends at most one full-push request per 3 s; a request
+ * inside that window waits for the printer's next push, and only asks again once the window has passed. Never
+ * read printer.data here: bambu-node's cache is display state.
+ */
 export declare function readFreshPrinterStatus(printer: BambuClient, serial: string, timeoutMs?: number): Promise<any>;
 export interface PrinterStateRequirements {
     model: string;

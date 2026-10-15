@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { nextSequenceId } from "./sequence-id.js";
 import { assertCommandAccepted, commandReplyWaitMs, commandSequenceId, matchCommandReply, type CommandReply } from "./command-reply.js";
+import { PrinterReport } from "./printer-report.js";
 
 const FRAME_MAGIC = 0x52424a50;
 const FRAME_HEADER_SIZE = 16;
@@ -183,6 +184,10 @@ export class BambuNetworkBridge {
   private inferredExpectedNetworkVersion?: string;
   private subscribedDevices = new Set<string>();
   private localChannels = new Set<string>();
+  /** Each printer's state restored from the plugin's on_message / on_local_message pushes (printer-report.ts). */
+  private printerReports = new Map<string, PrinterReport>();
+  /** Recent printer messages that aren't status pushes (command replies), kept so a reply polled once isn't lost. */
+  private recentReplies: Array<{ devId?: string; at: number; message: unknown }> = [];
 
   resolveBridgeCommand(override?: string): string {
     return (
@@ -401,6 +406,8 @@ export class BambuNetworkBridge {
 
     this.subscribedDevices.clear();
     this.localChannels.clear();
+    this.printerReports.clear();
+    this.recentReplies = [];
     this.agentId = agent;
     this.agentKey = key;
     return { agent, handshake: this.handshake };
@@ -448,7 +455,33 @@ export class BambuNetworkBridge {
 
   private async pollEvents(options: BambuNetworkBridgeOptions, limit = 1024): Promise<Array<{ name?: string; payload?: Record<string, unknown> }>> {
     const polled = await this.request("bridge.poll_events", { limit }, options) as { events?: unknown };
-    return Array.isArray(polled?.events) ? polled.events as Array<{ name?: string; payload?: Record<string, unknown> }> : [];
+    return this.ingestEvents(Array.isArray(polled?.events) ? polled.events as Array<{ name?: string; payload?: Record<string, unknown> }> : []);
+  }
+
+  /**
+   * Every printer message the plugin hands back (on_message from the cloud, on_local_message from its LAN session)
+   * updates that printer's restored state, as Studio's DeviceManager does with the same callbacks; command replies
+   * are kept for a minute for reply matching.
+   */
+  private ingestEvents<T extends { name?: string; payload?: Record<string, unknown> }>(events: T[]): T[] {
+    const now = Date.now();
+    for (const event of events) {
+      if (event.name !== "on_message" && event.name !== "on_local_message") continue;
+      const devId = typeof event.payload?.dev_id === "string" ? event.payload.dev_id : undefined;
+      let message: unknown;
+      try { message = JSON.parse(String(event.payload?.msg ?? "")); } catch { continue; }
+      if (devId && this.printerReport(devId).ingest(message, now) !== undefined) continue;
+      this.recentReplies.push({ devId, at: now, message });
+    }
+    this.recentReplies = this.recentReplies.filter(entry => now - entry.at <= 60_000).slice(-256);
+    return events;
+  }
+
+  /** The printer's state as restored from the plugin's pushes (empty until a full report arrives through it). */
+  printerReport(devId: string): PrinterReport {
+    let report = this.printerReports.get(devId);
+    if (!report) { report = new PrinterReport(); this.printerReports.set(devId, report); }
+    return report;
   }
 
   private async drainEvents(options: BambuNetworkBridgeOptions): Promise<void> {
@@ -463,12 +496,10 @@ export class BambuNetworkBridge {
   async awaitPrinterReply(devId: string, sequenceId: string, waitMs: number, options: BambuNetworkBridgeOptions = {}): Promise<CommandReply | undefined> {
     const deadline = Date.now() + waitMs;
     while (true) {
-      let events: Array<{ name?: string; payload?: Record<string, unknown> }>;
-      try { events = await this.pollEvents(options); } catch { return undefined; }
-      for (const event of events) {
-        if (event.name !== "on_message" && event.name !== "on_local_message") continue;
-        if (event.payload?.dev_id !== undefined && event.payload.dev_id !== devId) continue;
-        const reply = matchCommandReply(event.payload?.msg, sequenceId);
+      try { await this.pollEvents(options); } catch { return undefined; }
+      for (const entry of this.recentReplies) {
+        if (entry.devId !== undefined && entry.devId !== devId) continue;
+        const reply = matchCommandReply(entry.message, sequenceId);
         if (reply) return reply;
       }
       const left = deadline - Date.now();
@@ -507,7 +538,7 @@ export class BambuNetworkBridge {
       let printerConnected = false;
       for (let attempt = 0; attempt < 30 && !printerConnected; attempt++) {
         const polled = await this.request("bridge.poll_events", { limit: 256 }, options) as { events?: Array<{ name?: string; payload?: Record<string, unknown> }> };
-        for (const event of polled?.events ?? []) {
+        for (const event of this.ingestEvents(polled?.events ?? [])) {
           if (event.name === "on_subscribe_failure") throw new Error(`Bambu's cloud refused the subscription to printer ${devId}; is it bound to the signed-in account?`);
           // on_printer_connected comes first, but send_message only works once the printer's own messages flow.
           if (event.name === "on_message" && event.payload?.dev_id === devId) printerConnected = true;
@@ -553,7 +584,7 @@ export class BambuNetworkBridge {
     assertBridgeOk(connect, "net.connect_printer");
     const connectCode = bridgeValueAsNumber(connect, "net.connect_printer");
     if (connectCode !== 0) throw new Error(`Bambu's network plugin could not start a LAN connection to printer ${devId} (connect_printer returned ${connectCode}); nothing was sent.`);
-    const poll = async () => ((await this.request("bridge.poll_events", { limit: 256 }, options)) as { events?: Array<{ name?: string; payload?: Record<string, unknown> }> })?.events ?? [];
+    const poll = async () => this.ingestEvents(((await this.request("bridge.poll_events", { limit: 256 }, options)) as { events?: Array<{ name?: string; payload?: Record<string, unknown> }> })?.events ?? []);
     const forPrinter = (payload: Record<string, unknown> | undefined) => !payload?.dev_id || payload.dev_id === devId;
     let connected = false;
     // connect_printer only starts the MQTT loop: publishing before on_local_connect races the CONNACK (-4030).
@@ -606,6 +637,8 @@ export class BambuNetworkBridge {
     this.handshake = undefined;
     this.subscribedDevices.clear();
     this.localChannels.clear();
+    this.printerReports.clear();
+    this.recentReplies = [];
     this.stdoutBuffer = Buffer.alloc(0);
 
     for (const [id, pending] of this.pending.entries()) {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFreshPrinterStatus, serialModel } from "../safety/printer-state.js";
 import { nextSequenceId } from "../sequence-id.js";
+import { lanPrinterReport, mergeReport, requestPushAll } from "../printer-report.js";
 import { assertCommandAccepted, commandReplyWaitMs, matchCommandReply, withCommandReply, withPrinterReplyField, type CommandReply } from "../command-reply.js";
 import { assertAmsDryingSupported, buildAmsDryingCommand, hexFlagBit, normalizeAmsDryingRequest } from "../ams-drying.js";
 import fs from "node:fs/promises";
@@ -23,7 +24,6 @@ import * as mqtt from "mqtt";
 import {
   BambuClient,
   GCodeFileCommand,
-  PushAllCommand,
   UpdateLightCommand,
   UpdateStateCommand,
 } from "bambu-node";
@@ -560,7 +560,8 @@ class BambuClientStore {
     }
 
     const previous = this.reportSnapshots.get(key) || {};
-    this.reportSnapshots.set(key, { ...previous, ...update });
+    // Pushes are often deltas: restore them onto the cached report like Bambu Studio (nested objects merge).
+    this.reportSnapshots.set(key, mergeReport(previous, update));
     this.resolveInitialReport(key);
   }
 
@@ -631,6 +632,8 @@ class BambuClientStore {
       accessToken: token,
     });
     this.ensureInitialReportPromise(key);
+    // Restore the printer's state from every report from the start (safety reads use it).
+    lanPrinterReport(printer, serial);
 
     printer.on("rawMessage", (_topic, payload) => {
       try {
@@ -845,9 +848,10 @@ export class BambuImplementation {
       const printer = await this.getPrinter(host, serial, token);
 
       try {
-        await invokeWithoutAck(printer, new PushAllCommand());
+        // Studio's pushall, at most one per 3 s (a display read inside that window uses the cached report).
+        if (await requestPushAll(printer)) await sleep(COMMAND_SETTLE_MS);
       } catch (error) {
-        console.warn("PushAllCommand failed, continuing with cached status", error);
+        console.warn("Full push request failed, continuing with cached status", error);
       }
 
       const cachedData = await this.printerStore.waitForInitialReport(host, serial, token);

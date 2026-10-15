@@ -1,4 +1,6 @@
-import { GetVersionCommand, PushAllCommand } from "bambu-node";
+import { GetVersionCommand } from "bambu-node";
+import { lanPrinterReport, lastPushAllAt, notePushAll, pushAllMessage, pushAllMinIntervalMs } from "../printer-report.js";
+import { nextSequenceId } from "../sequence-id.js";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
 import { filamentProhibition } from "./filament-rules.js";
 import { DEPUTY_EXTRUDER_ID, DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, printerTypeModel, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
@@ -44,16 +46,26 @@ function observedIdentity(raw, configuredSerial) {
     const model = models[0];
     return { model, observedSerial: serials[0], identitySource: hasReportedModel ? "report" : "module-serial" };
 }
-/** Only raw reports received after this request are evidence. Never read printer.data here. */
+/**
+ * A fresh report for a safety check: the printer's state restored the way Bambu Studio does it (printer-report.ts),
+ * from a full report at most one full-push interval (3 s, Studio's REQUEST_PUSH_MIN_TIME) older than this request,
+ * with at least one push merged after the request. Studio sends at most one full-push request per 3 s; a request
+ * inside that window waits for the printer's next push, and only asks again once the window has passed. Never
+ * read printer.data here: bambu-node's cache is display state.
+ */
 export function readFreshPrinterStatus(printer, serial, timeoutMs = 5000) {
+    const report = lanPrinterReport(printer, serial);
     return new Promise((resolve, reject) => {
-        let raw = {};
         const requestedAt = Date.now();
-        let receivedAt = 0;
+        const minInterval = pushAllMinIntervalMs();
+        const last = lastPushAllAt(printer);
+        const delay = last === undefined ? 0 : Math.max(0, last + minInterval - requestedAt);
         let requestsPublished = false;
         let complete = false;
+        let pushAllTimer;
         const cleanup = () => {
             clearTimeout(timer);
+            clearTimeout(pushAllTimer);
             printer.off("rawMessage", onRaw);
             printer.off("client:disconnect", onDisconnect);
             printer.off("client:error", onError);
@@ -66,9 +78,16 @@ export function readFreshPrinterStatus(printer, serial, timeoutMs = 5000) {
             reject(error instanceof Error ? error : new Error(String(error)));
         };
         const maybeResolve = () => {
-            if (complete || !requestsPublished || !receivedAt || !Object.prototype.hasOwnProperty.call(raw, "gcode_state") ||
-                !Object.prototype.hasOwnProperty.call(raw, "print_error") || !Object.prototype.hasOwnProperty.call(raw, "hms"))
+            if (complete || !requestsPublished || report.fullAt === undefined || report.receivedAt === undefined)
                 return;
+            if (report.receivedAt < requestedAt || requestedAt - report.fullAt > minInterval)
+                return;
+            const state = report.state();
+            if (!state || !Object.prototype.hasOwnProperty.call(state, "gcode_state") ||
+                !Object.prototype.hasOwnProperty.call(state, "print_error") || !Object.prototype.hasOwnProperty.call(state, "hms"))
+                return;
+            const raw = report.modules && report.modulesAt !== undefined && requestedAt - report.modulesAt <= minInterval
+                ? { ...state, modules: report.modules } : state;
             try {
                 const identity = observedIdentity(raw, serial);
                 if (!identity.model)
@@ -77,40 +96,40 @@ export function readFreshPrinterStatus(printer, serial, timeoutMs = 5000) {
                 cleanup();
                 resolve({ connected: true, model: identity.model, status: raw.gcode_state, serial,
                     observedSerial: identity.observedSerial, raw,
-                    observation: { source: "mqtt", requestedAt, receivedAt, identitySource: identity.identitySource } });
+                    observation: { source: "mqtt", requestedAt, receivedAt: report.receivedAt, fullAt: report.fullAt, identitySource: identity.identitySource } });
             }
             catch (error) {
                 fail(error);
             }
         };
-        const onRaw = (topic, payload) => {
+        const onRaw = (topic) => {
             if (complete || topic !== `device/${serial}/report`)
                 return;
-            let parsed;
-            try {
-                parsed = JSON.parse(payload.toString());
-            }
-            catch {
-                return;
-            }
-            if (object(parsed.print) && parsed.print.command === "push_status") {
-                raw = { ...raw, ...parsed.print };
-                receivedAt = Date.now();
-            }
-            if (object(parsed.info) && parsed.info.command === "get_version" && Array.isArray(parsed.info.module)) {
-                raw = { ...raw, modules: parsed.info.module };
-            }
             maybeResolve();
         };
         const onDisconnect = () => fail(new Error("Printer disconnected while waiting for a fresh safety report."));
         const onError = (error) => fail(error);
-        const timer = setTimeout(() => fail(new Error("Timed out waiting for a fresh MQTT safety report with observed printer identity, state and errors; cached status cannot authorize an operation.")), timeoutMs);
+        const timer = setTimeout(() => fail(new Error("Timed out waiting for a fresh MQTT safety report with observed printer identity, state and errors; cached status cannot authorize an operation.")), timeoutMs + delay);
         printer.on("rawMessage", onRaw);
         printer.on("client:disconnect", onDisconnect);
         printer.on("client:error", onError);
-        // invoke() publishes only; executeCommand() would add an ACK dependency that H2 firmware lacks.
-        void Promise.all([new PushAllCommand().invoke(printer), new GetVersionCommand().invoke(printer)])
-            .then(() => { requestsPublished = true; maybeResolve(); }, fail);
+        const pushAll = () => {
+            if (complete)
+                return Promise.resolve();
+            notePushAll(printer);
+            return printer.publish(pushAllMessage(nextSequenceId()));
+        };
+        // publish only; executeCommand() would add an ACK dependency that H2 firmware lacks.
+        if (delay === 0) {
+            void Promise.all([pushAll(), new GetVersionCommand().invoke(printer)])
+                .then(() => { requestsPublished = true; maybeResolve(); }, fail);
+        }
+        else {
+            // A full push was asked for under 3 s ago: the next push the printer sends is enough, else ask again once
+            // Studio's interval has passed.
+            pushAllTimer = setTimeout(() => { pushAll().catch(fail); }, delay);
+            void new GetVersionCommand().invoke(printer).then(() => { requestsPublished = true; maybeResolve(); }, fail);
+        }
     });
 }
 function finiteNumber(value) {
