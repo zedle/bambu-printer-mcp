@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Changed
+- Run hardware actions unattended by default so agents can drive the printer: print starts, heating, finished-bed clearance and error clearing no longer ask for confirmation. `BAMBU_REQUIRE_CONFIRMATION=1` asks a person for every one of them. File inspection, fresh printer-state, nozzle, material and HMS checks run either way.
+- With `BAMBU_DEFAULT_CONNECTION_MODE=bambu_network` and the FULU bridge configured, control commands (clear errors, pause, resume, cancel, speed, light, fans, airduct, AMS, heating, skip objects) go through Bambu's signed cloud path, since firmware 01.08.05+ refuses unsigned LAN MQTT control outside LAN Only and Developer Mode. The bridge client signs in, waits for the cloud connection and subscribes to the printer before sending (the plugin crashes otherwise).
+
 ### Fixed
 - Select the H2C external spool by holder id: it reports one external holder per nozzle (254 left, 255 right), and a job mapped to 254 now checks that holder instead of rejecting the report as ambiguous. Duplicate, missing or extra holders and other models still reject.
 - Match H2C job nozzles to the printer report in physical order: sliced files list the left nozzle first, while the H2C reports its right (main) nozzle as id 0 and its left (deputy) as id 1, so a job with different left and right nozzle types or flows was compared against the wrong nozzle. Explicit nozzle selections and other models are unchanged.

@@ -11,7 +11,7 @@ import { createServer as createHttpServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { STLManipulator, SLICER_TYPES, normalizeSlicerType, } from "./stl/stl-manipulator.js";
 import { BambuNetworkBridge } from "./bambu-network-bridge.js";
-import { assertBambuNativeAvailable, validateBambuNativeMetadata, buildBambuNativeFanCommand, buildBambuNativeTemperatureCommand, printWithBambuNative, sendCommandWithBambuNative, uploadWithBambuNative, } from "./bambu-native.js";
+import { assertBambuNativeAvailable, validateBambuNativeMetadata, validateBambuNativeControlMessage, buildBambuNativeFanCommand, buildBambuNativeTemperatureCommand, printWithBambuNative, sendCommandWithBambuNative, uploadWithBambuNative, } from "./bambu-native.js";
 import { importFileViaBambuConnect } from "./bambu-connect.js";
 import { BlenderMcpBridge } from "./blender-mcp-bridge.js";
 import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue } from "./ams-mapping.js";
@@ -904,7 +904,7 @@ class BambuPrinterMCPServer {
                     throw new Error(`No hardware confirmation within ${describeDuration(this.confirmationTimeoutMs)}; nothing was sent to the printer. Retry when someone can check the printer, or raise BAMBU_CONFIRMATION_TIMEOUT_MS.`);
                 }
                 if (isElicitationUnsupported(error)) {
-                    throw new Error("Human hardware confirmation requires an MCP client with elicitation support. For deliberately headless operation, BAMBU_REQUIRE_CONFIRMATION=0 disables ordinary print/heat prompts; finished-bed clearance and hardware-error confirmation still require elicitation.");
+                    throw new Error("BAMBU_REQUIRE_CONFIRMATION=1 asks a person to confirm hardware actions, which needs an MCP client with elicitation support. Unset it for unattended operation.");
                 }
                 throw new Error(`Human hardware confirmation failed: ${error?.message ?? error}. Nothing was sent to the printer.`);
             }
@@ -2618,9 +2618,33 @@ class BambuPrinterMCPServer {
             const host = String(args?.host || DEFAULT_HOST);
             const bambuSerial = String(args?.bambu_serial || DEFAULT_BAMBU_SERIAL);
             const bambuToken = String(args?.bambu_token || DEFAULT_BAMBU_TOKEN);
-            const nativeControls = process.platform === "darwin" &&
+            const macNativeControls = process.platform === "darwin" &&
                 (bambuSerial.trim().toUpperCase().startsWith("20P") ||
                     (DEFAULT_BAMBU_MODEL === "x2d" && bambuSerial === DEFAULT_BAMBU_SERIAL));
+            // Firmware 01.08.05+ refuses unsigned LAN MQTT control unless LAN Only + Developer Mode are on. With the
+            // FULU bridge as the default connection, control commands go through Bambu's signed cloud path instead.
+            const bridgeControls = !macNativeControls && DEFAULT_BAMBU_CONNECTION_MODE === "bambu_network" &&
+                !!this.bambuNetwork.resolveBridgeCommand();
+            const nativeControls = macNativeControls || bridgeControls;
+            const sendMacNativeCommand = sendNativeCommand;
+            const signedCommand = async (options, execution = {}) => {
+                if (!bridgeControls)
+                    return sendMacNativeCommand(options, execution);
+                const validated = validateBambuNativeControlMessage(options.messageJson);
+                const print = JSON.parse(validated.messageJson).print;
+                const requiresFreshState = print?.command === "resume" || print?.command === "clean_print_error" ||
+                    (print?.command === "set_bed_temp" && Number(print.temp) > 0) ||
+                    (print?.command === "set_nozzle_temp" && Number(print.target_temp) > 0);
+                if (requiresFreshState && typeof execution.beforeDispatch !== "function") {
+                    throw new Error(`${validated.command} requires a fresh printer-state check before dispatch.`);
+                }
+                execution.assertActive?.();
+                await execution.beforeDispatch?.();
+                execution.signal?.throwIfAborted();
+                const devId = String(args?.dev_id || bambuSerial || DEFAULT_BAMBU_DEV_ID).trim();
+                await this.bambuNetwork.sendPrinterMessage(devId, validated.messageJson, { qos: options.qos ?? 1 });
+                return { status: "success", command: validated.command, transport: "bambu_network" };
+            };
             const requestedTemplateDir = typeof args?.template_dir === "string" && args.template_dir.trim().length > 0
                 ? String(args.template_dir)
                 : undefined;
@@ -2823,19 +2847,19 @@ class BambuPrinterMCPServer {
                     }
                     case "cancel_print":
                         result = await this.bambu.cancelJob(host, bambuSerial, bambuToken, nativeControls
-                            ? () => sendNativeCommand({ host, serial: bambuSerial, token: bambuToken,
+                            ? () => signedCommand({ host, serial: bambuSerial, token: bambuToken,
                                 messageJson: JSON.stringify({ print: { command: "stop", param: "", sequence_id: String(Date.now()) } }), qos: 1 })
                             : undefined);
                         break;
                     case "pause_print":
                         result = await this.bambu.pauseJob(host, bambuSerial, bambuToken, nativeControls
-                            ? () => sendNativeCommand({ host, serial: bambuSerial, token: bambuToken,
+                            ? () => signedCommand({ host, serial: bambuSerial, token: bambuToken,
                                 messageJson: JSON.stringify({ print: { command: "pause", param: "", sequence_id: String(Date.now()) } }), qos: 1 })
                             : undefined);
                         break;
                     case "resume_print":
                         result = await this.bambu.resumeJob(host, bambuSerial, bambuToken, nativeControls
-                            ? (assertActive, beforeDispatch) => sendNativeCommand({ host, serial: bambuSerial, token: bambuToken,
+                            ? (assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
                                 messageJson: JSON.stringify({ print: { command: "resume", param: "", sequence_id: String(Date.now()) } }), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
                             : undefined);
                         break;
@@ -2843,7 +2867,7 @@ class BambuPrinterMCPServer {
                         if (!args?.message_json) {
                             throw new Error("Missing required parameter: message_json");
                         }
-                        if (!nativeControls) {
+                        if (!macNativeControls) {
                             throw new Error("x2d_native_control is restricted to a selected X2D printer on macOS.");
                         }
                         const messageJson = validateBambuNativeMetadata(String(args.message_json));
@@ -2859,7 +2883,7 @@ class BambuPrinterMCPServer {
                     }
                     case "clear_hms_errors":
                         result = await this.bambu.clearHmsErrors(host, bambuSerial, bambuToken, nativeControls
-                            ? (assertActive, beforeDispatch) => sendNativeCommand({ host, serial: bambuSerial, token: bambuToken,
+                            ? (assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
                                 messageJson: JSON.stringify({ print: { command: "clean_print_error", param: "", sequence_id: String(Date.now()) } }), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
                             : undefined);
                         break;
@@ -2877,7 +2901,7 @@ class BambuPrinterMCPServer {
                             if (!Number.isInteger(mode) || mode < 1 || mode > 4) {
                                 throw new Error("Print speed mode must be one of: silent, standard, sport, ludicrous, 1, 2, 3, 4.");
                             }
-                            result = await sendNativeCommand({
+                            result = await signedCommand({
                                 host,
                                 serial: bambuSerial,
                                 token: bambuToken,
@@ -2899,7 +2923,7 @@ class BambuPrinterMCPServer {
                             if (mode !== "cooling" && mode !== "heating") {
                                 throw new Error("Airduct mode must be one of: cooling, heating.");
                             }
-                            result = await sendNativeCommand({
+                            result = await signedCommand({
                                 host,
                                 serial: bambuSerial,
                                 token: bambuToken,
@@ -2930,7 +2954,7 @@ class BambuPrinterMCPServer {
                             if (!Number.isInteger(slotId) || slotId < 0 || slotId > 3 || (amsId === 128 && slotId !== 0)) {
                                 throw new Error("slot_id must be an integer from 0 to 3; AMS-HT supports only slot 0.");
                             }
-                            result = await sendNativeCommand({
+                            result = await signedCommand({
                                 host,
                                 serial: bambuSerial,
                                 token: bambuToken,
@@ -2958,8 +2982,8 @@ class BambuPrinterMCPServer {
                         const heaterModel = args.temperature === 0
                             ? String(args.bambu_model || DEFAULT_BAMBU_MODEL).trim().toLowerCase()
                             : await this.resolveBambuModel(args.bambu_model);
-                        result = await this.bambu.setTemperature(host, bambuSerial, bambuToken, String(args.component), args.temperature, heaterModel || undefined, args?.material !== undefined ? String(args.material) : undefined, Number(args?.nozzle_diameter ?? DEFAULT_NOZZLE_DIAMETER), (args.temperature === 0 ? nativeControls : heaterModel === "x2d" && process.platform === "darwin")
-                            ? (heater, target, assertActive, beforeDispatch) => sendNativeCommand({ host, serial: bambuSerial, token: bambuToken,
+                        result = await this.bambu.setTemperature(host, bambuSerial, bambuToken, String(args.component), args.temperature, heaterModel || undefined, args?.material !== undefined ? String(args.material) : undefined, Number(args?.nozzle_diameter ?? DEFAULT_NOZZLE_DIAMETER), (args.temperature === 0 ? nativeControls : (heaterModel === "x2d" && process.platform === "darwin") || bridgeControls)
+                            ? (heater, target, assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
                                 messageJson: buildBambuNativeTemperatureCommand(heater, target).messageJson }, { signal: extra.signal, assertActive, beforeDispatch })
                             : undefined);
                         break;
@@ -2976,7 +3000,7 @@ class BambuPrinterMCPServer {
                             }
                             const fanCommand = buildBambuNativeFanCommand(String(args.fan), Number(args.speed));
                             result = {
-                                ...await sendNativeCommand({
+                                ...await signedCommand({
                                     host,
                                     serial: bambuSerial,
                                     token: bambuToken,
@@ -3005,7 +3029,7 @@ class BambuPrinterMCPServer {
                             if (!["on", "off", "flashing"].includes(mode)) {
                                 throw new Error("Light mode must be one of: on, off, flashing.");
                             }
-                            result = await sendNativeCommand({
+                            result = await signedCommand({
                                 host,
                                 serial: bambuSerial,
                                 token: bambuToken,
@@ -3036,7 +3060,7 @@ class BambuPrinterMCPServer {
                             if (objectIds.length === 0 || objectIds.some((id) => !Number.isInteger(id) || id < 0)) {
                                 throw new Error("object_ids must contain one or more non-negative integers.");
                             }
-                            result = await sendNativeCommand({
+                            result = await signedCommand({
                                 host,
                                 serial: bambuSerial,
                                 token: bambuToken,
@@ -3063,7 +3087,7 @@ class BambuPrinterMCPServer {
                             if ((!Number.isInteger(amsId) || (amsId < 0 || amsId > 3)) && amsId !== 128) {
                                 throw new Error("X2D ams_id must be 0 to 3, or 128 for AMS-HT.");
                             }
-                            result = await sendNativeCommand({
+                            result = await signedCommand({
                                 host,
                                 serial: bambuSerial,
                                 token: bambuToken,

@@ -14,6 +14,8 @@ import { withPrintSnapshot } from "../dist/safety/artifact.js";
 
 // Mocked printers never report a started job; tests that cover it opt back in.
 process.env.BAMBU_DISPATCH_CHECK_MS = "0";
+// These tests cover the opt-in human prompts; the unattended default has its own tests.
+process.env.BAMBU_REQUIRE_CONFIRMATION = "1";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const host = "127.0.0.1";
@@ -690,9 +692,9 @@ test("human preflight rechecks printer state after confirmation", async (t) => {
   assertNoDispatch(events);
 });
 
-test("FINISH requires bed clearance even with ordinary headless prompts disabled", async (t) => {
+test("FINISH asks a person to confirm bed clearance when confirmation is on", async (t) => {
   const previous = process.env.BAMBU_REQUIRE_CONFIRMATION;
-  process.env.BAMBU_REQUIRE_CONFIRMATION = "0";
+  process.env.BAMBU_REQUIRE_CONFIRMATION = "1";
   t.after(() => { if (previous === undefined) delete process.env.BAMBU_REQUIRE_CONFIRMATION; else process.env.BAMBU_REQUIRE_CONFIRMATION = previous; });
   const file = await fixture(t);
   const { printer, events } = isolatedPrinter(safetyStatus({ state: "FINISH", subtask_name: "previous-part" }));
@@ -701,6 +703,28 @@ test("FINISH requires bed clearance even with ordinary headless prompts disabled
   await assert.rejects(printer.print3mf(host, serial, token, { projectName: "confirm", filePath: file, bambuModel: "p1s", useAMS: false }), /confirmation.*declined/i);
   assert.match(prompts[0], /FINISH.*remove the previous part/i);
   assertNoDispatch(events);
+});
+
+test("unattended by default: checked prints, error clears and heating run without asking anyone", async (t) => {
+  const previous = process.env.BAMBU_REQUIRE_CONFIRMATION;
+  delete process.env.BAMBU_REQUIRE_CONFIRMATION;
+  t.after(() => { if (previous === undefined) delete process.env.BAMBU_REQUIRE_CONFIRMATION; else process.env.BAMBU_REQUIRE_CONFIRMATION = previous; });
+  const file = await fixture(t);
+  const { printer, events } = isolatedPrinter(safetyStatus({ state: "FINISH", subtask_name: "previous-part", print_error: 123 }));
+  const prompts = [];
+  printer.confirm = async message => { prompts.push(message); return false; };
+  await printer.clearHmsErrors(host, serial, token);
+  printer.getSafetyStatus = async () => safetyStatus({ state: "FINISH", subtask_name: "previous-part" });
+  const result = await printer.print3mf(host, serial, token, { projectName: "agent", filePath: file, bambuModel: "p1s", useAMS: false });
+  assert.deepEqual(prompts, [], "no prompt without BAMBU_REQUIRE_CONFIRMATION=1");
+  assert.equal(result.status, "success");
+  const upload = events.find(({ action }) => action === "upload");
+  assert.ok(upload, "the checked file was uploaded");
+  assert.match(JSON.stringify(events.filter(({ action }) => action === "publish").at(-1).payload), new RegExp(path.posix.basename(upload.remote).replaceAll(".", "\\.")));
+  // Safety checks still run: a printer that is busy is refused without asking.
+  printer.getSafetyStatus = async () => safetyStatus({ state: "RUNNING" });
+  await assert.rejects(printer.print3mf(host, serial, token, { projectName: "busy", filePath: file, bambuModel: "p1s", useAMS: false }), /not safely idle/i);
+  assert.deepEqual(prompts, []);
 });
 
 test("bed clearance cannot authorize a different finished job", async (t) => {
@@ -753,7 +777,7 @@ test("changed hardware codes during confirmation are not cleared", async () => {
 for (const failure of ["confirmation recheck", "upload", "dispatch recheck", "publish"]) {
   test(`cleared-error acknowledgment survives failed ${failure} until successful dispatch`, async (t) => {
     const previous = process.env.BAMBU_REQUIRE_CONFIRMATION;
-    process.env.BAMBU_REQUIRE_CONFIRMATION = "0";
+    process.env.BAMBU_REQUIRE_CONFIRMATION = "1";
     t.after(() => { if (previous === undefined) delete process.env.BAMBU_REQUIRE_CONFIRMATION; else process.env.BAMBU_REQUIRE_CONFIRMATION = previous; });
     const legacyFile = await fixture(t);
     const file = legacyFile.replace(".gcode.3mf", ".3mf");
@@ -773,10 +797,11 @@ for (const failure of ["confirmation recheck", "upload", "dispatch recheck", "pu
     printer.getSafetyStatus = async () => safetyStatus();
     printer.ftpUpload = upload; printer.getPrinter = getPrinter;
     await printer.print3mf(host, serial, token, options);
-    assert.equal(prompts.length, 2, "retry must require a new physical acknowledgment even in headless mode");
+    assert.equal(prompts.length, 2, "retry must require a new physical acknowledgment");
     assert.ok(prompts.every(message => message.includes("Previously cleared hardware codes: print_error:123")));
     await printer.print3mf(host, serial, token, options);
-    assert.equal(prompts.length, 2, "a successful checked dispatch consumes the acknowledged codes");
+    assert.equal(prompts.length, 3);
+    assert.ok(!prompts[2].includes("Previously cleared hardware codes"), "a successful checked dispatch consumes the acknowledged codes");
   });
 }
 

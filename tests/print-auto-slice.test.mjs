@@ -89,7 +89,7 @@ BambuImplementation.prototype.getSafetyStatus = async function () {
       BAMBU_CLIENT_CERT: "/nonexistent", BAMBU_CLIENT_KEY: "/nonexistent",
       BAMBU_TEMPLATE_3MF: "", BAMBU_TEMPLATE_3MF_PATH: "", BAMBU_SLICER_PROFILE: "", BAMBU_SLICER_TYPE: "bambustudio",
       SLICER_TYPE: slicerType, SLICER_PATH: executable, BAMBU_PROFILES_ROOT: profilesRoot, BAMBU_SLICER_PROFILE_DIRS: "",
-      BAMBU_CONFIRMATION_TIMEOUT_MS: "", ...env,
+      BAMBU_CONFIRMATION_TIMEOUT_MS: "", BAMBU_REQUIRE_CONFIRMATION: "1", ...env,
     },
     stderr: "pipe",
   });
@@ -202,7 +202,7 @@ test("an unanswered printer-model prompt is reported as a timeout", async (t) =>
 test("a client without elicitation is still told it cannot confirm, not that it timed out", async (t) => {
   const server = await start(t, { sliceSucceeds: true, elicitation: false, env: { BAMBU_CONFIRMATION_TIMEOUT_MS: "1000" } });
   const printed = JSON.stringify((await server.print(await server.makeProject("unsliced.3mf"))).content);
-  assert.match(printed, /requires an MCP client with elicitation support/);
+  assert.match(printed, /needs an MCP client with elicitation support/);
   assert.doesNotMatch(printed, /No hardware confirmation within/);
   assert.deepEqual(server.events().filter((event) => ["upload", "publish"].includes(event.action)), [], "an unconfirmed print must not dispatch");
 });

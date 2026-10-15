@@ -32,7 +32,7 @@ export declare class BambuImplementation {
     private checkedJobs;
     private clearedErrors;
     constructor(confirm?: ((message: string) => Promise<boolean>) | undefined);
-    confirmHardwareAction(message: string, physicalCheck?: boolean): Promise<void>;
+    confirmHardwareAction(message: string, _physicalCheck?: boolean): Promise<void>;
     private finishedJobIdentity;
     confirmPrintPreflight(serial: string, status: any, inspection: Awaited<ReturnType<typeof inspectPrintFile>>): Promise<string | undefined>;
     assertBedClearance(status: any, confirmedFinishedJob: string | undefined): void;

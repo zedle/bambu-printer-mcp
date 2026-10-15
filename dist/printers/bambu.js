@@ -382,8 +382,10 @@ export class BambuImplementation {
         this.clearedErrors = new Map();
         this.printerStore = new BambuClientStore();
     }
-    async confirmHardwareAction(message, physicalCheck = false) {
-        if (!physicalCheck && process.env.BAMBU_REQUIRE_CONFIRMATION === "0")
+    // Agent-first: hardware actions run without prompts unless BAMBU_REQUIRE_CONFIRMATION=1 asks a person for
+    // every one (print starts, heating, finished-bed clearance, error clearing). Safety checks run either way.
+    async confirmHardwareAction(message, _physicalCheck = false) {
+        if (process.env.BAMBU_REQUIRE_CONFIRMATION !== "1")
             return;
         if (!this.confirm || !(await this.confirm(message))) {
             throw new Error("Hardware safety confirmation was declined or unavailable. Use an MCP client with elicitation support. No command was sent.");

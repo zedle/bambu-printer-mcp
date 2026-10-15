@@ -138,6 +138,7 @@ export class BambuNetworkBridge {
   private lastStderr = "";
   private recentLogs: string[] = [];
   private inferredExpectedNetworkVersion?: string;
+  private subscribedDevices = new Set<string>();
 
   resolveBridgeCommand(override?: string): string {
     return (
@@ -331,9 +332,42 @@ export class BambuNetworkBridge {
       await withAgent("net.change_user", { user_info: userInfo });
     }
 
+    this.subscribedDevices.clear();
     this.agentId = agent;
     this.agentKey = key;
     return { agent, handshake: this.handshake };
+  }
+
+  /**
+   * Send one MQTT command to a printer through Bambu's network plugin over the cloud, as Bambu Studio does.
+   * Firmware 01.08.05+ refuses unsigned LAN MQTT control outside LAN Only + Developer Mode; the plugin's cloud
+   * path is signed. The plugin needs the cloud connection and a subscription to the printer first: sending
+   * without them crashes it (pthread_mutex_lock in bambu_network_send_message). Returns the plugin's result (0 = ok).
+   */
+  async sendPrinterMessage(devId: string, messageJson: string, options: BambuNetworkBridgeOptions & { qos?: number } = {}): Promise<number> {
+    if (!devId.trim()) throw new Error("A printer dev_id is required for BambuNetwork control.");
+    const login = await this.callWithAgent("net.is_user_login", {}, options);
+    if ((login as { value?: unknown })?.value !== true) {
+      throw new Error("The BambuNetwork bridge is not signed in to a Bambu account. Copy a signed-in Bambu Studio's BambuNetworkEngine.conf into the bridge config directory, or pass user_info.");
+    }
+    let connected = false;
+    for (let attempt = 0; attempt < 20 && !connected; attempt++) {
+      const status = await this.callWithAgent("net.is_server_connected", {}, options);
+      connected = (status as { value?: unknown })?.value === true;
+      if (!connected) await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+    if (!connected) throw new Error("The BambuNetwork bridge did not connect to Bambu's cloud within 20 seconds; nothing was sent.");
+    if (!this.subscribedDevices.has(devId)) {
+      assertBridgeOk(await this.callWithAgent("net.start_subscribe", { module: "app" }, options), "net.start_subscribe");
+      assertBridgeOk(await this.callWithAgent("net.add_subscribe", { devs: [devId] }, options), "net.add_subscribe");
+      this.subscribedDevices.add(devId);
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    const response = await this.callWithAgent("net.send_message", { dev_id: devId, msg: messageJson, qos: options.qos ?? 1, flag: 0 }, options);
+    assertBridgeOk(response, "net.send_message");
+    const code = bridgeValueAsNumber(response, "net.send_message");
+    if (code !== 0) throw new Error(`Bambu's network plugin refused the printer command (send_message returned ${code}).`);
+    return code;
   }
 
   async callWithAgent(
@@ -352,6 +386,7 @@ export class BambuNetworkBridge {
     this.agentId = undefined;
     this.agentKey = undefined;
     this.handshake = undefined;
+    this.subscribedDevices.clear();
     this.stdoutBuffer = Buffer.alloc(0);
 
     for (const [id, pending] of this.pending.entries()) {
