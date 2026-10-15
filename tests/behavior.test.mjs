@@ -625,8 +625,8 @@ test("printer model safety: schema requires bambu_model, rejects missing/invalid
   assert.ok(airductTool, "set_airduct_mode tool must exist");
   assert.deepEqual(
     airductTool.inputSchema.properties.mode.enum,
-    ["cooling", "heating"],
-    "set_airduct_mode must enumerate cooling/heating"
+    ["cooling", "heating", "full_cooling"],
+    "set_airduct_mode must enumerate Studio's selectable airduct modes"
   );
 
   const rfidTool = listToolsResult.tools.find((t) => t.name === "reread_ams_rfid");

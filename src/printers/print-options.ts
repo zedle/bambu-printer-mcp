@@ -108,3 +108,18 @@ export function usedExtruderCount(model: string, inspection: { usedFilamentPosit
   if (!DUAL_EXTRUDER_MODELS.has(model)) return 1;
   return new Set(inspection.usedFilamentPositions.map(position => inspection.filamentMap?.[position] ?? 1)).size;
 }
+
+/** Studio's get_nozzle_volume_type_cloud_string for the sliced nozzle_volume_type values. */
+const CLOUD_FLOW: Record<string, string> = { standard: "standard_flow", high_flow: "high_flow", tpu_high_flow: "tpu_high_flow", e3d_high_flow: "e3d_high_flow", hybrid: "hybrid_flow" };
+
+/**
+ * Studio's build_nozzles_info, sent with two-nozzle jobs: one entry per sliced nozzle, left first, with the cloud task's
+ * nozzle id (left 1, right 0), a null type, the sliced flow and diameter. Single-nozzle jobs send none.
+ */
+export function studioNozzlesInfo(inspection: { nozzleDiameters: number[]; nozzleFlows?: string[] }): string {
+  if (inspection.nozzleDiameters.length !== 2) return "";
+  return JSON.stringify(inspection.nozzleDiameters.map((diameter, index) => {
+    const flow = inspection.nozzleFlows?.[index]?.trim().toLowerCase().replace(/[\s-]+/g, "_");
+    return { id: index === 0 ? 1 : 0, type: null, ...(flow && CLOUD_FLOW[flow] ? { flowSize: CLOUD_FLOW[flow] } : {}), diameter };
+  }));
+}

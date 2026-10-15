@@ -40,3 +40,10 @@ export declare function rfidCommand(protocol: ControlProtocol, amsId: number, sl
  * extruder's info bit 1, else from hw_switch_state (anything but 0 counts as loaded, as in is_filament_at_extruder).
  */
 export declare function assertNoFilamentAtToolhead(raw: Record<string, any>, protocol: ControlProtocol, model: string, amsId: number): void;
+/**
+ * set_airduct the way Studio's fan popup sends it: only on printers that report device.airduct, only modes in its
+ * modeList (exhaust excluded; H2-series show the first two), with submode 1/0 for the cooling filter where given, else -1.
+ */
+export declare function airductCommand(raw: Record<string, any> | undefined, model: string, mode: string, coolingFilter?: boolean): ControlCommand & {
+    modeId: number;
+};

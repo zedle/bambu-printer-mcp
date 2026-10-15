@@ -129,3 +129,22 @@ export function assertNoFilamentAtToolhead(raw: Record<string, any>, protocol: C
   }
   if (Number(raw.hw_switch_state) !== 0) throw new Error(loaded);
 }
+/** Airduct modes (DevFan AIR_DUCT): 0 cooling, 1 heating, 2 exhaust (Studio hides it), 3 full cooling. */
+const AIRDUCT_MODES: Record<string, number> = { cooling: 0, heating: 1, full_cooling: 3 };
+
+/**
+ * set_airduct the way Studio's fan popup sends it: only on printers that report device.airduct, only modes in its
+ * modeList (exhaust excluded; H2-series show the first two), with submode 1/0 for the cooling filter where given, else -1.
+ */
+export function airductCommand(raw: Record<string, any> | undefined, model: string, mode: string, coolingFilter?: boolean): ControlCommand & { modeId: number } {
+  const modeId = AIRDUCT_MODES[mode.trim().toLowerCase().replace(/[\s-]+/g, "_")];
+  if (modeId === undefined) throw new Error("Airduct mode must be one of: cooling, heating, full_cooling.");
+  const airduct = raw?.device?.airduct;
+  if (raw && Object.keys(raw).length && (!airduct || typeof airduct !== "object")) throw new Error("This printer reports no switchable airduct.");
+  if (airduct && Array.isArray(airduct.modeList)) {
+    let offered = airduct.modeList.map((entry: any) => Number(entry?.modeId)).filter((id: number) => Number.isInteger(id) && id !== 2);
+    if (["h2d", "h2dpro", "h2c", "h2s"].includes(model)) offered = airduct.modeList.slice(0, 2).map((entry: any) => Number(entry?.modeId)).filter((id: number) => id !== 2);
+    if (!offered.includes(modeId)) throw new Error(`This printer's airduct offers ${offered.map((id: number) => Object.keys(AIRDUCT_MODES).find(key => AIRDUCT_MODES[key] === id) ?? id).join(", ")}, not ${mode}.`);
+  }
+  return { ...json({ command: "set_airduct", modeId, submode: coolingFilter === undefined ? -1 : coolingFilter ? 1 : 0 }), modeId };
+}

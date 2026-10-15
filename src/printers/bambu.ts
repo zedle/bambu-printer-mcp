@@ -12,7 +12,7 @@ import { validatePrinterState, manualHeatingRequirements, type PrinterStateRequi
 import { DEPUTY_EXTRUDER_ID, MAIN_EXTRUDER_ID, externalSpoolMapping, extruderCount, isExternalTray, printerTypeModel } from "../safety/models.js";
 import { normalizeBridgeAmsTrayValue, studioTrayMapping } from "../ams-mapping.js";
 import { assertBedSupported, studioBedType, studioPrintOptions, usedExtruderCount, usedFilamentTypes } from "./print-options.js";
-import { assertNoFilamentAtToolhead, controlProtocol, fanCommand, rfidCommand, temperatureCommand, type ControlCommand } from "./control-commands.js";
+import { airductCommand, assertNoFilamentAtToolhead, controlProtocol, fanCommand, rfidCommand, temperatureCommand, type ControlCommand } from "./control-commands.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName, normalizedRemotePath, cancelPendingPrinterOperations } from "../safety/artifact.js";
 import { Client as FTPClient } from "basic-ftp";
 import { BambuPrinter } from "bambu-js";
@@ -1034,26 +1034,23 @@ export class BambuImplementation {
     };
   }
 
-  async setAirductMode(host: string, serial: string, token: string, mode: string): Promise<any> {
-    const printer = await this.getPrinter(host, serial, token);
-    const normalizedMode = mode.trim().toLowerCase();
-    if (normalizedMode !== "cooling" && normalizedMode !== "heating") {
-      throw new Error("Airduct mode must be one of: cooling, heating.");
+  async setAirductMode(host: string, serial: string, token: string, mode: string,
+    dispatch?: (command: ControlCommand) => Promise<any>, coolingFilter?: boolean): Promise<any> {
+    const status = await this.getStatus(host, serial, token);
+    const model = normalizeModel(typeof status?.model === "string" ? status.model : "") ?? serialModel(serial) ?? "";
+    const command = airductCommand(status?.connected ? status.raw : undefined, model, mode, coolingFilter);
+    if (dispatch) await dispatch(command);
+    else {
+      const printer = await this.getPrinter(host, serial, token);
+      await printer.publish(JSON.parse(command.messageJson));
+      await sleep(COMMAND_SETTLE_MS);
     }
-
-    await printer.publish({
-      print: {
-        command: "set_airduct",
-        modeId: normalizedMode === "cooling" ? 0 : 1,
-        submode: -1,
-        sequence_id: "0",
-      },
-    });
-    await sleep(COMMAND_SETTLE_MS);
+    const normalizedMode = mode.trim().toLowerCase().replace(/[\s-]+/g, "_");
     return {
       status: "success",
       message: `Airduct mode command sent for ${normalizedMode}.`,
       mode: normalizedMode,
+      modeId: command.modeId,
     };
   }
 

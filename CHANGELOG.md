@@ -34,6 +34,8 @@
 - Recognise Bambu Studio's printer_type codes as model identity: `N1` is the A1 mini (not only `A1M`), `N7` the P2S, `3DPrinter-X1-Carbon`/`3DPrinter-X1` the X1C/X1, and `-V2` revisions (`O1D-V2`, `N7-V2`) their base model. Current firmware's cloud model ids in `model_id` are ignored as before.
 - Use Studio's printable height of 250 mm for the P1P, P1S, X1, X1C and X1E (was 256).
 - Report each nozzle's temperature on dual-nozzle printers (`temperatures.nozzles`, left and right) and fall back to the packed new-protocol bed and nozzle values (current in the low 16 bits, target in the high 16) when the legacy fields are missing.
+- `set_airduct_mode` follows Bambu Studio's fan panel: it offers only the modes the printer lists in `device.airduct.modeList` (exhaust hidden; the H2 series shows two), adds `full_cooling` where listed and the cooling filter (`cooling_filter`, Studio's submode), and refuses printers without an airduct, on LAN and bridge alike.
+- Send Studio's `nozzles_info` with two-nozzle bridge and native prints (left id 1, right id 0, the sliced flow and diameter) and its per-model `ftp_folder` (`sdcard/` on the P1 series and A1/A1 mini).
 
 ## [1.1.27] – 2026-10-14
 

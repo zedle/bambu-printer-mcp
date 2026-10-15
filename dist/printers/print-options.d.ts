@@ -41,3 +41,11 @@ export declare function usedExtruderCount(model: string, inspection: {
     usedFilamentPositions: number[];
     filamentMap?: number[];
 }): number;
+/**
+ * Studio's build_nozzles_info, sent with two-nozzle jobs: one entry per sliced nozzle, left first, with the cloud task's
+ * nozzle id (left 1, right 0), a null type, the sliced flow and diameter. Single-nozzle jobs send none.
+ */
+export declare function studioNozzlesInfo(inspection: {
+    nozzleDiameters: number[];
+    nozzleFlows?: string[];
+}): string;

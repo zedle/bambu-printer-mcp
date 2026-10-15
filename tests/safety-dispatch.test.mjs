@@ -433,6 +433,9 @@ test("verified public direct and bridge prints reach their intended transport", 
   const { task_bed_type, task_bed_leveling, auto_bed_leveling, task_flow_cali, auto_flow_cali, auto_offset_cali, task_vibration_cali, task_layer_inspect } = print.payload.params;
   assert.deepEqual({ task_bed_type, task_bed_leveling, auto_bed_leveling, task_flow_cali, auto_flow_cali, auto_offset_cali, task_vibration_cali, task_layer_inspect },
     { task_bed_type: "textured_plate", task_bed_leveling: true, auto_bed_leveling: 1, task_flow_cali: false, auto_flow_cali: 0, auto_offset_cali: 0, task_vibration_cali: false, task_layer_inspect: true });
+  // Studio's per-model ftp_folder ("sdcard/" on the P1 series); single-nozzle jobs send no nozzles_info.
+  assert.equal(print.payload.params.ftp_folder, "sdcard/");
+  assert.equal(print.payload.params.nozzles_info, "");
 });
 
 async function startBridgeJob(t, options) {

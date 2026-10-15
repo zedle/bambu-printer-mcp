@@ -54,7 +54,7 @@ export declare class BambuImplementation {
     resumeJob(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>) => Promise<any>): Promise<any>;
     clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>) => Promise<any>): Promise<any>;
     setPrintSpeed(host: string, serial: string, token: string, speedMode: string | number): Promise<any>;
-    setAirductMode(host: string, serial: string, token: string, mode: string): Promise<any>;
+    setAirductMode(host: string, serial: string, token: string, mode: string, dispatch?: (command: ControlCommand) => Promise<any>, coolingFilter?: boolean): Promise<any>;
     rereadAmsRfid(host: string, serial: string, token: string, amsId: number, slotId: number, dispatch?: (command: ControlCommand) => Promise<any>): Promise<any>;
     /**
      * Heaters, with the command form Studio uses for the printer (control-commands.ts). On dual-nozzle printers the

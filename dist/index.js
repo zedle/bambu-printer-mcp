@@ -19,8 +19,8 @@ import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3M
 import { BambuImplementation, assertDirectPrintSupported } from "./printers/bambu.js";
 import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
-import { externalSpoolMapping, extruderCount } from "./safety/models.js";
-import { assertBedSupported, studioBedType, studioPrintOptions, usedExtruderCount, usedFilamentTypes } from "./printers/print-options.js";
+import { externalSpoolMapping, extruderCount, ftpFolder } from "./safety/models.js";
+import { assertBedSupported, studioBedType, studioNozzlesInfo, studioPrintOptions, usedExtruderCount, usedFilamentTypes } from "./printers/print-options.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
 dotenv.config();
@@ -1208,14 +1208,15 @@ class BambuPrinterMCPServer {
                 filename: snapshot,
                 config_filename: snapshot,
                 plate_index: plateIndex + 1,
-                ftp_folder: String(args?.ftp_folder || ""),
+                // Studio's DevPrinterConfigUtil::get_ftp_folder ("sdcard/" on P1 and A1); the plug-in's LAN upload ignores it.
+                ftp_folder: String(args?.ftp_folder || ftpFolder(inspection.model)),
                 ftp_file: String(args?.ftp_file || ""),
                 ftp_file_md5: String(args?.ftp_file_md5 || ""),
                 nozzle_mapping: stringifyBridgeJson(args?.nozzle_mapping) || "",
                 ams_mapping: cloudMappings ? JSON.stringify(cloudMappings.v0) : amsMapping || "",
                 ams_mapping2: cloudMappings ? JSON.stringify(cloudMappings.v1) : "",
                 ams_mapping_info: cloudMappings ? JSON.stringify(cloudMappings.info) : "",
-                nozzles_info: stringifyBridgeJson(args?.nozzles_info) || "",
+                nozzles_info: studioNozzlesInfo(inspection),
                 connection_type: connectionType,
                 comments: String(args?.comments || ""),
                 origin_profile_id: args?.origin_profile_id !== undefined ? Number(args.origin_profile_id) : 0,
@@ -1255,6 +1256,7 @@ class BambuPrinterMCPServer {
                     plateIndex, bedType: sentBedType, useAMS,
                     amsMapping: cloudMappings ? JSON.stringify(cloudMappings.v0) : amsMapping, amsMapping2: nativeAmsMapping2(mapping, inspection.model),
                     ...(cloudMappings ? { amsMappingInfo: JSON.stringify(cloudMappings.info) } : {}),
+                    nozzlesInfo: String(params.nozzles_info),
                     bedLeveling: params.task_bed_leveling,
                     flowCalibration: params.task_flow_cali,
                     vibrationCalibration: params.task_vibration_cali,
@@ -2273,15 +2275,16 @@ class BambuPrinterMCPServer {
                     },
                     {
                         name: "set_airduct_mode",
-                        description: "Set H2/P2 airduct mode to cooling or heating.",
+                        description: "Set the airduct mode on printers that have one (H2 series, P2S, X2D), as Bambu Studio's fan panel does: only modes the printer reports in its airduct mode list.",
                         inputSchema: {
                             type: "object",
                             properties: {
                                 mode: {
                                     type: "string",
-                                    enum: ["cooling", "heating"],
-                                    description: "Airduct mode to apply"
+                                    enum: ["cooling", "heating", "full_cooling"],
+                                    description: "Airduct mode to apply (full_cooling only where the printer lists it)"
                                 },
+                                cooling_filter: { type: "boolean", description: "Cooling-mode air filter on or off (Studio's submode), where the printer offers it." },
                                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
                                 bambu_token: { type: "string", description: "Access token (default: value from env)" }
@@ -2954,28 +2957,10 @@ class BambuPrinterMCPServer {
                         if (!args?.mode) {
                             throw new Error("Missing required parameter: mode");
                         }
-                        if (nativeControls) {
-                            const mode = String(args.mode).trim().toLowerCase();
-                            if (mode !== "cooling" && mode !== "heating") {
-                                throw new Error("Airduct mode must be one of: cooling, heating.");
-                            }
-                            result = await signedCommand({
-                                host,
-                                serial: bambuSerial,
-                                token: bambuToken,
-                                messageJson: JSON.stringify({
-                                    print: {
-                                        command: "set_airduct",
-                                        modeId: mode === "cooling" ? 0 : 1,
-                                        submode: -1,
-                                        sequence_id: String(Date.now()),
-                                    },
-                                }),
-                            });
-                        }
-                        else {
-                            result = await this.bambu.setAirductMode(host, bambuSerial, bambuToken, String(args.mode));
-                        }
+                        if (args.cooling_filter !== undefined && typeof args.cooling_filter !== "boolean")
+                            throw new Error("cooling_filter must be true or false.");
+                        // Studio's mode list comes from the printer's own device.airduct report.
+                        result = await this.bambu.setAirductMode(host, bambuSerial, bambuToken, String(args.mode), nativeControls ? command => signedCommand({ host, serial: bambuSerial, token: bambuToken, messageJson: command.messageJson }) : undefined, args.cooling_filter);
                         break;
                     case "reread_ams_rfid":
                         if (args?.ams_id === undefined || args?.slot_id === undefined) {

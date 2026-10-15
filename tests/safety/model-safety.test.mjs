@@ -268,3 +268,27 @@ test('P1 and X1 build height is Studio\'s printable_height 250', async () => {
   const { MACHINE_LIMITS } = await import('../../dist/safety/limits.js');
   for (const model of ['p1p', 'p1s', 'x1', 'x1c', 'x1e']) assert.equal(MACHINE_LIMITS[model].volume[2], 250, model);
 });
+
+test('airduct modes come from the printer\'s own mode list, as in Studio\'s fan panel', async () => {
+  const control = await import('../../dist/printers/control-commands.js');
+  const print = command => JSON.parse(command.messageJson).print;
+  // H2C lists cooling (0), heating (1) and exhaust (2, hidden by Studio): two selectable modes.
+  const h2c = mockStatus('H2C').raw;
+  assert.deepEqual([print(control.airductCommand(h2c, 'h2c', 'heating')).modeId, print(control.airductCommand(h2c, 'h2c', 'heating')).submode], [1, -1]);
+  assert.equal(print(control.airductCommand(h2c, 'h2c', 'cooling', true)).submode, 1);
+  assert.throws(() => control.airductCommand(h2c, 'h2c', 'full_cooling'), /offers cooling, heating, not full_cooling/);
+  // Printers without an airduct refuse it; an unknown mode is refused before anything is sent.
+  assert.throws(() => control.airductCommand(mockStatus('X1CMULTIAMS').raw, 'x1c', 'cooling'), /no switchable airduct/);
+  assert.throws(() => control.airductCommand(h2c, 'h2c', 'exhaust'), /must be one of/);
+  // A full-cooling mode (3) is selectable where the printer lists it.
+  const listed = { device: { airduct: { modeList: [{ modeId: 0 }, { modeId: 1 }, { modeId: 3 }] } } };
+  assert.equal(print(control.airductCommand(listed, 'p2s', 'full_cooling')).modeId, 3);
+});
+
+test('two-nozzle jobs carry Studio\'s nozzles_info', async () => {
+  const options = await import('../../dist/printers/print-options.js');
+  assert.deepEqual(JSON.parse(options.studioNozzlesInfo({ nozzleDiameters: [0.4, 0.6], nozzleFlows: ['high_flow', 'standard'] })), [
+    { id: 1, type: null, flowSize: 'high_flow', diameter: 0.4 }, { id: 0, type: null, flowSize: 'standard_flow', diameter: 0.6 },
+  ]);
+  assert.equal(options.studioNozzlesInfo({ nozzleDiameters: [0.4] }), '');
+});
