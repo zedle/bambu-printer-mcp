@@ -591,6 +591,13 @@ test("verified public direct and bridge prints reach their intended transport", 
   assert.match(print.payload.params.dst_file, /^checked-[a-f0-9-]+-job\.gcode\.3mf$/);
   assert.equal(print.payload.params.task_use_ams, false);
   assert.equal(print.payload.params.ams_mapping, "[254]");
+  // Studio's bed string and P1S options: leveling on (1), no flow calibration, vibration off, first-layer inspection on.
+  const { task_bed_type, task_bed_leveling, auto_bed_leveling, task_flow_cali, auto_flow_cali, auto_offset_cali, task_vibration_cali, task_layer_inspect } = print.payload.params;
+  assert.deepEqual({ task_bed_type, task_bed_leveling, auto_bed_leveling, task_flow_cali, auto_flow_cali, auto_offset_cali, task_vibration_cali, task_layer_inspect },
+    { task_bed_type: "textured_plate", task_bed_leveling: true, auto_bed_leveling: 1, task_flow_cali: false, auto_flow_cali: 0, auto_offset_cali: 0, task_vibration_cali: false, task_layer_inspect: true });
+  // Studio's per-model ftp_folder ("sdcard/" on the P1 series); single-nozzle jobs send no nozzles_info.
+  assert.equal(print.payload.params.ftp_folder, "sdcard/");
+  assert.equal(print.payload.params.nozzles_info, "");
 });
 
 async function startBridgeJob(t, options) {
@@ -656,13 +663,15 @@ test("public print schemas expose ordered nozzle diameter arrays", async (t) => 
   }
 });
 
+// The printer reports nozzles by physical id (0 = right, 1 = left); sliced files list the left nozzle first. So a
+// left 0.4 / right 0.6 job is reported as [id 0: 0.6, id 1: 0.4].
 for (const tool of ["print_3mf", "print_3mf_bambu_network"]) {
   for (const [description, nozzleArgs] of [
     ["explicit ordered nozzle diameters", { nozzle_diameters: [0.4, 0.6] }],
     ["job metadata when no nozzle argument is supplied", {}],
   ]) {
     test(`${tool} accepts mixed H2D nozzles using ${description}`, async (t) => {
-      const { client, eventsPath } = await interceptedMcp(t, { model: "h2d", nozzleDiameters: [0.4, 0.6], realBridgeRequest: true });
+      const { client, eventsPath } = await interceptedMcp(t, { model: "h2d", nozzleDiameters: [0.6, 0.4], realBridgeRequest: true });
       const file = await fixture(t, { model: "h2d", nozzleDiameters: [0.4, 0.6] });
       const result = await client.callTool({ name: tool, arguments: { three_mf_path: file, bambu_model: "h2d", bed_type: "textured_plate", use_ams: false, ...nozzleArgs } });
       assert.notEqual(result.isError, true, result.content?.[0]?.text);
@@ -679,7 +688,7 @@ for (const tool of ["print_3mf", "print_3mf_bambu_network"]) {
 
   test(`${tool} accepts mixed H2D nozzles with a verified AMS mapping`, async (t) => {
     const { client, eventsPath } = await interceptedMcp(t, {
-      model: "h2d", nozzleDiameters: [0.4, 0.6], realBridgeRequest: true,
+      model: "h2d", nozzleDiameters: [0.6, 0.4], realBridgeRequest: true,
       ams: { tray_now: "0", ams: [{ id: "0", tray: [{ id: "0", tray_type: "PLA", nozzle_temp_min: "190", nozzle_temp_max: "240" }] }] },
     });
     const file = await fixture(t, { model: "h2d", nozzleDiameters: [0.4, 0.6] });
@@ -698,7 +707,7 @@ for (const tool of ["print_3mf", "print_3mf_bambu_network"]) {
     ["an array with the nozzle positions reversed", { nozzle_diameters: [0.6, 0.4] }],
   ]) {
     test(`${tool} rejects ${description}`, async (t) => {
-      const { client, eventsPath } = await interceptedMcp(t, { model: "h2d", nozzleDiameters: [0.4, 0.6] });
+      const { client, eventsPath } = await interceptedMcp(t, { model: "h2d", nozzleDiameters: [0.6, 0.4] });
       const file = await fixture(t, { model: "h2d", nozzleDiameters: [0.4, 0.6] });
       const result = await client.callTool({ name: tool, arguments: { three_mf_path: file, bambu_model: "h2d", ...nozzleArgs, bed_type: "textured_plate", use_ams: false } });
       assert.equal(result.isError, true);
@@ -708,7 +717,7 @@ for (const tool of ["print_3mf", "print_3mf_bambu_network"]) {
   }
 
   test(`${tool} rejects a mixed H2D file when the live second nozzle differs`, async (t) => {
-    const { client, eventsPath } = await interceptedMcp(t, { model: "h2d", nozzleDiameters: [0.4, 0.8], realBridgeRequest: true });
+    const { client, eventsPath } = await interceptedMcp(t, { model: "h2d", nozzleDiameters: [0.8, 0.4], realBridgeRequest: true });
     const file = await fixture(t, { model: "h2d", nozzleDiameters: [0.4, 0.6] });
     const result = await client.callTool({ name: tool, arguments: { three_mf_path: file, bambu_model: "h2d", nozzle_diameters: [0.4, 0.6], bed_type: "textured_plate", use_ams: false } });
     assert.equal(result.isError, true);
@@ -717,7 +726,7 @@ for (const tool of ["print_3mf", "print_3mf_bambu_network"]) {
   });
 
   test(`${tool} rejects conflicting scalar and array nozzle arguments`, async (t) => {
-    const { client, eventsPath } = await interceptedMcp(t, { model: "h2d", nozzleDiameters: [0.4, 0.6] });
+    const { client, eventsPath } = await interceptedMcp(t, { model: "h2d", nozzleDiameters: [0.6, 0.4] });
     const file = await fixture(t, { model: "h2d", nozzleDiameters: [0.4, 0.6] });
     const result = await client.callTool({ name: tool, arguments: { three_mf_path: file, bambu_model: "h2d", nozzle_diameter: "0.4", nozzle_diameters: [0.4, 0.6], bed_type: "textured_plate", use_ams: false } });
     assert.equal(result.isError, true);
@@ -726,7 +735,7 @@ for (const tool of ["print_3mf", "print_3mf_bambu_network"]) {
   });
 
   test(`${tool} rejects mixed-nozzle auto-slicing before the slicer or printer is invoked`, async (t) => {
-    const { client, eventsPath } = await interceptedMcp(t, { model: "h2d", nozzleDiameters: [0.4, 0.6] });
+    const { client, eventsPath } = await interceptedMcp(t, { model: "h2d", nozzleDiameters: [0.6, 0.4] });
     const file = await fixture(t, { model: "h2d", nozzleDiameters: [0.4, 0.6] });
     const zip = await JSZip.loadAsync(await fs.readFile(file));
     zip.remove("Metadata/plate_1.gcode");

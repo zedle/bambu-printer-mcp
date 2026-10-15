@@ -24,6 +24,8 @@ const BAMBU_CLI_BED_TYPES: Record<string, string> = {
   cool_plate: 'Cool Plate',
   engineering_plate: 'Engineering Plate',
   hot_plate: 'High Temp Plate',
+  // BambuStudio PrintConfig.cpp s_keys_map_BedType: "Supertack Plate" is btSuperTack.
+  supertack_plate: 'Supertack Plate',
 };
 
 // Define types for progress tracking
@@ -684,11 +686,6 @@ export class STLManipulator extends EventEmitter {
   private resolveBambuStudioBedType(bedType?: string): string | undefined {
     if (!bedType) return undefined;
     const normalized = bedType.trim().toLowerCase();
-    if (normalized === 'supertack_plate') {
-      throw new Error(
-        'BambuStudio CLI SuperTack bed type is not verified; use a pre-sliced 3MF or choose textured_plate, cool_plate, engineering_plate, or hot_plate.'
-      );
-    }
     return BAMBU_CLI_BED_TYPES[normalized] || bedType;
   }
 

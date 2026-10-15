@@ -107,3 +107,29 @@ test("a signed bridge command waits for the printer's reply among the plugin's m
   assert.equal(silent.reply, undefined);
   assert.equal(silent.waitedMs, 100);
 });
+
+test("per-model control commands are numbered from the server's range and report the printer's reply", async (t) => {
+  withReplyWait(t, 2000);
+  const { mockReport } = await import("./safety/push-fixtures.mjs");
+  const { bambu, printer } = answeringPrinter(body => ({ print: { command: body.command, sequence_id: body.sequence_id, result: "success", reason: "success" } }));
+  bambu.getStatus = async () => ({ connected: true, model: "P2S", raw: mockReport("P2S") });
+  const fan = await bambu.setFanSpeed(host, serial, token, "part", 50);
+  assert.deepEqual([printer.published[0].print.command, printer.published[0].print.speed], ["set_fan", 50]);
+  assert.match(printer.published[0].print.sequence_id, /^4\d{4}$/);
+  assert.deepEqual(fan.printerReply, { result: "success", reason: "success" });
+  const airduct = await bambu.setAirductMode(host, serial, token, "heating");
+  assert.equal(printer.published[1].print.command, "set_airduct");
+  assert.deepEqual(airduct.printerReply, { result: "success", reason: "success" });
+  // Heater off needs no report: the P1S serial picks M140 S0 as G-code, and its reply is matched too.
+  const off = await bambu.setTemperature(host, serial, token, "bed", 0);
+  assert.deepEqual([printer.published[2].print.command, printer.published[2].print.param], ["gcode_line", "M140 S0\n"]);
+  assert.deepEqual(off.printerReply, { result: "success", reason: "success" });
+});
+
+test("a refused per-model control command is an error with its reason", async (t) => {
+  withReplyWait(t, 2000);
+  const { mockReport } = await import("./safety/push-fixtures.mjs");
+  const { bambu } = answeringPrinter(body => ({ print: { command: body.command, sequence_id: body.sequence_id, result: "fail", reason: "not supported" } }));
+  bambu.getStatus = async () => ({ connected: true, model: "X1C", raw: mockReport("X1CMULTIAMS") });
+  await assert.rejects(bambu.setFanSpeed(host, serial, token, "part", 50), /refused gcode_line: not supported/);
+});

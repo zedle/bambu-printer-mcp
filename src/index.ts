@@ -38,7 +38,7 @@ import {
 } from "./bambu-native.js";
 import { importFileViaBambuConnect } from "./bambu-connect.js";
 import { BlenderMcpBridge } from "./blender-mcp-bridge.js";
-import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue } from "./ams-mapping.js";
+import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue, studioTrayMapping } from "./ams-mapping.js";
 import { assertAmsDryingSupported, buildAmsDryingCommand, normalizeAmsDryingRequest } from "./ams-drying.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, parse3MF } from './3mf_parser.js';
 import type { ThreeMFAmsRequirements } from "./types.js";
@@ -46,6 +46,8 @@ import { BambuImplementation, assertDirectPrintSupported, dispatchStatusLabel, u
 import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
 import { withCommandReply } from "./command-reply.js";
+import { externalSpoolMapping, extruderCount, ftpFolder } from "./safety/models.js";
+import { assertBedSupported, studioBedType, studioNozzlesInfo, studioPrintOptions, usedExtruderCount, usedFilamentTypes } from "./printers/print-options.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
 import { nextSequenceId } from "./sequence-id.js";
@@ -174,7 +176,7 @@ function resolveNozzleType(value: unknown): string | undefined {
   }
   return normalized;
 }
-const VALID_BAMBUSTUDIO_CLI_BED_TYPES = ["textured_plate", "cool_plate", "engineering_plate", "hot_plate"] as const;
+const VALID_BAMBUSTUDIO_CLI_BED_TYPES = ["textured_plate", "cool_plate", "engineering_plate", "hot_plate", "supertack_plate"] as const;
 
 // Map model IDs to BambuStudio --load-machine preset names
 const BAMBU_MODEL_PRESETS: Record<string, (nozzle: string) => string> = {
@@ -673,7 +675,7 @@ function resolveBambuStudioCliBedType(argsBedType: string | undefined): string {
   const bedType = resolveBedType(argsBedType);
   if (!(VALID_BAMBUSTUDIO_CLI_BED_TYPES as readonly string[]).includes(bedType)) {
     throw new Error(
-      `BambuStudio CLI bed_type "${bedType}" is not verified. Use a pre-sliced 3MF for SuperTack, or choose one of: ${VALID_BAMBUSTUDIO_CLI_BED_TYPES.join(", ")}`
+      `BambuStudio CLI bed_type "${bedType}" is not supported. Choose one of: ${VALID_BAMBUSTUDIO_CLI_BED_TYPES.join(", ")}`
     );
   }
   return bedType;
@@ -1049,14 +1051,9 @@ function stringifyBridgeJson(value: unknown): string | undefined {
   return JSON.stringify(value);
 }
 
-function nativeAmsMapping2(mapping: number[] | undefined): string | undefined {
+function nativeAmsMapping2(mapping: number[] | undefined, model: string): string | undefined {
   if (!mapping || mapping.length === 0) return undefined;
-  return JSON.stringify(mapping.map((value) => {
-    if (value < 0 || value === 255) return { ams_id: 255, slot_id: 255 };
-    if (value === 254) return { ams_id: 254, slot_id: 254 };
-    if (value >= 128) return { ams_id: 128, slot_id: value - 128 };
-    return { ams_id: Math.floor(value / 4), slot_id: value % 4 };
-  }));
+  return JSON.stringify(studioTrayMapping(mapping, extruderCount(model) === 1).v1);
 }
 
 /**
@@ -1065,17 +1062,16 @@ function nativeAmsMapping2(mapping: number[] | undefined): string | undefined {
  * trays as {254|255, 0} and AMS-HT units as {unit, 0}; ams_mapping_info adds type, id, colours and the cloud task
  * nozzle (right 0, left 1, from the file's filament_map). Without them the printer runs the job as use_ams false.
  */
-function studioCloudMappings(mapping: number[], inspection: { materials: string[]; filamentMap?: number[]; filamentIds?: string[]; filamentColours?: string[]; nozzleDiameters: number[] },
+function studioCloudMappings(mapping: number[], inspection: { model: string; materials: string[]; filamentMap?: number[]; filamentIds?: string[]; filamentColours?: string[]; nozzleDiameters: number[]; physicalExtruderMap?: number[] },
   trayColour: (tray: number) => string | undefined): { v0: number[]; v1: { ams_id: number; slot_id: number }[]; info: Record<string, unknown>[] } {
-  const v0 = mapping.map(tray => (tray === 254 || tray === 255 ? -1 : tray));
-  const v1 = mapping.map(tray => tray < 0 ? { ams_id: 255, slot_id: 255 } : tray >= 128 ? { ams_id: tray, slot_id: 0 } : { ams_id: Math.floor(tray / 4), slot_id: tray % 4 });
-  v1.forEach((entry, position) => { if (mapping[position] === 254 || mapping[position] === 255) v1[position] = { ams_id: mapping[position], slot_id: 0 }; });
-  const info = mapping.map((tray, position) => {
+  const { v0, v1, trays } = studioTrayMapping(mapping, extruderCount(inspection.model) === 1);
+  const info = trays.map((tray, position) => {
     if (tray < 0) return { ams: -1, targetColor: "", filamentId: "", filamentType: "" };
-    const nozzle = inspection.nozzleDiameters.length === 2 ? inspection.filamentMap?.[position] : undefined;
+    const logical = inspection.nozzleDiameters.length === 2 ? inspection.filamentMap?.[position] : undefined;
+    const nozzleId = logical === undefined ? undefined : (inspection.physicalExtruderMap ?? [1, 0])[logical - 1];
     return {
       ams: tray, targetColor: trayColour(tray) ?? "", filamentId: inspection.filamentIds?.[position] ?? "", filamentType: inspection.materials[position] ?? "",
-      ...(nozzle === 1 ? { nozzleId: 1 } : nozzle === 2 ? { nozzleId: 0 } : {}),
+      ...(nozzleId === 0 || nozzleId === 1 ? { nozzleId } : {}),
       sourceColor: inspection.filamentColours?.[position] ?? "",
     };
   });
@@ -1500,11 +1496,6 @@ class BambuPrinterMCPServer {
     printer: { host: string; serial: string; token: string }
   ): Promise<{ printerPreset: string | undefined; nozzleDiameter: string; options: BambuSliceOptions }> {
     assertUniformCliNozzles(args);
-    if (bedType === "supertack_plate") {
-      throw new Error(
-        'BambuStudio CLI SuperTack bed type is not verified; use a pre-sliced 3MF for SuperTack or choose textured_plate, cool_plate, engineering_plate, or hot_plate.'
-      );
-    }
     const requested = requestedPrintNozzles(args);
     const sliceExtruders = await this.resolveSliceExtruders(
       { ...args, nozzle_diameter: requested?.length ? String(requested[0]) : undefined },
@@ -1722,17 +1713,21 @@ class BambuPrinterMCPServer {
     const clientJobId = args?.client_job_id !== undefined ? Number(args.client_job_id) : Date.now();
 
     return withPrinterOperation(devIp, devId, assertActive => withPrintSnapshot(threeMFPath, async (snapshot, retainForDispatchedUpload) => {
-      const inspection = await inspectPrintFile(snapshot, { model: printModel, nozzleDiameters: printNozzles, plateIndex, bedType: printBedType });
+      // The sliced plate decides the bed (Studio's PrintJob sends the plate's bed type); a bed_type argument is a check.
+      const inspection = await inspectPrintFile(snapshot, { model: printModel, nozzleDiameters: printNozzles, plateIndex, bedType: args?.bed_type !== undefined || autoSliced ? printBedType : undefined });
+      const sentBedType = studioBedType(inspection.bedType) ?? studioBedType(printBedType)!;
+      assertBedSupported(inspection.model, sentBedType);
+      const printOptions = studioPrintOptions(inspection.model, usedExtruderCount(inspection.model, inspection), {
+        bedLeveling: args?.bed_leveling, flowCalibration: args?.flow_calibration, nozzleOffsetCalibration: args?.nozzle_offset_calibration,
+        vibrationCalibration: args?.vibration_calibration, layerInspect: args?.layer_inspect,
+      }, usedFilamentTypes(inspection));
       let mapping = finalAmsMapping?.slice();
       if (finalAmsSlots) {
         if (finalAmsSlots.length !== inspection.usedFilamentPositions.length) throw new Error("ams_slots must supply exactly one physical tray per used filament.");
         mapping = Array(inspection.materials.length).fill(-1);
         inspection.usedFilamentPositions.forEach((position, index) => { mapping![position] = finalAmsSlots[index]; });
       }
-      if (!useAMS) {
-        mapping = Array(inspection.materials.length).fill(-1);
-        inspection.usedFilamentPositions.forEach(position => { mapping![position] = 254; });
-      }
+      if (!useAMS) mapping = externalSpoolMapping(inspection.model, inspection);
       const requirements = { ...inspection, amsMapping: mapping, useAMS };
       const initialStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
       validatePrinterState(initialStatus, requirements);
@@ -1760,14 +1755,15 @@ class BambuPrinterMCPServer {
         filename: snapshot,
         config_filename: snapshot,
         plate_index: plateIndex + 1,
-        ftp_folder: String(args?.ftp_folder || ""),
+        // Studio's DevPrinterConfigUtil::get_ftp_folder ("sdcard/" on P1 and A1); the plug-in's LAN upload ignores it.
+        ftp_folder: String(args?.ftp_folder || ftpFolder(inspection.model)),
         ftp_file: String(args?.ftp_file || ""),
         ftp_file_md5: String(args?.ftp_file_md5 || ""),
         nozzle_mapping: stringifyBridgeJson(args?.nozzle_mapping) || "",
         ams_mapping: cloudMappings ? JSON.stringify(cloudMappings.v0) : amsMapping || "",
         ams_mapping2: cloudMappings ? JSON.stringify(cloudMappings.v1) : "",
         ams_mapping_info: cloudMappings ? JSON.stringify(cloudMappings.info) : "",
-        nozzles_info: stringifyBridgeJson(args?.nozzles_info) || "",
+        nozzles_info: studioNozzlesInfo(inspection),
         connection_type: connectionType,
         comments: String(args?.comments || ""),
         origin_profile_id: args?.origin_profile_id !== undefined ? Number(args.origin_profile_id) : 0,
@@ -1781,17 +1777,17 @@ class BambuPrinterMCPServer {
         use_ssl_for_mqtt: args?.use_ssl_for_mqtt !== undefined ? Boolean(args.use_ssl_for_mqtt) : true,
         username: String(args?.username || "bblp"),
         password,
-        task_bed_leveling: args?.bed_leveling !== undefined ? Boolean(args.bed_leveling) : true,
-        task_flow_cali: args?.flow_calibration !== undefined ? Boolean(args.flow_calibration) : true,
-        task_vibration_cali: args?.vibration_calibration !== undefined ? Boolean(args.vibration_calibration) : true,
-        task_layer_inspect: args?.layer_inspect !== undefined ? Boolean(args.layer_inspect) : false,
+        task_bed_leveling: printOptions.bedLeveling,
+        task_flow_cali: printOptions.flowCalibration,
+        task_vibration_cali: printOptions.vibrationCalibration,
+        task_layer_inspect: printOptions.layerInspect,
         task_record_timelapse: args?.timelapse !== undefined ? Boolean(args.timelapse) : false,
         task_use_ams: useAMS,
-        task_bed_type: printBedType,
+        task_bed_type: sentBedType,
         extra_options: stringifyBridgeJson(args?.extra_options) || "",
-        auto_bed_leveling: args?.auto_bed_leveling !== undefined ? Number(args.auto_bed_leveling) : 0,
-        auto_flow_cali: args?.auto_flow_cali !== undefined ? Number(args.auto_flow_cali) : 0,
-        auto_offset_cali: args?.auto_offset_cali !== undefined ? Number(args.auto_offset_cali) : 0,
+        auto_bed_leveling: printOptions.autoBedLeveling,
+        auto_flow_cali: printOptions.autoFlowCalibration,
+        auto_offset_cali: printOptions.autoOffsetCalibration,
         extruder_cali_manual_mode: args?.extruder_cali_manual_mode !== undefined ? Number(args.extruder_cali_manual_mode) : -1,
         task_ext_change_assist: args?.external_change_assist !== undefined ? Boolean(args.external_change_assist) : false,
         try_emmc_print: args?.try_emmc_print !== undefined ? Boolean(args.try_emmc_print) : false,
@@ -1805,8 +1801,10 @@ class BambuPrinterMCPServer {
         const nativeResult = await printWithBambuNative({
           host: devIp, serial: devId, token: password || bambuToken, filePath: snapshot,
           projectName: String(params.task_name), presetName, remoteName: remoteFileName,
-          plateIndex, bedType: printBedType, useAMS,
-          amsMapping, amsMapping2: nativeAmsMapping2(mapping),
+          plateIndex, bedType: sentBedType, useAMS,
+          amsMapping: cloudMappings ? JSON.stringify(cloudMappings.v0) : amsMapping, amsMapping2: nativeAmsMapping2(mapping, inspection.model),
+          ...(cloudMappings ? { amsMappingInfo: JSON.stringify(cloudMappings.info) } : {}),
+          nozzlesInfo: String(params.nozzles_info),
           bedLeveling: params.task_bed_leveling as boolean,
           flowCalibration: params.task_flow_cali as boolean,
           vibrationCalibration: params.task_vibration_cali as boolean,
@@ -2093,11 +2091,6 @@ class BambuPrinterMCPServer {
     }
 
     const printPreset = BAMBU_MODEL_PRESETS[printModel]?.(printNozzle);
-    if (bedType === "supertack_plate") {
-      throw new Error(
-        'BambuStudio CLI SuperTack bed type is not verified; use a pre-sliced 3MF for SuperTack or choose textured_plate, cool_plate, engineering_plate, or hot_plate.'
-      );
-    }
     const autoSliceOptions: BambuSliceOptions = {
       uptodate: true,
       ensureOnBed: true,
@@ -2561,7 +2554,7 @@ class BambuPrinterMCPServer {
                 bed_type: {
                   type: "string",
                   enum: ["textured_plate", "cool_plate", "engineering_plate", "hot_plate", "supertack_plate"],
-                  description: "Bed plate type for slicing (default: textured_plate). SuperTack is accepted only for pre-sliced print jobs until the BambuStudio CLI identifier is verified."
+                  description: "Bed plate type for slicing (default: textured_plate)."
                 },
                 nozzle_type: {
                   type: "string",
@@ -2617,7 +2610,7 @@ class BambuPrinterMCPServer {
                 bed_type: {
                   type: "string",
                   enum: ["textured_plate", "cool_plate", "engineering_plate", "hot_plate", "supertack_plate"],
-                  description: "Bed plate type for slicing (default: textured_plate). SuperTack is accepted only for pre-sliced print jobs until the BambuStudio CLI identifier is verified."
+                  description: "Bed plate type for slicing (default: textured_plate)."
                 },
                 nozzle_type: {
                   type: "string",
@@ -2755,10 +2748,10 @@ class BambuPrinterMCPServer {
                 ams_mapping_info: { type: "string", description: "Raw JSON string for FULU PrintParams ams_mapping_info, matching OrcaSlicer-bambulab's detailed AMS mapping field." },
                 nozzle_mapping: { type: "string", description: "Raw JSON string for FULU PrintParams nozzle_mapping." },
                 nozzles_info: { type: "string", description: "Raw JSON string for FULU PrintParams nozzles_info." },
-                bed_leveling: { type: "boolean", description: "Enable auto bed leveling in FULU PrintParams (default: true)." },
-                flow_calibration: { type: "boolean", description: "Enable flow calibration in FULU PrintParams (default: true)." },
-                vibration_calibration: { type: "boolean", description: "Enable vibration calibration in FULU PrintParams (default: true)." },
-                layer_inspect: { type: "boolean", description: "Enable first-layer inspection where supported (default: false for BambuNetwork bridge)." },
+                bed_leveling: { type: "boolean", description: "Bed leveling on or off. Omit for Bambu Studio's default: automatic where the printer offers it (H2/P2S/X2D), else on." },
+                flow_calibration: { type: "boolean", description: "Flow dynamics calibration on or off. Omit for Bambu Studio's default: automatic where offered, else on; off on printers without it (P1)." },
+                vibration_calibration: { type: "boolean", description: "Vibration calibration (default: false, as Bambu Studio sends)." },
+                layer_inspect: { type: "boolean", description: "First-layer inspection where supported (default: true, as Bambu Studio sends)." },
                 timelapse: { type: "boolean", description: "Enable timelapse recording in FULU PrintParams (default: false)." },
                 use_ssl_for_ftp: { type: "boolean", description: "Whether FULU local print should use SSL for FTP (default: true)." },
                 use_ssl_for_mqtt: { type: "boolean", description: "Whether FULU local print should use SSL for MQTT (default: true)." },
@@ -2977,15 +2970,16 @@ class BambuPrinterMCPServer {
           },
           {
             name: "set_airduct_mode",
-            description: "Set H2/P2 airduct mode to cooling or heating.",
+            description: "Set the airduct mode on printers that have one (H2 series, P2S, X2D), as Bambu Studio's fan panel does: only modes the printer reports in its airduct mode list.",
             inputSchema: {
               type: "object",
               properties: {
                 mode: {
                   type: "string",
-                  enum: ["cooling", "heating"],
-                  description: "Airduct mode to apply"
+                  enum: ["cooling", "heating", "full_cooling"],
+                  description: "Airduct mode to apply (full_cooling only where the printer lists it)"
                 },
+                cooling_filter: { type: "boolean", description: "Cooling-mode air filter on or off (Studio's submode), where the printer offers it." },
                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
                 bambu_token: { type: "string", description: "Access token (default: value from env)" }
@@ -2995,11 +2989,11 @@ class BambuPrinterMCPServer {
           },
           {
             name: "reread_ams_rfid",
-            description: "Trigger a Bambu AMS RFID re-read for one AMS slot. X2D on macOS uses the native official plug-in route. This can move AMS filament; use only when the printer is idle and unloaded.",
+            description: "Trigger a Bambu AMS RFID re-read for one AMS slot, with the command Bambu Studio uses for the printer (ams_get_rfid or M620 R). Refused, as in Studio, while filament is loaded to the toolhead that AMS feeds. This can move AMS filament; use only when the printer is idle.",
             inputSchema: {
               type: "object",
               properties: {
-                ams_id: { type: "number", description: "AMS unit index from 0 to 3, or 128 for an X2D AMS-HT." },
+                ams_id: { type: "number", description: "AMS unit index from 0 to 3, or the AMS-HT unit id (128-135)." },
                 slot_id: { type: "number", description: "Slot index within that AMS, from 0 to 3" },
                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
@@ -3010,11 +3004,12 @@ class BambuPrinterMCPServer {
           },
           {
             name: "set_temperature",
-            description: "Set a checked bed or nozzle temperature. Positive heating requires matching fresh printer telemetry; nozzle heating also requires declared material. Zero turns the heater off.",
+            description: "Set a checked bed, nozzle or chamber temperature, with the command Bambu Studio uses for the printer (G-code or JSON). Positive heating requires matching fresh printer telemetry; nozzle heating also requires declared material, checked against the filament loaded at that nozzle. Zero turns the heater off (both nozzles on a dual-nozzle printer unless extruder is given).",
             inputSchema: {
               type: "object",
               properties: {
-                component: { type: "string", description: "Component to heat: bed, nozzle, or extruder" },
+                component: { type: "string", description: "Component to heat: bed, nozzle (or extruder), or chamber (H2 series, X2D, X1E)" },
+                extruder: { type: "string", enum: ["left", "right"], description: "Nozzle on a dual-nozzle printer (H2D, H2D Pro, H2C, X2D); required to heat one." },
                 temperature: { type: "number", minimum: 0, description: "Finite target temperature in °C, checked against model/component and declared material limits" },
                 bambu_model: { type: "string", enum: [...VALID_BAMBU_MODELS], description: "Printer model, required for positive heating unless configured in the environment" },
                 material: { type: "string", description: "Loaded material, for example PLA or PETG. Required for positive nozzle heating, including non-RFID spools." },
@@ -3028,7 +3023,7 @@ class BambuPrinterMCPServer {
           },
           {
             name: "set_fan_speed",
-            description: "Set a Bambu printer fan speed percentage. X2D on macOS uses the installed Bambu networking plug-in without UI automation; other models use MQTT.",
+            description: "Set a Bambu printer fan speed percentage in 10 % steps, with Bambu Studio's command for the printer (set_fan where the printer has an airduct and the new protocol, else M106).",
             inputSchema: {
               type: "object",
               properties: {
@@ -3037,7 +3032,7 @@ class BambuPrinterMCPServer {
                   description: "Fan to control: part, auxiliary, right_auxiliary, chamber, 1, 2, 3, or 10"
                 },
                 speed: { type: "number", description: "Fan speed percentage from 0 to 100" },
-                confirm_during_print: { type: "boolean", description: "Required for X2D fan changes while a print is running." },
+                confirm_during_print: { type: "boolean", description: "Required for signed fan changes while a print is running." },
                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
                 bambu_token: { type: "string", description: "Access token (default: value from env)" }
@@ -3189,9 +3184,9 @@ class BambuPrinterMCPServer {
                   type: "boolean",
                   description: "When true, match the sliced 3MF's tray_info_idx requirements against live AMS inventory and use the resulting ams_slots. Ignored when ams_mapping or ams_slots is provided."
                 },
-                bed_leveling: { type: "boolean", description: "Enable auto bed leveling (default: true)" },
-                                flow_calibration: { type: "boolean", description: "Enable flow calibration (default: true)" },
-                                vibration_calibration: { type: "boolean", description: "Enable vibration calibration (default: true)" },
+                bed_leveling: { type: "boolean", description: "Bed leveling on or off. Omit for Bambu Studio's default: automatic where the printer offers it, else on." },
+                                flow_calibration: { type: "boolean", description: "Flow dynamics calibration on or off. Omit for Bambu Studio's default: automatic where offered, else on; off where the printer has none." },
+                                vibration_calibration: { type: "boolean", description: "Vibration calibration (default: false, as Bambu Studio sends)." },
                                 timelapse: { type: "boolean", description: "Enable timelapse recording (default: false)" },
                                 slicer_profile: { type: "string", description: "Path to the slicer profile/config file for auto-slicing (optional)." },
                                 template_3mf_path: { type: "string", description: "Optional template 3MF whose embedded Bambu slicer settings should be reused when auto-slicing this print job." },
@@ -3226,9 +3221,9 @@ class BambuPrinterMCPServer {
                   enum: ["textured_plate", "cool_plate", "engineering_plate", "hot_plate", "supertack_plate"],
                   description: "Bed plate type currently installed (default: textured_plate)"
                 },
-                bed_leveling: { type: "boolean", description: "Enable auto bed leveling (default: true)" },
-                flow_calibration: { type: "boolean", description: "Enable flow calibration (default: true)" },
-                vibration_calibration: { type: "boolean", description: "Enable vibration calibration (default: true)" },
+                bed_leveling: { type: "boolean", description: "Bed leveling on or off. Omit for Bambu Studio's default: automatic where the printer offers it, else on." },
+                flow_calibration: { type: "boolean", description: "Flow dynamics calibration on or off. Omit for Bambu Studio's default: automatic where offered, else on; off where the printer has none." },
+                vibration_calibration: { type: "boolean", description: "Vibration calibration (default: false, as Bambu Studio sends)." },
                 timelapse: { type: "boolean", description: "Enable timelapse recording (default: false)" },
                 slicer_profile: { type: "string", description: "Path to the slicer profile/config file for auto-slicing (optional)." },
                 nozzle_diameter: { type: "string", description: "Nozzle diameter in mm for auto-slicing (default: 0.4)" }
@@ -3376,9 +3371,12 @@ class BambuPrinterMCPServer {
         if (!bridgeControls) return sendMacNativeCommand(options, execution);
         const validated = validateBambuNativeControlMessage(options.messageJson);
         const print = JSON.parse(validated.messageJson).print;
+        const gcodeHeat = print?.command === "gcode_line" && typeof print.param === "string" ? print.param.trim().match(/^M(?:104|140)\s+S(\d+)$/i) : null;
         const requiresFreshState = print?.command === "resume" || print?.command === "clean_print_error" ||
           (print?.command === "set_bed_temp" && Number(print.temp) > 0) ||
-          (print?.command === "set_nozzle_temp" && Number(print.target_temp) > 0);
+          (print?.command === "set_nozzle_temp" && Number(print.target_temp) > 0) ||
+          (print?.command === "set_ctt" && Number(print.ctt_val) > 0) ||
+          (!!gcodeHeat && Number(gcodeHeat[1]) > 0);
         if (requiresFreshState && typeof execution.beforeDispatch !== "function") {
           throw new Error(`${validated.command} requires a fresh printer-state check before dispatch.`);
         }
@@ -3726,64 +3724,26 @@ class BambuPrinterMCPServer {
             if (!args?.mode) {
               throw new Error("Missing required parameter: mode");
             }
-            if (nativeControls) {
-              const mode = String(args.mode).trim().toLowerCase();
-              if (mode !== "cooling" && mode !== "heating") {
-                throw new Error("Airduct mode must be one of: cooling, heating.");
-              }
-              result = await signedCommand({
-                host,
-                serial: bambuSerial,
-                token: bambuToken,
-                messageJson: JSON.stringify({
-                  print: {
-                    command: "set_airduct",
-                    modeId: mode === "cooling" ? 0 : 1,
-                    submode: -1,
-                    sequence_id: nextSequenceId(),
-                  },
-                }),
-              });
-            } else {
-              result = await this.bambu.setAirductMode(host, bambuSerial, bambuToken, String(args.mode));
-            }
+            if (args.cooling_filter !== undefined && typeof args.cooling_filter !== "boolean") throw new Error("cooling_filter must be true or false.");
+            // Studio's mode list comes from the printer's own device.airduct report.
+            result = await this.bambu.setAirductMode(host, bambuSerial, bambuToken, String(args.mode),
+              nativeControls ? command => signedCommand({ host, serial: bambuSerial, token: bambuToken, messageJson: command.messageJson }) : undefined,
+              args.cooling_filter as boolean | undefined);
             break;
 
           case "reread_ams_rfid":
             if (args?.ams_id === undefined || args?.slot_id === undefined) {
               throw new Error("Missing required parameters: ams_id and slot_id");
             }
-            if (nativeControls) {
-              const amsId = Number(args.ams_id);
-              const slotId = Number(args.slot_id);
-              if ((!Number.isInteger(amsId) || (amsId < 0 || amsId > 3)) && amsId !== 128) {
-                throw new Error("X2D ams_id must be 0 to 3, or 128 for AMS-HT.");
-              }
-              if (!Number.isInteger(slotId) || slotId < 0 || slotId > 3 || (amsId === 128 && slotId !== 0)) {
-                throw new Error("slot_id must be an integer from 0 to 3; AMS-HT supports only slot 0.");
-              }
-              result = await signedCommand({
-                host,
-                serial: bambuSerial,
-                token: bambuToken,
-                messageJson: JSON.stringify({
-                  print: {
-                    command: "ams_get_rfid",
-                    sequence_id: nextSequenceId(),
-                    ams_id: amsId,
-                    slot_id: slotId,
-                  },
-                }),
-              });
-            } else {
-              result = await this.bambu.rereadAmsRfid(
-                host,
-                bambuSerial,
-                bambuToken,
-                Number(args.ams_id),
-                Number(args.slot_id)
-              );
-            }
+            // Studio's protocol choice (ams_get_rfid or M620 R) and toolhead check come from a fresh report.
+            result = await this.bambu.rereadAmsRfid(
+              host,
+              bambuSerial,
+              bambuToken,
+              Number(args.ams_id),
+              Number(args.slot_id),
+              nativeControls ? command => signedCommand({ host, serial: bambuSerial, token: bambuToken, messageJson: command.messageJson }) : undefined
+            );
             break;
 
           case "set_temperature": {
@@ -3793,6 +3753,10 @@ class BambuPrinterMCPServer {
             if (typeof args.temperature !== "number" || !Number.isFinite(args.temperature) || args.temperature < 0) {
               throw new Error("Temperature must be a finite, non-negative number in °C.");
             }
+            const extruder = args.extruder === undefined ? undefined
+              : ["left", "deputy", "1"].includes(String(args.extruder).trim().toLowerCase()) ? 1
+              : ["right", "main", "0"].includes(String(args.extruder).trim().toLowerCase()) ? 0
+              : (() => { throw new Error("extruder must be left or right."); })();
             const heaterModel = args.temperature === 0
               ? String(args.bambu_model || DEFAULT_BAMBU_MODEL).trim().toLowerCase()
               : await this.resolveBambuModel(args.bambu_model as string | undefined);
@@ -3803,9 +3767,10 @@ class BambuPrinterMCPServer {
               args?.material !== undefined ? String(args.material) : undefined,
               Number(args?.nozzle_diameter ?? DEFAULT_NOZZLE_DIAMETER),
               (args.temperature === 0 ? nativeControls : (heaterModel === "x2d" && process.platform === "darwin") || bridgeControls)
-                ? (heater, target, assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
-                    messageJson: buildBambuNativeTemperatureCommand(heater, target).messageJson }, { signal: extra.signal, assertActive, beforeDispatch })
-                : undefined
+                ? (command, assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
+                    messageJson: command.messageJson, qos: command.qos }, { signal: extra.signal, assertActive, beforeDispatch })
+                : undefined,
+              extruder
             );
             break;
           }
@@ -3818,30 +3783,17 @@ class BambuPrinterMCPServer {
               const status = await this.bambu.getStatus(host, bambuSerial, bambuToken);
               const printerState = String(status?.raw?.gcode_state ?? status?.raw?.print?.gcode_state ?? status?.gcode_state ?? status?.status ?? "").toUpperCase();
               if (printerState === "RUNNING" && args?.confirm_during_print !== true) {
-                throw new Error("The X2D is currently printing. Re-submit with confirm_during_print=true after explicit user confirmation.");
+                throw new Error("The printer is currently printing. Re-submit with confirm_during_print=true after explicit user confirmation.");
               }
-              const fanCommand = buildBambuNativeFanCommand(String(args.fan), Number(args.speed));
-              result = {
-                ...await signedCommand({
-                  host,
-                  serial: bambuSerial,
-                  token: bambuToken,
-                  messageJson: fanCommand.messageJson,
-                }),
-                fan: fanCommand.fan,
-                fan_index: fanCommand.fanIndex,
-                requested_speed: fanCommand.requestedSpeed,
-                speed: fanCommand.speed,
-              };
-            } else {
-              result = await this.bambu.setFanSpeed(
-                host,
-                bambuSerial,
-                bambuToken,
-                String(args.fan),
-                Number(args.speed)
-              );
             }
+            result = await this.bambu.setFanSpeed(
+              host,
+              bambuSerial,
+              bambuToken,
+              String(args.fan),
+              Number(args.speed),
+              nativeControls ? command => signedCommand({ host, serial: bambuSerial, token: bambuToken, messageJson: command.messageJson }) : undefined
+            );
             break;
 
           case "set_light":
@@ -4371,11 +4323,13 @@ class BambuPrinterMCPServer {
               useAMS: useAMS,
               amsMapping: finalAmsMapping,
               amsSlots: finalAmsSlots,
-              bedType: printBedType,
-              bedLeveling: args?.bed_leveling !== undefined ? Boolean(args.bed_leveling) : undefined,
-              flowCalibration: args?.flow_calibration !== undefined ? Boolean(args.flow_calibration) : undefined,
-              vibrationCalibration: args?.vibration_calibration !== undefined ? Boolean(args.vibration_calibration) : undefined,
-              layerInspect: args?.layer_inspect !== undefined ? Boolean(args.layer_inspect) : undefined,
+              // The sliced plate decides the bed; an explicit bed_type is checked against it.
+              bedType: args?.bed_type !== undefined || !hasGcode ? printBedType : undefined,
+              bedLeveling: args?.bed_leveling,
+              flowCalibration: args?.flow_calibration,
+              nozzleOffsetCalibration: args?.nozzle_offset_calibration,
+              vibrationCalibration: args?.vibration_calibration,
+              layerInspect: args?.layer_inspect,
               timelapse: args?.timelapse !== undefined ? Boolean(args.timelapse) : undefined,
             });
             // Report what the printer did, not merely that a command was published.
@@ -4440,9 +4394,9 @@ class BambuPrinterMCPServer {
               useAMS: true,
               amsSlots: collarAnalysis.amsSlots,
               bedType: printBedType,
-              bedLeveling: args?.bed_leveling !== undefined ? Boolean(args.bed_leveling) : true,
-              flowCalibration: args?.flow_calibration !== undefined ? Boolean(args.flow_calibration) : true,
-              vibrationCalibration: args?.vibration_calibration !== undefined ? Boolean(args.vibration_calibration) : true,
+              bedLeveling: args?.bed_leveling,
+              flowCalibration: args?.flow_calibration,
+              vibrationCalibration: args?.vibration_calibration,
               timelapse: args?.timelapse !== undefined ? Boolean(args.timelapse) : false,
             });
 

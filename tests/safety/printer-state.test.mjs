@@ -68,17 +68,26 @@ test('diameter must be reported and match; bed-only state reads may omit diamete
   assert.doesNotThrow(() => check(fresh({nozzle_diameter:undefined}),req({nozzleDiameters:[]})));
 });
 test('matches used nozzles by index rather than accepting one matching nozzle among multiple', () => {
+  // Report: id 0 is the right (main) nozzle, id 1 the left (deputy). Sliced files list the left nozzle first.
   const status = fresh({model_id:'O1D',nozzle_diameter:undefined,device:{nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat:0},{id:1,diameter:0.6,type:'HS01',stat:0}]}}});
-  assert.doesNotThrow(() => check(status,req({model:'h2d',nozzleDiameters:[0.4,0.6]})));
+  assert.doesNotThrow(() => check(status,req({model:'h2d',nozzleDiameters:[0.6,0.4]})));
+  // The mirror-image job (left 0.4, right 0.6) must not pass on this printer.
+  assert.throws(() => check(status,req({model:'h2d',nozzleDiameters:[0.4,0.6]})), /nozzle 1 diameter/i);
   assert.throws(() => check(status,req({model:'h2d',nozzleDiameters:[0.4,0.4]})), /nozzle|diameter/i);
   assert.throws(() => check(status,req({model:'h2d',nozzleDiameters:[0.4]})), /nozzle|ambiguous/i);
   assert.doesNotThrow(() => check(status,req({model:'h2d',nozzleDiameters:[0.6],usedNozzleIndices:[1],nozzleFlows:['Standard']})));
   assert.throws(() => check(status,req({model:'h2d',nozzleDiameters:[0.6],usedNozzleIndices:[1],nozzleFlows:['High Flow']})), /flow/i);
 });
-test('reported type, flow, absent or abnormal multi nozzle state cannot contradict job', () => {
-  assert.throws(() => check(fresh({nozzle_type:'stainless_steel'}),req({nozzleTypes:['hardened_steel']})), /type/i);
+test('nozzle material only feeds a hardness warning; flow and abnormal nozzles block, like Bambu Studio', () => {
+  // Studio compares diameter and flow (CheckErrorExtruderNozzleWithSlicing): a stock hardened-steel preset prints on a
+  // stainless nozzle, with a warning only when the filament is harder than the nozzle.
+  assert.deepEqual(check(fresh({nozzle_type:'stainless_steel'}),req({nozzleTypes:['hardened_steel']})).hmsWarnings, []);
+  assert.match(check(fresh({nozzle_type:'stainless_steel'}),req({nozzleTypes:['hardened_steel'],filamentTypes:['PLA-CF']})).hmsWarnings.join(), /PLA-CF is harder than nozzle 0 \(stainless steel\)/);
+  assert.deepEqual(check(fresh({nozzle_type:'hardened_steel'}),req({filamentTypes:['PLA-CF']})).hmsWarnings, []);
   assert.throws(() => check(fresh({nozzle_type:'HH01'}),req({nozzleFlows:['Standard']})), /flow/i);
-  for(const stat of [1,2,4]) assert.throws(() => check(fresh({device:{nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat}]}}})), /nozzle|reliable|abnormal/i);
+  // stat bit 0 is "unreliable" (a warning in Studio); bits 1-2 abnormal or unknown, which block a used nozzle.
+  assert.match(check(fresh({device:{nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat:1}]}}})).hmsWarnings.join(), /nozzle 0 information is unreliable/);
+  for(const stat of [2,4]) assert.throws(() => check(fresh({device:{nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat}]}}})), /abnormal or unknown/i);
 });
 test('rejects busy, failed, missing or unknown states while allowing IDLE and FINISH', () => {
   for(const gcode_state of ['RUNNING','PAUSE','PREPARE','SLICING','OFFLINE','UNKNOWN',undefined]) assert.throws(() => check(fresh({gcode_state})), /state|idle/i);
@@ -93,16 +102,16 @@ test('requires explicit clean print error and valid HMS severity, but permits in
   assert.doesNotThrow(() => check(fresh({hms:[{attr:0x03000100,code:0x40001}]})));
   assert.deepEqual(check(fresh({hms:[{attr:0x0C000100,code:0x0002001B},{attr:0x03000100,code:0x30001},{attr:0x03000100,code:0x40001}]})).hmsWarnings,
     ['HMS 0C00-0100-0002-001B (serious)','HMS 0300-0100-0003-0001 (common)']);
-  assert.throws(() => check(fresh({hms:[{attr:0x0C000100,code:0x0002001B},{attr:0x05000500,code:0x00010007}]})), /fatal HMS error \(HMS 0500-0500-0001-0007\)/);
-  // A blocking entry names its code, so a lingering command-verification rejection is recognizable.
-  assert.throws(() => check(fresh({hms:[{attr:0x05000500,code:0x00010007}]})), /HMS 0500-0500-0001-0007/);
+  // 0500-0500-0001-0007 is a refused unsigned command, not a printer fault: a warning. Other fatal codes still block.
+  assert.deepEqual(check(fresh({hms:[{attr:0x05000500,code:0x00010007}]})).hmsWarnings, ['HMS 0500-0500-0001-0007 (a refused unsigned command, not a printer fault)']);
+  assert.throws(() => check(fresh({hms:[{attr:0x05000500,code:0x00010008}]})), /fatal HMS error \(HMS 0500-0500-0001-0008\)/);
 });
 test('known maintenance reminders do not block, but faults beside them and unknown codes in their family do', () => {
   // H2C report: threaded rods and X/YZ/extruder-lift rails need lubrication (0501-0400-0003-0002/0004).
   const reminders=[{attr:0x05010400,code:0x00030002},{attr:0x05010400,code:0x00030004}];
   assert.doesNotThrow(() => check(fresh({hms:reminders})));
   for(const code of [0x00030003,0x00030005,0x00030006,0x00030007,0x00030010]) assert.doesNotThrow(() => check(fresh({hms:[{attr:0x05010400,code}]})));
-  assert.throws(() => check(fresh({hms:[...reminders,{attr:0x05000500,code:0x00010007}]})), /HMS 0500-0500-0001-0007/);
+  assert.throws(() => check(fresh({hms:[...reminders,{attr:0x0C000100,code:0x00010001}]})), /HMS 0C00-0100-0001-0001/);
   // Codes outside the known reminder list keep their own severity: fatal blocks, common is only a warning.
   assert.throws(() => check(fresh({hms:[{attr:0x05010400,code:0x00010044}]})), /fatal HMS/i);
   for(const [attr,code] of [[0x05010400,0x00030008],[0x05010401,0x00030002],[0x05000400,0x00030002]])
@@ -111,7 +120,12 @@ test('known maintenance reminders do not block, but faults beside them and unkno
   assert.throws(() => check(fresh({print_error:1,hms:reminders})), /error/i);
   // A canceled task (0300-400C) stays reported until the next job; it is a warning, other print errors block.
   assert.deepEqual(check(fresh({gcode_state:'FAILED',print_error:0x0300400C})).hmsWarnings, ['print_error 0300-400C (the previous task was canceled)']);
-  assert.throws(() => check(fresh({gcode_state:'FAILED',print_error:0x0300400D})), /print error \(0300-400D\)/);
+  // Every stop-class code (xxxx-4xxx) is the record of a stopped task, e.g. 0500-400E "Job was cancelled.".
+  assert.deepEqual(check(fresh({gcode_state:'FAILED',print_error:0x0500400E})).hmsWarnings, ['print_error 0500-400E (the previous task stopped)']);
+  // Pause (8xxx) and prompt (Cxxx) classes wait for an action and still block.
+  for(const print_error of [0x0300800A,0x07FF8012,0x0500C011]) assert.throws(() => check(fresh({gcode_state:'IDLE',print_error})), /print error \(/);
+  // A paused job's stop-class code is not waved through on resume.
+  assert.throws(() => check(fresh({gcode_state:'PAUSE',print_error:0x0500400E}),req({requireIdle:false})), /print error/);
 });
 const ams = {ams:[{id:'0',tray:[{id:'0',tray_type:'PLA',nozzle_temp_min:'190',nozzle_temp_max:'240'},{id:'1',tray_type:'PETG',nozzle_temp_min:'220',nozzle_temp_max:'270'}]}]};
 test('AMS requirements use positional mappings and selected slot material, including external 254', () => {
@@ -212,9 +226,22 @@ test('manual heating permits declared external or unloaded material and rejects 
   }
   assert.doesNotThrow(() => check(fresh(),safety.manualHeatingRequirements(fresh(),'p1s',0.4,'PLA')));
 });
-test('manual heating refuses ambiguous multi-nozzle active selection', () => {
-  const status=fresh({model_id:'O1D',device:{nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat:0},{id:1,diameter:0.4,type:'HH01',stat:0}]}}});
-  assert.throws(() => safety.manualHeatingRequirements(status,'h2d',0.4,'PLA'),/multi.nozzle|sliced|active/i);
+test('manual heating on a dual-nozzle printer needs the nozzle and checks the filament loaded there', () => {
+  const extruder=snows=>({extruder:{info:snows.map((snow,id)=>({id,snow,info:0}))}});
+  const nozzle={nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat:0},{id:1,diameter:0.4,type:'HH01',stat:0}]}};
+  const status=snows=>fresh({model_id:'O1D',device:{...nozzle,...extruder(snows)},ams:{ams:[{id:'1',info:'2003',tray:[{id:'3',tray_type:'PETG'}]}]},vir_slot:[{id:'254',tray_type:'PLA'},{id:'255',tray_type:''}]});
+  assert.throws(() => safety.manualHeatingRequirements(status([0xffff,0xffff]),'h2d',0.4,'PLA'),/dual-nozzle/i);
+  // Right nozzle (0) loaded from AMS 1 slot 3 (snow 0x0103 = tray 7): PETG.
+  const right=safety.manualHeatingRequirements(status([0x0103,0xffff]),'h2d',0.4,'PLA',0);
+  assert.deepEqual([right.useAMS,right.amsMapping,right.usedNozzleIndices],[true,[7],[0]]);
+  assert.throws(() => check(status([0x0103,0xffff]),right),/PETG in slot 7 contradicts/);
+  assert.doesNotThrow(() => check(status([0x0103,0xffff]),safety.manualHeatingRequirements(status([0x0103,0xffff]),'h2d',0.4,'PETG',0)));
+  // Left nozzle (1) fed from the external holder 254 (snow 0xFEFF): PLA.
+  assert.doesNotThrow(() => check(status([0xffff,0xfeff]),safety.manualHeatingRequirements(status([0xffff,0xfeff]),'h2d',0.4,'PLA',1)));
+  // Nothing loaded: the material's ceiling applies, no spool to compare.
+  assert.equal(safety.manualHeatingRequirements(status([0xffff,0xffff]),'h2d',0.4,'PLA',1).verifyMaterials,false);
+  assert.throws(() => safety.manualHeatingRequirements(fresh({model_id:'O1D',device:nozzle}),'h2d',0.4,'PLA',1),/filament loaded at that nozzle/);
+  assert.throws(() => safety.manualHeatingRequirements(fresh(),'p1s',0.4,'PLA',1),/one nozzle/);
 });
 
 test('explicit job nozzle type and flow requirements cannot pass unknown reported configuration', () => {
@@ -230,7 +257,8 @@ test('legacy nozzle reports use Bambu standard-flow default and flag3 high-flow 
   assert.throws(() => check(fresh({flag3:1024}),req({nozzleFlows:['Standard']})),/flow/i);
   assert.doesNotThrow(() => check(fresh({flag3:1024}),req({nozzleFlows:['High Flow']})));
   assert.throws(() => check(fresh({flag3:1024}),req({nozzleFlows:['Standard']})),/flow/i);
-  assert.throws(() => check(fresh({flag3:2048}),req({nozzleFlows:['Standard']})),/flow|nozzle/i);
+  // Studio's ParseV1_0 treats any other flag value as standard flow.
+  assert.doesNotThrow(() => check(fresh({flag3:2048}),req({nozzleFlows:['Standard']})));
 });
 
 for (const [prefix, model, reportedModel] of [['039', 'a1', 'A1'], ['030', 'a1mini', 'A1M']]) {
@@ -263,7 +291,8 @@ test('H2C job nozzles (left, right) are matched to the printer report (id 1 left
   const job=(nozzleTypes,nozzleFlows)=>req({model:'h2c',serial,nozzleDiameters:[0.4,0.4],nozzleTypes,nozzleFlows});
   assert.doesNotThrow(()=>check(status,job(['tungsten_carbide','hardened_steel'],['high_flow','standard'])));
   assert.throws(()=>check(status,job(['hardened_steel','tungsten_carbide'],['standard','high_flow'])),/type|flow/i);
-  assert.throws(()=>check(status,job(['hardened_steel','hardened_steel'],['standard','standard'])),/nozzle 1 type/i);
+  // The nozzle material doesn't have to match the preset (Studio checks diameter and flow only).
+  assert.doesNotThrow(()=>check(status,job(['hardened_steel','hardened_steel'],['high_flow','standard'])));
   assert.throws(()=>check(status,job(['tungsten_carbide','hardened_steel'],['standard','standard'])),/nozzle 1 flow/i);
   // Explicit physical selections keep the printer's own ids.
   assert.doesNotThrow(()=>check(status,req({model:'h2c',serial,nozzleDiameters:[0.4],usedNozzleIndices:[1],nozzleTypes:['tungsten_carbide'],nozzleFlows:['high_flow']})));
@@ -276,4 +305,14 @@ test('official H2C and H2D Pro returned serials agree with declared identity and
     assert.throws(()=>check(fresh({model_id:other,modules:[{name:'ota',sn:serial}]},{serial}),req({model,serial,nozzleDiameters:[]})),/identity|conflict|model/i);
     assert.throws(()=>check(fresh({model_id:undefined}),req({model,serial,nozzleDiameters:[]})),/identity|model/i);
   }
+});
+
+test('upload-only accepts any known printer state, including FAILED after a cancel, but keeps error gates', () => {
+  const upload = extra => req({verifyMaterials:false,requireIdle:false,uploadOnly:true,...extra});
+  for(const gcode_state of ['FAILED','PREPARE','SLICING','RUNNING','IDLE']) assert.doesNotThrow(() => check(fresh({gcode_state}),upload()), gcode_state);
+  assert.deepEqual(check(fresh({gcode_state:'FAILED',print_error:0x0500400E}),upload()).hmsWarnings, ['print_error 0500-400E (the previous task stopped)']);
+  for(const raw of [{gcode_state:'UNKNOWN'},{print_error:0x0300800A},{hms:[{attr:0x0C000100,code:0x00010001}]}]) assert.throws(() => check(fresh(raw),upload()), /state|error|HMS/i);
+  // Identity and nozzles are still verified.
+  assert.throws(() => check(fresh({gcode_state:'FAILED',nozzle_diameter:'0.6'}),upload()), /diameter/);
+  assert.throws(() => check(fresh({gcode_state:'FAILED'}),upload({model:'x1c'})), /model/);
 });

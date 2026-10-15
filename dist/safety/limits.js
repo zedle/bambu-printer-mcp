@@ -13,17 +13,18 @@
  * P2S: https://blog.bambulab.com/the-icon-redefined-meet-the-p2s-a-completely-reengineered-version-of-the-ultra-productive-p1-series/
  * X2D: https://csm.bblcdn.com/hub/7c58718aaa2e40edab56efb87419a96a.pdf
  * X1-family bed caps use 110 C: 120 C requires verified 110 V supply, unavailable here.
+ * Build heights follow Bambu Studio's machine profiles (printable_height 250 on the P1 and X1 series).
  * A zero chamber cap means no supported active chamber heater, not ambient temperature.
  */
 export const MACHINE_LIMITS = {
-    p1p: { nozzle: 300, bed: 100, chamber: 0, volume: [256, 256, 256] },
-    p1s: { nozzle: 300, bed: 100, chamber: 0, volume: [256, 256, 256] },
+    p1p: { nozzle: 300, bed: 100, chamber: 0, volume: [256, 256, 250] },
+    p1s: { nozzle: 300, bed: 100, chamber: 0, volume: [256, 256, 250] },
     p2s: { nozzle: 300, bed: 110, chamber: 0, volume: [256, 256, 256] },
     a1: { nozzle: 300, bed: 100, chamber: 0, volume: [256, 256, 256] },
     a1mini: { nozzle: 300, bed: 80, chamber: 0, volume: [180, 180, 180] },
-    x1: { nozzle: 300, bed: 110, chamber: 0, volume: [256, 256, 256] },
-    x1c: { nozzle: 300, bed: 110, chamber: 0, volume: [256, 256, 256] },
-    x1e: { nozzle: 320, bed: 110, chamber: 60, volume: [256, 256, 256] },
+    x1: { nozzle: 300, bed: 110, chamber: 0, volume: [256, 256, 250] },
+    x1c: { nozzle: 300, bed: 110, chamber: 0, volume: [256, 256, 250] },
+    x1e: { nozzle: 320, bed: 110, chamber: 60, volume: [256, 256, 250] },
     h2d: { nozzle: 350, bed: 120, chamber: 65, volume: [350, 320, 325] },
     h2dpro: { nozzle: 350, bed: 120, chamber: 65, volume: [350, 320, 325] },
     h2c: { nozzle: 350, bed: 120, chamber: 65, volume: [330, 320, 325] },
@@ -48,6 +49,9 @@ export function normalizeModel(value) {
 const MATERIAL_LIMITS = {
     PLA: 260, PETG: 300, ABS: 300, ASA: 300, TPU: 290, PVA: 290, BVOH: 290,
     HIPS: 300, PP: 300, POM: 250, PET: 350, PA: 350, PC: 350, PPA: 350, PPS: 350,
+    // Bambu Studio filament types with bundled Generic profiles (PrintConfig.cpp filament_type). Their profiles top out
+    // at PCTG 255/270, PE and PE-CF 210/220, EVA 210/220, PHA 220/240 (nozzle_temperature / range_high).
+    PCTG: 300, PE: 260, EVA: 250, PHA: 260,
     'SUPPORT-PLA': 290, 'SUPPORT-PA': 350,
 };
 export function normalizeMaterial(value) {
@@ -60,7 +64,7 @@ export function normalizeMaterial(value) {
         return 'SUPPORT-PLA';
     if (/^SUPPORT(?: FOR)? (?:PA(?:\/PET)?|G)(?:\b|$)/.test(material))
         return 'SUPPORT-PA';
-    const match = material.match(/^(PPA|PPS|PETG|PLA|ABS|ASA|TPU|PVA|BVOH|HIPS|PP|POM|PET|PA(?:6|12|HT)?|PC)(?=$|[\s+_/-])/);
+    const match = material.match(/^(PPA|PPS|PETG|PCTG|PLA|ABS|ASA|TPU|PVA|BVOH|HIPS|PHA|PP|POM|PET|PE|EVA|PA(?:6|12|HT)?|PC)(?=$|[\s+_/-])/);
     return match ? match[1].replace(/^PA(?:6|12|HT)$/, 'PA') : undefined;
 }
 function validate(component, value, model, materials, startupPurge = false) {

@@ -86,7 +86,9 @@ function stubFreshSafetyStatus(bambu, model) {
         ams: { tray_now: "254", ams: [
           { id: "0", tray: [{ id: "1", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }, { id: "2", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }] },
           { id: "3", tray: [{ id: "3", tray_type: "PLA", nozzle_temp_min: "190", nozzle_temp_max: "240" }] },
-          { id: "128", tray: [{ id: "0", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }, { id: "3", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }] },
+          // AMS-HT units hold one tray each and are addressed by unit id (128, 131), slot 0.
+          { id: "128", tray: [{ id: "0", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }] },
+          { id: "131", tray: [{ id: "0", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }] },
         ] },
       },
       observation: { source: "mqtt", requestedAt: now, receivedAt: now, identitySource: "report" },
@@ -245,10 +247,13 @@ test("X2D native control accepts Studio device commands but rejects unrelated de
     () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "set_bed_temp", temp: 120 } })),
     /sequence_id/i
   );
-  assert.throws(
-    () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "gcode_line", param: "M104 S300" } })),
-    /limited to AMS/i
-  );
+  // Studio's G-code heater and fan forms pass within the machine ceilings; anything else is refused.
+  for (const param of ["M104 S300\n", "M140 S60\n", "M106 P1 S255 \n", "M620 R3 \n"]) {
+    assert.doesNotThrow(() => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "gcode_line", sequence_id: "g", param } })), param);
+  }
+  for (const param of ["M104 S400", "M140 S130", "M104 T1 S220", "M106 P10 S255", "M106 P1 S300", "G28", "M104 S200\nG28"]) {
+    assert.throws(() => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "gcode_line", param } })), /limited to AMS M620/i, param);
+  }
   assert.throws(
     () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "gcode_file", param: "/tmp/arbitrary.gcode" } })),
     /built-in user calibration/i
@@ -620,8 +625,8 @@ test("printer model safety: schema requires bambu_model, rejects missing/invalid
   assert.ok(airductTool, "set_airduct_mode tool must exist");
   assert.deepEqual(
     airductTool.inputSchema.properties.mode.enum,
-    ["cooling", "heating"],
-    "set_airduct_mode must enumerate cooling/heating"
+    ["cooling", "heating", "full_cooling"],
+    "set_airduct_mode must enumerate Studio's selectable airduct modes"
   );
 
   const rfidTool = listToolsResult.tools.find((t) => t.name === "reread_ams_rfid");
@@ -1193,11 +1198,12 @@ test("H2 ams_mapping2 preserves external spool and HT tray encodings", async () 
     });
 
     assert.ok(publishedPayload?.print, "project_file payload should be published");
-    assert.deepEqual(publishedPayload.print.ams_mapping, [254, 128, 131, 15]);
+    // Studio's encoding: externals -1 in ams_mapping; the H2S's one external holder is 255; AMS-HT units are {unit, 0}.
+    assert.deepEqual(publishedPayload.print.ams_mapping, [-1, 128, 131, 15]);
     assert.deepEqual(publishedPayload.print.ams_mapping2, [
-      { ams_id: 254, slot_id: 254 },
+      { ams_id: 255, slot_id: 0 },
       { ams_id: 128, slot_id: 0 },
-      { ams_id: 128, slot_id: 3 },
+      { ams_id: 131, slot_id: 0 },
       { ams_id: 3, slot_id: 3 },
     ]);
   } finally {
@@ -2528,5 +2534,35 @@ test("tool schema invariant: input schemas use Codex-compatible root objects", a
         `${tool.name} input schema root must not use ${keyword}`
       );
     }
+  }
+});
+
+test("LAN project_file sends the sliced plate's Studio bed string and Studio's calibration defaults", async () => {
+  const threeMfPath = await writeSliced3mfFixture({ name: "h2s-engineering-plate", bedType: "Engineering Plate", plateFilamentIds: [3] });
+  const bambu = new BambuImplementation(async () => true);
+  stubFreshSafetyStatus(bambu, "h2s");
+  const payloads = [];
+  bambu.ftpUpload = async () => {};
+  bambu.getPrinter = async () => ({ publish: async (payload) => { payloads.push(payload); } });
+  try {
+    const print = options => bambu.print3mf("127.0.0.1", "0938TEST0000000", "TEST_TOKEN", {
+      projectName: "h2s-engineering-plate", bambuModel: "h2s", filePath: threeMfPath, plateIndex: 0, useAMS: true, amsSlots: [15], ...options,
+    });
+    await print({});
+    const sent = payloads.at(-1).print;
+    // Studio's bed_type_to_gcode_string of the sliced plate, not the tool's "engineering_plate".
+    assert.equal(sent.bed_type, "eng_plate");
+    // H2S: bed leveling and flow calibration default to auto (bool false, int 2); no nozzle-offset calibration;
+    // vibration off and first-layer inspection on, as Studio's set_print_config sends them.
+    assert.deepEqual(
+      { bed_leveling: sent.bed_leveling, auto_bed_leveling: sent.auto_bed_leveling, flow_cali: sent.flow_cali, extrude_cali_flag: sent.extrude_cali_flag,
+        nozzle_offset_cali: sent.nozzle_offset_cali, vibration_cali: sent.vibration_cali, layer_inspect: sent.layer_inspect, timelapse: sent.timelapse },
+      { bed_leveling: false, auto_bed_leveling: 2, flow_cali: false, extrude_cali_flag: 2, nozzle_offset_cali: 0, vibration_cali: false, layer_inspect: true, timelapse: false });
+    await print({ bedLeveling: true, flowCalibration: false });
+    assert.deepEqual([payloads.at(-1).print.bed_leveling, payloads.at(-1).print.auto_bed_leveling, payloads.at(-1).print.flow_cali, payloads.at(-1).print.extrude_cali_flag], [true, 1, false, 0]);
+    // An explicit bed type is a check against the sliced plate.
+    await assert.rejects(print({ bedType: "textured_plate" }), /bed type/);
+  } finally {
+    fs.rmSync(threeMfPath, { force: true });
   }
 });

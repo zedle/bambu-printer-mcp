@@ -71,3 +71,20 @@ for (const [name, data, expected] of [
     assert.equal(status.temperatures.chamber, expected);
   });
 }
+
+test("dual-nozzle status reports each nozzle from the packed extruder temperatures", async () => {
+  // Recorded H2D report (ha-bambulab mock, MIT): right 245/245 (0x00F500F5), left 47 idle; bed packed 70/70.
+  const { mockReport } = await import("./safety/push-fixtures.mjs");
+  const reportData = mockReport("H2D");
+  const bambu = new BambuImplementation();
+  bambu.printerStore = { waitForInitialReport: async () => reportData };
+  bambu.getPrinter = async () => ({ data: reportData, publish: async () => {} });
+  const status = await bambu.getStatus("127.0.0.1", "094TEST", "TEST_TOKEN");
+  assert.deepEqual(status.temperatures.nozzles, [{ id: 0, side: "right", actual: 245, target: 245 }, { id: 1, side: "left", actual: 47, target: 0 }]);
+  // Without the legacy fields the packed values are used.
+  const packedOnly = { ...reportData, bed_temper: undefined, bed_target_temper: undefined, nozzle_temper: undefined, nozzle_target_temper: undefined };
+  bambu.printerStore = { waitForInitialReport: async () => packedOnly };
+  const packed = await bambu.getStatus("127.0.0.1", "094TEST", "TEST_TOKEN");
+  assert.deepEqual(packed.temperatures.bed, { actual: 70, target: 70 });
+  assert.deepEqual(packed.temperatures.nozzle, { actual: 245, target: 245 });
+});

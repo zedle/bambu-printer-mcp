@@ -13,6 +13,7 @@
  * P2S: https://blog.bambulab.com/the-icon-redefined-meet-the-p2s-a-completely-reengineered-version-of-the-ultra-productive-p1-series/
  * X2D: https://csm.bblcdn.com/hub/7c58718aaa2e40edab56efb87419a96a.pdf
  * X1-family bed caps use 110 C: 120 C requires verified 110 V supply, unavailable here.
+ * Build heights follow Bambu Studio's machine profiles (printable_height 250 on the P1 and X1 series).
  * A zero chamber cap means no supported active chamber heater, not ambient temperature.
  */
 export declare const MACHINE_LIMITS: Readonly<Record<string, {

@@ -443,7 +443,8 @@ export function validateBambuNativeControlMessage(messageJson: string): {
       throw new Error(`X2D native ${command} requires a sequence_id string.`);
     }
     const temperature = Number(command === "set_bed_temp" ? print.temp : print.target_temp);
-    const maximum = command === "set_bed_temp" ? 120 : 300;
+    // The highest machine ceilings (H2 series); each model's own limit is checked before a command is built.
+    const maximum = command === "set_bed_temp" ? 120 : 350;
     if (!Number.isInteger(temperature) || temperature < 0 || temperature > maximum) {
       throw new Error(`X2D native ${command} temperature must be an integer from 0 to ${maximum}°C.`);
     }
@@ -494,8 +495,14 @@ export function validateBambuNativeControlMessage(messageJson: string): {
 
   if (command === "gcode_line") {
     const param = typeof print.param === "string" ? print.param.trim() : "";
-    if (!/^M620\s+[CRP]\d+\s*$/i.test(param)) {
-      throw new Error("X2D native gcode_line is limited to AMS M620 C/R/P commands.");
+    // Studio's G-code controls (publish_gcode): AMS M620 C/R/P, and on printers without the JSON forms the heaters
+    // (M104 S / M140 S) and fans (M106 P1-3 S0-255). Heater targets get each model's ceiling before they're built.
+    const heater = param.match(/^M(104|140)\s+S(\d+)$/i);
+    const fan = param.match(/^M106\s+P([123])\s+S(\d+)$/i);
+    if (!/^M620\s+[CRP]\d+$/i.test(param) &&
+        !(heater && Number(heater[2]) <= (heater[1] === "140" ? 120 : 350)) &&
+        !(fan && Number(fan[2]) <= 255)) {
+      throw new Error("Native gcode_line is limited to AMS M620 C/R/P, M104/M140 S and M106 P1-3 S commands.");
     }
     return { messageJson: JSON.stringify(parsed), command };
   }

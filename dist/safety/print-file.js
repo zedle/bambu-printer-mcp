@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readBoundedPrintFile, loadSafe3mfArchive } from './archive.js';
 import { MACHINE_LIMITS, normalizeMaterial, normalizeModel, validateStartupPurgeTemperature, validateTemperature } from './limits.js';
+import { extruderCount, physicalExtruderMap } from './models.js';
 const NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
 const fail = (message) => { throw new Error(`Print safety: ${message}`); };
 function list(value) {
@@ -433,13 +434,13 @@ export async function inspectPrintFile(filePath, options) {
             const code = command[1].toUpperCase() + String(Number(base)) + (subcode === undefined ? '' : '.' + subcode);
             const argumentsText = line.slice(command[0].length).trim();
             commandCount++;
-            // H2C timelapse capture (time_lapse_gcode): M9711 M<timelapse type> E<extruder> U V Z S C O T.
-            // Its M is a parameter, not a second command; it sets no heater target.
-            const timelapseCapture = code === 'M9711' && model === 'h2c';
+            // Timelapse capture (time_lapse_gcode on H2D, H2D Pro, H2C and X2D, GCode.cpp): M9711 M<timelapse type>
+            // E<extruder> [X Y | U V] Z S C O T. Its M is a parameter, not a second command; it sets no heater target.
+            const timelapseCapture = code === 'M9711' && ['h2d', 'h2dpro', 'h2c', 'x2d'].includes(model);
             if (timelapseCapture) {
                 const args = parameters(argumentsText);
-                if ([...args.keys()].some(key => !'MEUVZSCOT'.includes(key)))
-                    fail('unsupported H2C timelapse capture parameters');
+                if ([...args.keys()].some(key => !'MEXYUVZSCOT'.includes(key)))
+                    fail('unsupported timelapse capture parameters');
                 continue;
             }
             if (!['M117', 'M118', 'M1002', 'M1006', 'M900', 'M970', 'M983.1', 'G383'].includes(code) && /[GM]\s*\d/i.test(argumentsText))
@@ -673,8 +674,27 @@ export async function inspectPrintFile(filePath, options) {
         return values;
     };
     const filamentMap = perFilament('filament_map')?.map(Number);
+    // Studio compares sliced extruder i with physical extruder physical_extruder_map[i] (["1","0"] on every dual-nozzle
+    // Bambu profile). A declared map must describe this model's extruders; a missing one falls back to Studio's.
+    const declaredExtruderMap = metadataValues(metadata, ['physical_extruder_map']);
+    const extruderMap = declaredExtruderMap.length ? consistent(declaredExtruderMap, value => {
+        const values = list(value);
+        return values.length && values.every(v => /^\d+$/.test(v)) ? values.map(Number) : undefined;
+    }, 'physical extruder map') : undefined;
+    if (extruderMap && nozzleDiameters.length !== extruderCount(model))
+        fail('sliced nozzle count does not match this printer model');
+    let physicalMap;
+    try {
+        physicalMap = nozzleDiameters.length === extruderCount(model) ? physicalExtruderMap(model, extruderMap) : undefined;
+    }
+    catch (error) {
+        return fail(error instanceof Error ? error.message : String(error));
+    }
     return { model, nozzleDiameters, materials, usedFilamentPositions: [...used].sort((a, b) => a - b), plateInternalPath, sha256, maxNozzleTemperature, maxBedTemperature, maxChamberTemperature, bedType, selectsAms, nozzleTypes, nozzleFlows,
         ...(filamentMap && filamentMap.every(value => Number.isInteger(value) && value >= 1 && value <= nozzleDiameters.length) ? { filamentMap } : {}),
+        ...(physicalMap ? { physicalExtruderMap: physicalMap } : {}),
         ...(perFilament('filament_ids') ? { filamentIds: perFilament('filament_ids') } : {}),
-        ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {}) };
+        ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {}),
+        ...(perFilament('filament_type') ? { filamentTypes: perFilament('filament_type') } : {}),
+        ...(perFilament('filament_settings_id') ? { filamentNames: perFilament('filament_settings_id').map(name => name.replace(/\s*@.*$/, '')) } : {}) };
 }
