@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { nextSequenceId } from "./sequence-id.js";
+import { assertCommandAccepted, commandReplyWaitMs, commandSequenceId, matchCommandReply, type CommandReply } from "./command-reply.js";
 
 const FRAME_MAGIC = 0x52424a50;
 const FRAME_HEADER_SIZE = 16;
@@ -423,6 +424,57 @@ export class BambuNetworkBridge {
     }
     if (code !== 0) throw new Error(`Bambu's network plugin refused the printer command (send_message returned ${code}).`);
     return code;
+  }
+
+  /**
+   * sendPrinterMessage, then wait (at most `replyMs`, default BAMBU_COMMAND_REPLY_MS) for the printer's reply to
+   * the command's sequence_id, which the plugin hands back as an on_message (cloud) or on_local_message (LAN)
+   * event, as Bambu Studio matches its command acks. A refusal (result "fail", a non-zero err_code) throws; no reply
+   * within the wait is not an error. `waitedMs` is 0 when nothing was awaited.
+   */
+  async sendPrinterCommand(devId: string, messageJson: string, options: BambuNetworkBridgeOptions & { qos?: number; replyMs?: number } = {}):
+    Promise<{ code: number; reply?: CommandReply; waitedMs: number }> {
+    const sequenceId = commandSequenceId(messageJson);
+    const waitMs = options.replyMs ?? commandReplyWaitMs();
+    if (!sequenceId || waitMs <= 0) return { code: await this.sendPrinterMessage(devId, messageJson, options), waitedMs: 0 };
+    await this.ensurePrinterChannel(devId, options);
+    // The host queues every plugin event until it is polled; skip the backlog so the reply turns up within the wait.
+    await this.drainEvents(options);
+    const code = await this.sendPrinterMessage(devId, messageJson, options);
+    const reply = await this.awaitPrinterReply(devId, sequenceId, waitMs, options);
+    assertCommandAccepted(reply);
+    return { code, reply, waitedMs: reply ? 0 : waitMs };
+  }
+
+  private async pollEvents(options: BambuNetworkBridgeOptions, limit = 1024): Promise<Array<{ name?: string; payload?: Record<string, unknown> }>> {
+    const polled = await this.request("bridge.poll_events", { limit }, options) as { events?: unknown };
+    return Array.isArray(polled?.events) ? polled.events as Array<{ name?: string; payload?: Record<string, unknown> }> : [];
+  }
+
+  private async drainEvents(options: BambuNetworkBridgeOptions): Promise<void> {
+    try {
+      for (let round = 0; round < 50; round++) {
+        if ((await this.pollEvents(options)).length < 1024) return;
+      }
+    } catch { /* best effort: a reply may then take longer to find */ }
+  }
+
+  /** The printer's reply to `sequenceId` among the plugin's message events, polled until `waitMs` runs out. */
+  async awaitPrinterReply(devId: string, sequenceId: string, waitMs: number, options: BambuNetworkBridgeOptions = {}): Promise<CommandReply | undefined> {
+    const deadline = Date.now() + waitMs;
+    while (true) {
+      let events: Array<{ name?: string; payload?: Record<string, unknown> }>;
+      try { events = await this.pollEvents(options); } catch { return undefined; }
+      for (const event of events) {
+        if (event.name !== "on_message" && event.name !== "on_local_message") continue;
+        if (event.payload?.dev_id !== undefined && event.payload.dev_id !== devId) continue;
+        const reply = matchCommandReply(event.payload?.msg, sequenceId);
+        if (reply) return reply;
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) return undefined;
+      await new Promise(resolve => setTimeout(resolve, Math.min(250, left)));
+    }
   }
 
   /**

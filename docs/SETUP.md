@@ -107,6 +107,7 @@ BLENDER_MCP_TIMEOUT_MS=120000
 | `NOZZLE_DIAMETER` | `0.4` | No | Nozzle diameter in mm. Used to select the correct model/nozzle machine preset. |
 | `BAMBU_NOZZLE_TYPE` | model preset's stock nozzle | No | Installed nozzle for slicing: `stainless_steel`, `hardened_steel`, `tungsten_carbide`, or `brass`. Set it if you replaced the stock nozzle; printing requires the job's nozzle type to match the printer's report. |
 | `BAMBU_DISPATCH_CHECK_MS` | `15000` | No | How long to watch the printer's reports after an MQTT print command to confirm it started or was refused (0 to 60000; 0 skips the check). |
+| `BAMBU_COMMAND_REPLY_MS` | `3000` | No | How long a control command (pause, resume, stop, clear errors, speed, light, fans, heating, AMS, skip objects) waits for the printer's reply to its sequence id (0 to 30000; 0 skips the wait). The result's `printerReply` holds the printer's `result` / `reason` / `err_code`, or `null` when none came; a refusal is an error. |
 | `SLICER_TYPE` | `bambustudio` | No | `bambustudio`, `orcaslicer-bambulab` (FULU), `orcaslicer`, `prusaslicer`, `cura`, or `slic3r` |
 | `SLICER_PATH` | Platform default for the selected slicer | No | Full path to the slicer executable. `BAMBU_STUDIO_PATH` supplies the BambuStudio default only |
 | `SLICER_PROFILE` | | No | Process profile/config file; `BAMBU_SLICER_PROFILE` takes precedence. Does not replace the required machine preset for BambuStudio, Orca, or FULU |

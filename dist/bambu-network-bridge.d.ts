@@ -1,3 +1,4 @@
+import { type CommandReply } from "./command-reply.js";
 export declare const BRIDGE_PRINT_METHODS: Set<string>;
 /**
  * A print request reached the bridge, but no answer came back (timeout, bridge exit). The plugin may still upload
@@ -75,6 +76,24 @@ export declare class BambuNetworkBridge {
     sendPrinterMessage(devId: string, messageJson: string, options?: BambuNetworkBridgeOptions & {
         qos?: number;
     }): Promise<number>;
+    /**
+     * sendPrinterMessage, then wait (at most `replyMs`, default BAMBU_COMMAND_REPLY_MS) for the printer's reply to
+     * the command's sequence_id, which the plugin hands back as an on_message (cloud) or on_local_message (LAN)
+     * event, as Bambu Studio matches its command acks. A refusal (result "fail", a non-zero err_code) throws; no reply
+     * within the wait is not an error. `waitedMs` is 0 when nothing was awaited.
+     */
+    sendPrinterCommand(devId: string, messageJson: string, options?: BambuNetworkBridgeOptions & {
+        qos?: number;
+        replyMs?: number;
+    }): Promise<{
+        code: number;
+        reply?: CommandReply;
+        waitedMs: number;
+    }>;
+    private pollEvents;
+    private drainEvents;
+    /** The printer's reply to `sequenceId` among the plugin's message events, polled until `waitMs` runs out. */
+    awaitPrinterReply(devId: string, sequenceId: string, waitMs: number, options?: BambuNetworkBridgeOptions): Promise<CommandReply | undefined>;
     /**
      * Open the cloud channel to a printer as Bambu Studio does, once per agent: sign-in check, cloud connection,
      * callbacks, machine selection, subscription, the printer's first messages, then the certificates the plugin

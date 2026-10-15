@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFreshPrinterStatus } from "../safety/printer-state.js";
 import { nextSequenceId } from "../sequence-id.js";
+import { assertCommandAccepted, commandReplyWaitMs, matchCommandReply, withCommandReply, withPrinterReplyField, type CommandReply } from "../command-reply.js";
 import { assertAmsDryingSupported, buildAmsDryingCommand, hexFlagBit, normalizeAmsDryingRequest } from "../ams-drying.js";
 import fs from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
@@ -314,9 +315,90 @@ function resolveModelName(data: Record<string, any>): string {
   );
 }
 
-async function invokeWithoutAck(printer: BambuClient, command: { invoke(client: BambuClient): Promise<void> }) {
-  await command.invoke(printer);
+type BambuNodeCommand = { invoke(client: BambuClient): Promise<void> };
+
+/**
+ * The message a bambu-node command publishes, numbered from this server's sequence-id range instead of
+ * bambu-node's own counter (which starts at 1 and would mix with nobody's replies).
+ */
+async function bambuNodeMessage(command: BambuNodeCommand): Promise<Record<string, any>> {
+  let message: Record<string, any> | undefined;
+  await command.invoke({ publish: async (payload: unknown) => { message = typeof payload === "string" ? JSON.parse(payload) : payload as Record<string, any>; } } as unknown as BambuClient);
+  const section = message && Object.keys(message).find(key => message![key] && typeof message![key] === "object");
+  if (!message || !section) throw new Error("bambu-node built no printer command.");
+  return { ...message, [section]: { ...message[section], sequence_id: nextSequenceId() } };
+}
+
+/** Publish a command without waiting for its reply (print starts, whose outcome the dispatch watcher judges). */
+async function invokeWithoutAck(printer: BambuClient, command: BambuNodeCommand) {
+  await printer.publish(await bambuNodeMessage(command));
   await sleep(COMMAND_SETTLE_MS);
+}
+
+/**
+ * Pending command replies per printer client, keyed by sequence_id (Bambu Studio's MachineObject matches its
+ * command acks the same way). One report listener per client resolves them.
+ */
+const pendingReplies = new WeakMap<object, Map<string, (reply: CommandReply) => void>>();
+function pendingRepliesFor(printer: any): Map<string, (reply: CommandReply) => void> {
+  let pending = pendingReplies.get(printer);
+  if (!pending) {
+    const waiting = new Map<string, (reply: CommandReply) => void>();
+    pending = waiting;
+    pendingReplies.set(printer, waiting);
+    printer.on("rawMessage", (topic: string, payload: Buffer) => {
+      if (!waiting.size || typeof topic !== "string" || !topic.endsWith("/report")) return;
+      let parsed: unknown;
+      try { parsed = JSON.parse(payload.toString()); } catch { return; }
+      for (const [sequenceId, resolve] of waiting) {
+        const reply = matchCommandReply(parsed, sequenceId);
+        if (reply) { waiting.delete(sequenceId); resolve(reply); }
+      }
+    });
+  }
+  return pending;
+}
+
+/**
+ * Send a control command and wait, at most BAMBU_COMMAND_REPLY_MS (default 3 s), for the printer's reply to its
+ * sequence_id. A refusal (result "fail", a non-zero err_code) throws; no reply is not an error (older firmware
+ * doesn't answer every command). `waitedMs` is 0 when no reply could be awaited (a client without events).
+ */
+async function sendCommand(printer: any, command: Record<string, any> | BambuNodeCommand): Promise<{ reply?: CommandReply; waitedMs: number }> {
+  const message = typeof (command as BambuNodeCommand).invoke === "function"
+    ? await bambuNodeMessage(command as BambuNodeCommand)
+    : command as Record<string, any>;
+  const section = Object.keys(message).find(key => message[key] && typeof message[key] === "object");
+  if (!section) throw new Error("Malformed printer command.");
+  if (message[section].sequence_id === undefined) message[section] = { ...message[section], sequence_id: nextSequenceId() };
+  const sequenceId = String(message[section].sequence_id);
+  const waitMs = commandReplyWaitMs();
+  if (waitMs === 0 || typeof printer?.on !== "function") {
+    await printer.publish(message);
+    await sleep(COMMAND_SETTLE_MS);
+    return { waitedMs: 0 };
+  }
+  const pending = pendingRepliesFor(printer);
+  let timer: NodeJS.Timeout | undefined;
+  const replied = new Promise<CommandReply | undefined>(resolve => {
+    pending.set(sequenceId, resolve);
+    timer = setTimeout(() => resolve(undefined), waitMs);
+  });
+  try {
+    await printer.publish(message);
+    const reply = await replied;
+    assertCommandAccepted(reply);
+    return { reply, waitedMs: reply ? 0 : waitMs };
+  } finally {
+    clearTimeout(timer);
+    pending.delete(sequenceId);
+  }
+}
+
+/** A dispatch callback's result (a signed command) may carry the printer's reply; copy it onto this result. */
+function withDispatchedReply<T extends Record<string, unknown>>(result: T, dispatched: unknown): T {
+  const field = dispatched && typeof dispatched === "object" ? (dispatched as { printerReply?: unknown }).printerReply : undefined;
+  return field === undefined ? result : withPrinterReplyField(result, field as any);
 }
 
 function getPrinterKey(host: string, serial: string, token: string): string {
@@ -1076,9 +1158,9 @@ export class BambuImplementation {
 
     try {
       if (dispatch) return await dispatch();
-      else await invokeWithoutAck(printer!, new UpdateStateCommand({ state: "stop" }));
+      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "stop" }));
       this.checkedJobs.delete(`${host}\n${serial}`);
-      return { status: "success", message: "Cancel command sent successfully." };
+      return withCommandReply({ status: "success", message: "Cancel command sent successfully." }, sent.reply, sent.waitedMs);
     } catch (error) {
       throw new Error(`Failed to cancel print: ${(error as Error).message}`);
     }
@@ -1088,8 +1170,8 @@ export class BambuImplementation {
     const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
     try {
       if (dispatch) return await dispatch();
-      else await invokeWithoutAck(printer!, new UpdateStateCommand({ state: "pause" }));
-      return { status: "success", message: "Pause command sent successfully." };
+      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "pause" }));
+      return withCommandReply({ status: "success", message: "Pause command sent successfully." }, sent.reply, sent.waitedMs);
     } catch (error) {
       throw new Error(`Failed to pause print: ${(error as Error).message}`);
     }
@@ -1112,9 +1194,10 @@ export class BambuImplementation {
       await beforeDispatch();
       const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
       assertActive();
-      if (dispatch) await dispatch(assertActive, beforeDispatch);
-      else await invokeWithoutAck(printer!, new UpdateStateCommand({ state: "resume" }));
-      return { status: "success", message: "Resume command sent successfully." };
+      const result = { status: "success", message: "Resume command sent successfully." };
+      if (dispatch) return withDispatchedReply(result, await dispatch(assertActive, beforeDispatch));
+      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "resume" }));
+      return withCommandReply(result, sent.reply, sent.waitedMs);
     });
   }
 
@@ -1140,11 +1223,16 @@ export class BambuImplementation {
       const command = buildCleanPrintError(freshRaw);
       const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
       assertActive();
-      if (dispatch) await dispatch(assertActive, beforeDispatch, command);
-      else await printer!.publish(command);
+      const result = { status: "success", message: "Confirmed HMS clear command sent. The next print requires acknowledgment of these cleared codes.", cleared_codes: codes };
+      if (dispatch) {
+        const dispatched = await dispatch(assertActive, beforeDispatch, command);
+        this.clearedErrors.set(serial, codes);
+        await sleep(COMMAND_SETTLE_MS);
+        return withDispatchedReply(result, dispatched);
+      }
+      const sent = await sendCommand(printer!, command);
       this.clearedErrors.set(serial, codes);
-      await sleep(COMMAND_SETTLE_MS);
-      return { status: "success", message: "Confirmed HMS clear command sent. The next print requires acknowledgment of these cleared codes.", cleared_codes: codes };
+      return withCommandReply(result, sent.reply, sent.waitedMs);
     });
   }
 
@@ -1163,21 +1251,20 @@ export class BambuImplementation {
       throw new Error("Print speed mode must be one of: silent, standard, sport, ludicrous, 1, 2, 3, 4.");
     }
 
-    await printer.publish({
+    const sent = await sendCommand(printer, {
       print: {
         command: "print_speed",
         param: String(mode),
         sequence_id: nextSequenceId(),
       },
     });
-    await sleep(COMMAND_SETTLE_MS);
     const names = ["", "silent", "standard", "sport", "ludicrous"];
-    return {
+    return withCommandReply({
       status: "success",
       message: `Print speed command sent for ${names[mode]}.`,
       mode,
       label: names[mode],
-    };
+    }, sent.reply, sent.waitedMs);
   }
 
   async setAirductMode(host: string, serial: string, token: string, mode: string): Promise<any> {
@@ -1187,7 +1274,7 @@ export class BambuImplementation {
       throw new Error("Airduct mode must be one of: cooling, heating.");
     }
 
-    await printer.publish({
+    const sent = await sendCommand(printer, {
       print: {
         command: "set_airduct",
         modeId: normalizedMode === "cooling" ? 0 : 1,
@@ -1195,12 +1282,11 @@ export class BambuImplementation {
         sequence_id: nextSequenceId(),
       },
     });
-    await sleep(COMMAND_SETTLE_MS);
-    return {
+    return withCommandReply({
       status: "success",
       message: `Airduct mode command sent for ${normalizedMode}.`,
       mode: normalizedMode,
-    };
+    }, sent.reply, sent.waitedMs);
   }
 
   async rereadAmsRfid(
@@ -1221,7 +1307,7 @@ export class BambuImplementation {
     }
 
     const printer = await this.getPrinter(host, serial, token);
-    await printer.publish({
+    const sent = await sendCommand(printer, {
       print: {
         command: "ams_get_rfid",
         ams_id: normalizedAmsId,
@@ -1229,13 +1315,12 @@ export class BambuImplementation {
         sequence_id: nextSequenceId(),
       },
     });
-    await sleep(COMMAND_SETTLE_MS);
-    return {
+    return withCommandReply({
       status: "success",
       message: `AMS RFID re-read command sent for AMS ${normalizedAmsId} slot ${normalizedSlotId}.`,
       ams_id: normalizedAmsId,
       slot_id: normalizedSlotId,
-    };
+    }, sent.reply, sent.waitedMs);
   }
 
   async setTemperature(
@@ -1286,9 +1371,10 @@ export class BambuImplementation {
       }
       const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
       assertActive();
-      if (dispatch) await dispatch(heater, targetTemperature, assertActive, beforeDispatch);
-      else await invokeWithoutAck(printer!, new GCodeLineCommand({ gcodes: [gcode] }));
-      return { status: "success", message: `Temperature command sent for ${normalizedComponent}.`, command: gcode };
+      const result = { status: "success", message: `Temperature command sent for ${normalizedComponent}.`, command: gcode };
+      if (dispatch) return withDispatchedReply(result, await dispatch(heater, targetTemperature, assertActive, beforeDispatch));
+      const sent = await sendCommand(printer!, new GCodeLineCommand({ gcodes: [gcode] }));
+      return withCommandReply(result, sent.reply, sent.waitedMs);
     };
     if (targetTemperature === 0) {
       cancelPendingPrinterOperations(host, serial);
@@ -1324,16 +1410,16 @@ export class BambuImplementation {
       throw new Error("Fan speed must be between 0 and 100 percent.");
     }
 
-    await invokeWithoutAck(
+    const sent = await sendCommand(
       printer,
       new UpdateFanCommand({ fan: fanId as any, speed: targetSpeed as any })
     );
-    return {
+    return withCommandReply({
       status: "success",
       message: `Fan speed command sent for fan ${fanId}.`,
       fan: fanId,
       speed: targetSpeed,
-    };
+    }, sent.reply, sent.waitedMs);
   }
 
   async setLight(
@@ -1355,19 +1441,19 @@ export class BambuImplementation {
       throw new Error("Light mode must be one of: on, off, flashing.");
     }
 
-    await invokeWithoutAck(
+    const sent = await sendCommand(
       printer,
       new UpdateLightCommand({
         light: normalizedLight as any,
         mode: normalizedMode as any,
       })
     );
-    return {
+    return withCommandReply({
       status: "success",
       message: `Light command sent for ${normalizedLight}.`,
       light: normalizedLight,
       mode: normalizedMode,
-    };
+    }, sent.reply, sent.waitedMs);
   }
 
   /** Tool arguments: action, ams_id and, to start, filament, temperature, duration_hours (see normalizeAmsDryingRequest). */
@@ -1376,16 +1462,15 @@ export class BambuImplementation {
     // Start needs a fresh report: Studio only offers drying when the printer and the unit support it.
     if (request.action === "start") assertAmsDryingSupported((await this.getSafetyStatus(host, serial, token))?.raw, request);
     const printer = await this.getPrinter(host, serial, token);
-    await printer.publish(buildAmsDryingCommand(request, nextSequenceId()));
-    await sleep(COMMAND_SETTLE_MS);
+    const sent = await sendCommand(printer, buildAmsDryingCommand(request, nextSequenceId()));
 
     const label = request.action === "start" ? "started" : "stopped";
-    return {
+    return withCommandReply({
       status: "success",
       message: `AMS drying ${label} for AMS ${request.amsId}.`,
       action: request.action,
       ams_id: request.amsId,
-    };
+    }, sent.reply, sent.waitedMs);
   }
 
   async skipObjects(
@@ -1403,20 +1488,19 @@ export class BambuImplementation {
       throw new Error("At least one non-negative object id is required.");
     }
 
-    await printer.publish({
+    const sent = await sendCommand(printer, {
       print: {
         sequence_id: nextSequenceId(),
         command: "skip_objects",
         obj_list: normalizedObjectIds,
       },
     });
-    await sleep(COMMAND_SETTLE_MS);
 
-    return {
+    return withCommandReply({
       status: "success",
       message: "Skip objects command sent.",
       object_ids: normalizedObjectIds,
-    };
+    }, sent.reply, sent.waitedMs);
   }
 
   async getFiles(host: string, serial: string, token: string) {

@@ -45,6 +45,7 @@ import type { ThreeMFAmsRequirements } from "./types.js";
 import { BambuImplementation, assertDirectPrintSupported, dispatchStatusLabel, unsignedLanPrintAllowed, withHmsWarnings } from "./printers/bambu.js";
 import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
+import { withCommandReply } from "./command-reply.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
 import { nextSequenceId } from "./sequence-id.js";
@@ -3385,8 +3386,9 @@ class BambuPrinterMCPServer {
         await execution.beforeDispatch?.();
         execution.signal?.throwIfAborted();
         const devId = String(args?.dev_id || bambuSerial || DEFAULT_BAMBU_DEV_ID).trim();
-        await this.bambuNetwork.sendPrinterMessage(devId, validated.messageJson, { qos: options.qos ?? 1 });
-        return { status: "success", command: validated.command, transport: "bambu_network" };
+        const sent = await this.bambuNetwork.sendPrinterCommand(devId, validated.messageJson, { qos: options.qos ?? 1 });
+        return withCommandReply({ status: "success", command: validated.command, transport: "bambu_network",
+          message: `${validated.command} sent through Bambu's signed cloud path.` }, sent.reply, sent.waitedMs);
       };
       const requestedTemplateDir =
         typeof args?.template_dir === "string" && args.template_dir.trim().length > 0
