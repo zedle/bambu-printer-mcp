@@ -198,7 +198,9 @@ const isMaintenanceReminder = (attr, code) => attr === MAINTENANCE_REMINDER_ATTR
 // Malformed entries and unknown severities still fail closed.
 function validateErrors(raw, requireIdle) {
     const state = typeof raw.gcode_state === "string" ? raw.gcode_state.toUpperCase() : "UNKNOWN";
-    if (requireIdle && !["IDLE", "FINISH"].includes(state))
+    // FAILED is how Bambu firmware reports a stopped or failed job; the printer is idle and takes a new job (as from
+    // Bambu Studio). Like FINISH it may leave a part on the bed, so it goes through the same bed-clearance check.
+    if (requireIdle && !["IDLE", "FINISH", "FAILED"].includes(state))
         throw new Error(`Printer state ${state} is not safely idle.`);
     if (!requireIdle && !["IDLE", "FINISH", "RUNNING", "PAUSE"].includes(state))
         throw new Error(`Printer state ${state} is unknown or failed.`);

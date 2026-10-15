@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- Accept a printer in `FAILED` (how Bambu firmware reports a stopped or failed job) as idle for a new print, as Bambu Studio does. Like `FINISH` it goes through finished-bed clearance.
 - Send Bambu Studio's cloud mapping fields with BambuNetwork prints, built from the checked tray mapping: `ams_mapping` with external trays as -1, `ams_mapping2` as {ams_id, slot_id} (external {254|255, 0}), and `ams_mapping_info` with type, id, colours and the task nozzle from the file's `filament_map`. Without them the printer ran AMS jobs as `use_ams: false`.
 - Recognise Studio's Engineering and Cool plate ids (`eng_plate`, `pc_plate`) next to their display names, so files for those plates no longer fail inspection as contradictory.
 - Open the printer's cloud channel before a cloud `start_print` as well (subscription, version, certificates): without it the plugin fails the job with -3140 (`ENC_FLAG_NOT_READY`).

@@ -392,7 +392,7 @@ export class BambuImplementation {
         }
     }
     finishedJobIdentity(status) {
-        return status.raw.gcode_state === "FINISH" ? JSON.stringify([status.raw.gcode_file, status.raw.subtask_name, status.raw.task_id, status.raw.subtask_id]) : undefined;
+        return ["FINISH", "FAILED"].includes(status.raw.gcode_state) ? JSON.stringify([status.raw.gcode_file, status.raw.subtask_name, status.raw.task_id, status.raw.subtask_id]) : undefined;
     }
     async confirmPrintPreflight(serial, status, inspection) {
         const finishedJob = this.finishedJobIdentity(status);
@@ -400,7 +400,7 @@ export class BambuImplementation {
         await this.confirmHardwareAction(`Start a checked print on ${inspection.model.toUpperCase()} (${serial})? Nozzles: ${inspection.nozzleDiameters.join(", ")} mm. ` +
             `Materials: ${inspection.materials.join(", ")}. Peak targets: nozzle ${inspection.maxNozzleTemperature}°C, bed ${inspection.maxBedTemperature}°C, chamber ${inspection.maxChamberTemperature}°C. ` +
             `File SHA-256: ${inspection.sha256}. Confirm the physical spool labels and that the build plate is clear.` +
-            (finishedJob !== undefined ? " The printer reports FINISH: remove the previous part and debris before confirming." : "") +
+            (finishedJob !== undefined ? ` The printer reports ${status.raw.gcode_state}: remove the previous part and debris before confirming.` : "") +
             (cleared ? ` Previously cleared hardware codes: ${cleared.join(", ")}. Confirm their physical causes have been resolved.` : ""), finishedJob !== undefined || !!cleared);
         return finishedJob;
     }

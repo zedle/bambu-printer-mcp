@@ -81,7 +81,9 @@ test('reported type, flow, absent or abnormal multi nozzle state cannot contradi
   for(const stat of [1,2,4]) assert.throws(() => check(fresh({device:{nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat}]}}})), /nozzle|reliable|abnormal/i);
 });
 test('rejects busy, failed, missing or unknown states while allowing IDLE and FINISH', () => {
-  for(const gcode_state of ['RUNNING','PAUSE','PREPARE','SLICING','FAILED','OFFLINE','UNKNOWN',undefined]) assert.throws(() => check(fresh({gcode_state})), /state|idle/i);
+  for(const gcode_state of ['RUNNING','PAUSE','PREPARE','SLICING','OFFLINE','UNKNOWN',undefined]) assert.throws(() => check(fresh({gcode_state})), /state|idle/i);
+  // A stopped or failed job leaves the printer idle (FAILED), ready for a new job like FINISH.
+  for(const gcode_state of ['IDLE','FINISH','FAILED']) assert.doesNotThrow(() => check(fresh({gcode_state})), gcode_state);
   assert.doesNotThrow(() => check(fresh({gcode_state:'FINISH'})));
 });
 test('requires explicit clean print error and valid HMS severity, but permits informative HMS', () => {

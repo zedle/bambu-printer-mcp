@@ -728,6 +728,16 @@ test("unattended by default: checked prints, error clears and heating run withou
   assert.deepEqual(prompts, []);
 });
 
+test("a stopped job (FAILED) asks for bed clearance like FINISH when confirmation is on", async (t) => {
+  const file = await fixture(t);
+  const { printer, events } = isolatedPrinter(safetyStatus({ state: "FAILED", subtask_name: "stopped-part" }));
+  const prompts = [];
+  printer.confirm = async message => { prompts.push(message); return false; };
+  await assert.rejects(printer.print3mf(host, serial, token, { projectName: "after-stop", filePath: file, bambuModel: "p1s", useAMS: false }), /confirmation.*declined/i);
+  assert.match(prompts[0], /FAILED.*remove the previous part/i);
+  assertNoDispatch(events);
+});
+
 test("bed clearance cannot authorize a different finished job", async (t) => {
   const file = await fixture(t);
   const { printer, events } = isolatedPrinter(safetyStatus({ state: "FINISH", subtask_name: "previous-part" }));
