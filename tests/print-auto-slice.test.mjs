@@ -55,7 +55,8 @@ Server.prototype.elicitInput = function (params, options) {
   return elicitInput.call(this, params, options);
 };
 ${realSlice ? '' : `STLManipulator.prototype.sliceSTL = async function (file, _type, _path, _profile, _progress, _preset, options) {
-  log({ action: 'slice', file, ...(options?.nozzleType ? { nozzleType: options.nozzleType } : {}) });
+  log({ action: 'slice', file, ...(options?.nozzleType ? { nozzleType: options.nozzleType } : {}),
+    ...(process.env.TEST_LOG_SLICE_DETAIL ? { preset: _preset, bedType: options?.bedType, extruderNozzles: options?.extruderNozzles, filamentMap: options?.filamentMap, filamentSources: options?.filamentSources, reportedExtruders: options?.reportedExtruders } : {}) });
   ${sliceSucceeds ? `return ${JSON.stringify(slicedOutput)};` : `throw new Error(${JSON.stringify(failure)});`}
 };`}
 BambuImplementation.prototype.ftpUpload = async function (_host, _token, file, remote) { log({ action: 'upload', file, remote, sha256: createHash('sha256').update(fs.readFileSync(file)).digest('hex') }); };
@@ -150,6 +151,15 @@ test("print_3mf uploads only the generated file after successful auto-slicing", 
   assert.notEqual(upload.file, server.slicedOutput, "dispatch must upload a private checked copy");
   assert.equal(upload.sha256, createHash("sha256").update(fs.readFileSync(server.slicedOutput)).digest("hex"), "only generated, inspected bytes may be uploaded");
   assert.equal(events.filter((event) => event.action === "publish").length, 1);
+});
+
+test("print_3mf auto-slices an H2D Pro job with Bambu Studio's H2D Pro machine preset", async (t) => {
+  const server = await start(t, { env: { TEST_LOG_SLICE_DETAIL: "1" } });
+  const project = await server.makeProject("unsliced.3mf");
+  const result = await server.print(project, { bambu_model: "h2dpro" });
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent.message, failure);
+  assert.deepEqual(server.events(), [{ action: "slice", file: project, preset: "Bambu Lab H2D Pro 0.4 nozzle", bedType: "textured_plate" }]);
 });
 
 test("human print confirmation waits ten minutes by default instead of the SDK's 60 seconds", async (t) => {
