@@ -172,6 +172,17 @@ export function buildCleanPrintError(raw: Record<string, any> | undefined, seque
   return { print: { command: "clean_print_error", sequence_id: sequenceId, subtask_id: String(raw?.subtask_id ?? ""), print_error: Number(raw?.print_error ?? 0) } };
 }
 
+/**
+ * Bambu Studio's acknowledgement that the error's dialog was closed (MachineObject::command_clean_print_error_uiop),
+ * sent with clean_print_error when the person confirms the error (DeviceErrorDialog DBL_CHECK_OK) and whenever its
+ * error dialog closes: `{"system": {"command": "uiop", "name": "print_error", "action": "close", "source": 1,
+ * "type": "dialog", "err": "<print_error as 8 hex digits>"}}` (source 1 = Studio, 0 = the printer's own screen).
+ */
+export function buildCleanPrintErrorUiop(printError: number, sequenceId: string = nextSequenceId()): { system: Record<string, unknown> } {
+  return { system: { command: "uiop", sequence_id: sequenceId, name: "print_error", action: "close", source: 1, type: "dialog",
+    err: (printError >>> 0).toString(16).toUpperCase().padStart(8, "0") } };
+}
+
 /** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
 export function dispatchStatusLabel(dispatch: "started" | "unconfirmed"): "success" | "dispatched_unconfirmed" {
   return dispatch === "started" ? "success" : "dispatched_unconfirmed";
@@ -1223,7 +1234,7 @@ export class BambuImplementation {
     });
   }
 
-  async clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: { print: Record<string, unknown> }) => Promise<any>): Promise<any> {
+  async clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: { print: Record<string, unknown> } | { system: Record<string, unknown> }) => Promise<any>): Promise<any> {
     return withPrinterOperation(host, serial, async assertActive => {
       const codesFor = (status: any): string[] => {
         if (!Array.isArray(status.raw?.hms) || status.raw?.print_error === undefined) throw new Error("Fresh error codes are required before clearing hardware errors.");
@@ -1246,15 +1257,28 @@ export class BambuImplementation {
       const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
       assertActive();
       const result = { status: "success", message: "Confirmed HMS clear command sent. The next print requires acknowledgment of these cleared codes.", cleared_codes: codes };
+      // Like Studio when the person confirms an error, close its dialog too (uiop) once the error is cleared.
+      const printError = Number(freshRaw?.print_error ?? 0);
+      const uiop = Number.isInteger(printError) && printError > 0 && printError <= 0xffffffff ? buildCleanPrintErrorUiop(printError) : undefined;
+      const withUiop = async <T extends Record<string, unknown>>(cleared: T, send: () => Promise<unknown>): Promise<T> => {
+        if (!uiop) return cleared;
+        try {
+          await send();
+          return { ...cleared, closedErrorDialog: uiop.system.err };
+        } catch (error) {
+          return { ...cleared, closedErrorDialog: null, uiopError: `The error was cleared, but closing its dialog (uiop) failed: ${(error as Error).message}` };
+        }
+      };
       if (dispatch) {
         const dispatched = await dispatch(assertActive, beforeDispatch, command);
         this.clearedErrors.set(serial, codes);
         await sleep(COMMAND_SETTLE_MS);
-        return withDispatchedReply(result, dispatched);
+        // The clear changed the codes beforeDispatch pins; the dialog close needs no state check.
+        return withUiop(withDispatchedReply(result, dispatched), () => dispatch(assertActive, async () => {}, uiop!));
       }
       const sent = await sendCommand(printer!, command);
       this.clearedErrors.set(serial, codes);
-      return withCommandReply(result, sent.reply, sent.waitedMs);
+      return withUiop(withCommandReply(result, sent.reply, sent.waitedMs), () => publishWithoutAck(printer!, uiop!));
     });
   }
 

@@ -63,6 +63,15 @@ export declare function withHmsWarnings<T extends Record<string, unknown>>(resul
 export declare function buildCleanPrintError(raw: Record<string, any> | undefined, sequenceId?: string): {
     print: Record<string, unknown>;
 };
+/**
+ * Bambu Studio's acknowledgement that the error's dialog was closed (MachineObject::command_clean_print_error_uiop),
+ * sent with clean_print_error when the person confirms the error (DeviceErrorDialog DBL_CHECK_OK) and whenever its
+ * error dialog closes: `{"system": {"command": "uiop", "name": "print_error", "action": "close", "source": 1,
+ * "type": "dialog", "err": "<print_error as 8 hex digits>"}}` (source 1 = Studio, 0 = the printer's own screen).
+ */
+export declare function buildCleanPrintErrorUiop(printError: number, sequenceId?: string): {
+    system: Record<string, unknown>;
+};
 /** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
 export declare function dispatchStatusLabel(dispatch: "started" | "unconfirmed"): "success" | "dispatched_unconfirmed";
 type DispatchVerdict = {
@@ -148,6 +157,8 @@ export declare class BambuImplementation {
     resumeJob(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>) => Promise<any>): Promise<any>;
     clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: {
         print: Record<string, unknown>;
+    } | {
+        system: Record<string, unknown>;
     }) => Promise<any>): Promise<any>;
     setPrintSpeed(host: string, serial: string, token: string, speedMode: string | number): Promise<any>;
     /** Send a control-commands.ts command: through the dispatch callback (signed) or LAN MQTT with reply matching. */

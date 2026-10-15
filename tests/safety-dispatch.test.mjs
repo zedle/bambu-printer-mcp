@@ -1012,6 +1012,30 @@ test("cleared hardware codes are returned and acknowledged again before printing
   assertNoDispatch(events);
 });
 
+test("clearing a print error also closes its dialog like Bambu Studio (uiop), after clean_print_error", async () => {
+  const { printer, events } = isolatedPrinter(safetyStatus({ print_error: 0x0700_8012, subtask_id: "777", hms: [] }));
+  const cleared = await printer.clearHmsErrors(host, serial, token);
+  const published = events.filter(({ action }) => action === "publish").map(({ payload }) => payload);
+  assert.equal(published.length, 2);
+  assert.equal(published[0].print.command, "clean_print_error");
+  assert.equal(published[0].print.print_error, 0x0700_8012);
+  const { sequence_id, ...uiop } = published[1].system;
+  assert.match(sequence_id, /^4\d{4}$/);
+  assert.deepEqual(uiop, { command: "uiop", name: "print_error", action: "close", source: 1, type: "dialog", err: "07008012" });
+  assert.equal(cleared.closedErrorDialog, "07008012");
+  // Only HMS entries: no print_error dialog to close.
+  const hmsOnly = isolatedPrinter(safetyStatus({ print_error: 0, hms: [{ attr: 1, code: 0x30001 }] }));
+  const result = await hmsOnly.printer.clearHmsErrors(host, serial, token);
+  assert.equal(hmsOnly.events.filter(({ action }) => action === "publish").length, 1);
+  assert.equal(result.closedErrorDialog, undefined);
+  // Signed routes send it through the same dispatch, with no state check (the clear changed the codes).
+  const signed = isolatedPrinter(safetyStatus({ print_error: 0x0500_400e, hms: [] }));
+  const dispatched = [];
+  const viaBridge = await signed.printer.clearHmsErrors(host, serial, token, async (_active, beforeDispatch, command) => { await beforeDispatch(); dispatched.push(command); return { status: "success" }; });
+  assert.deepEqual(dispatched.map(command => Object.keys(command)[0] + "." + Object.values(command)[0].command), ["print.clean_print_error", "system.uiop"]);
+  assert.equal(viaBridge.closedErrorDialog, "0500400E");
+});
+
 test("changed hardware codes during confirmation are not cleared", async () => {
   const { printer, events } = isolatedPrinter(safetyStatus({ print_error: 123, hms: [] }));
   printer.confirm = async () => { printer.getSafetyStatus = async () => safetyStatus({ print_error: 456, hms: [] }); return true; };
@@ -1065,10 +1089,11 @@ test("LAN and signed error clears send the same Studio-form clean_print_error", 
   const status = safetyStatus({ state: "FAILED", print_error: 0x0700_8012, subtask_id: "4567", hms: [] });
   const { printer, events } = isolatedPrinter(status);
   await printer.clearHmsErrors(host, serial, token);
-  const lan = events.filter(({ action }) => action === "publish").map(({ payload }) => payload.print);
+  // The uiop dialog close follows as a system-section message.
+  const lan = events.filter(({ action, payload }) => action === "publish" && payload.print).map(({ payload }) => payload.print);
   assert.equal(lan.length, 1);
   let signed;
-  await printer.clearHmsErrors(host, serial, token, async (_active, beforeDispatch, command) => { await beforeDispatch(); signed = command.print; });
+  await printer.clearHmsErrors(host, serial, token, async (_active, beforeDispatch, command) => { await beforeDispatch(); signed ??= command.print; });
   for (const command of [lan[0], signed]) {
     assert.deepEqual(Object.keys(command).sort(), ["command", "print_error", "sequence_id", "subtask_id"]);
     assert.equal(command.command, "clean_print_error");
