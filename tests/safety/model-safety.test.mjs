@@ -4,7 +4,8 @@ import { mockStatus } from './push-fixtures.mjs';
 
 const { validatePrinterState } = await import('../../dist/safety/printer-state.js');
 const models = await import('../../dist/safety/models.js');
-const { normalizeBridgeAmsTrayValue } = await import('../../dist/ams-mapping.js');
+const mapping = await import('../../dist/ams-mapping.js');
+const { normalizeBridgeAmsTrayValue } = mapping;
 
 const external = (model, extra = {}) => ({ model, nozzleDiameters: [], materials: ['PLA'], useAMS: false, ...extra });
 
@@ -101,4 +102,30 @@ test('the H2C right extruder accepts a matching rack hotend and blocks on a busy
   assert.throws(() => validatePrinterState(status({ info: full }), job([0.4, 0.4])), /hotend rack are full/);
   // The left extruder has no rack: it must match its own mounted hotend.
   assert.throws(() => validatePrinterState(status(), job([0.6, 0.4], { filamentMap: [1], amsMapping: [254], useAMS: false })), /nozzle 1 diameter/);
+});
+
+test('AMS-HT units are addressed by unit id with presence from the top-level bits 16+', () => {
+  const ams = (materials, extra = {}) => ({ model: 'h2d', nozzleDiameters: [], materials, useAMS: true, ...extra });
+  // H2D with AMS-HT units 128 (PLA) and 129 (PETG), both present (bits 16 and 17 of 0x3bbed).
+  const h2d = mockStatus('H2DEXTSPOOLACTIVE');
+  assert.doesNotThrow(() => validatePrinterState(h2d, ams(['PLA'], { amsMapping: [128] })));
+  assert.doesNotThrow(() => validatePrinterState(h2d, ams(['PETG'], { amsMapping: [129] })));
+  assert.throws(() => validatePrinterState(h2d, ams(['PLA'], { amsMapping: [129] })), /PETG in slot 129 contradicts/);
+  assert.throws(() => validatePrinterState(mockStatus('H2DEXTSPOOLACTIVE', { ams: { ...h2d.raw.ams, tray_exist_bits: '1bbed' } }), ams(['PETG'], { amsMapping: [129] })), /slot 129 is reported empty/);
+  assert.throws(() => validatePrinterState(h2d, ams(['PLA'], { amsMapping: [130] })), /slot 130 is not present/);
+  for (const index of [16, 136, 253]) assert.throws(() => validatePrinterState(h2d, ams(['PLA'], { amsMapping: [index] })), /not an AMS tray|mapping|external/);
+  // X1C with three AMS and one AMS-HT (PA-CF): bit 16 of 0x10eff.
+  assert.doesNotThrow(() => validatePrinterState(mockStatus('X1CMULTIAMS'), { ...ams(['PA'], { amsMapping: [128] }), model: 'x1c' }));
+});
+
+test('tray mappings use Studio\'s encoding on every transport', () => {
+  const { studioTrayMapping } = mapping;
+  assert.deepEqual(studioTrayMapping([0, 7, 128, 129, 254, 255, -1], false), {
+    v0: [0, 7, 128, 129, -1, -1, -1], trays: [0, 7, 128, 129, 254, 255, -1],
+    v1: [{ ams_id: 0, slot_id: 0 }, { ams_id: 1, slot_id: 3 }, { ams_id: 128, slot_id: 0 }, { ams_id: 129, slot_id: 0 },
+      { ams_id: 254, slot_id: 0 }, { ams_id: 255, slot_id: 0 }, { ams_id: 255, slot_id: 255 }],
+  });
+  // A single-extruder printer's one holder is 255 to Studio.
+  assert.deepEqual(studioTrayMapping([254, 3], true).v1, [{ ams_id: 255, slot_id: 0 }, { ams_id: 0, slot_id: 3 }]);
+  assert.deepEqual(studioTrayMapping([254, 3], true).trays, [255, 3]);
 });

@@ -86,7 +86,9 @@ function stubFreshSafetyStatus(bambu, model) {
         ams: { tray_now: "254", ams: [
           { id: "0", tray: [{ id: "1", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }, { id: "2", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }] },
           { id: "3", tray: [{ id: "3", tray_type: "PLA", nozzle_temp_min: "190", nozzle_temp_max: "240" }] },
-          { id: "128", tray: [{ id: "0", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }, { id: "3", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }] },
+          // AMS-HT units hold one tray each and are addressed by unit id (128, 131), slot 0.
+          { id: "128", tray: [{ id: "0", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }] },
+          { id: "131", tray: [{ id: "0", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }] },
         ] },
       },
       observation: { source: "mqtt", requestedAt: now, receivedAt: now, identitySource: "report" },
@@ -1192,11 +1194,12 @@ test("H2 ams_mapping2 preserves external spool and HT tray encodings", async () 
     });
 
     assert.ok(publishedPayload?.print, "project_file payload should be published");
-    assert.deepEqual(publishedPayload.print.ams_mapping, [254, 128, 131, 15]);
+    // Studio's encoding: externals -1 in ams_mapping; the H2S's one external holder is 255; AMS-HT units are {unit, 0}.
+    assert.deepEqual(publishedPayload.print.ams_mapping, [-1, 128, 131, 15]);
     assert.deepEqual(publishedPayload.print.ams_mapping2, [
-      { ams_id: 254, slot_id: 0 },
+      { ams_id: 255, slot_id: 0 },
       { ams_id: 128, slot_id: 0 },
-      { ams_id: 128, slot_id: 3 },
+      { ams_id: 131, slot_id: 0 },
       { ams_id: 3, slot_id: 3 },
     ]);
   } finally {

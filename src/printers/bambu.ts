@@ -9,8 +9,8 @@ import { readSafe3mfArchive } from "../safety/archive.js";
 import { inspectPrintFile, type PrintFileInspection } from "../safety/print-file.js";
 import { normalizeModel, validateTemperature } from "../safety/limits.js";
 import { validatePrinterState, manualHeatingRequirements, type PrinterStateRequirements } from "../safety/printer-state.js";
-import { externalSpoolMapping, isExternalTray } from "../safety/models.js";
-import { normalizeBridgeAmsTrayValue } from "../ams-mapping.js";
+import { externalSpoolMapping, extruderCount, isExternalTray } from "../safety/models.js";
+import { normalizeBridgeAmsTrayValue, studioTrayMapping } from "../ams-mapping.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName, normalizedRemotePath, cancelPendingPrinterOperations } from "../safety/artifact.js";
 import { Client as FTPClient } from "basic-ftp";
 import { BambuPrinter } from "bambu-js";
@@ -780,16 +780,13 @@ export class BambuImplementation {
     let amsMapping2: Array<{ ams_id: number; slot_id: number }>;
     if (usesH2ProjectFile) {
       const projLen = Math.max(projectMetadata.projectFilamentCount, baseMapping.length, 1);
-      amsMapping = Array.from({ length: projLen }, (_, i) =>
+      // Studio's encoding, which the plug-in forwards unchanged in its LAN project_file: externals -1 in
+      // ams_mapping, {254|255, 0} in ams_mapping2, AMS-HT units {unit, 0}.
+      const encoded = studioTrayMapping(Array.from({ length: projLen }, (_, i) =>
         i < baseMapping.length ? baseMapping[i] : -1
-      );
-      amsMapping2 = amsMapping.map((v) => {
-        if (v < 0) return { ams_id: 255, slot_id: 255 };
-        // Studio (SelectMachine.cpp get_ams_mapping_result): an external holder is {254|255, 0}.
-        if (isExternalTray(v)) return { ams_id: v, slot_id: 0 };
-        if (v >= 128) return { ams_id: 128, slot_id: v - 128 };
-        return { ams_id: Math.floor(v / 4), slot_id: v % 4 };
-      });
+      ), extruderCount(model) === 1);
+      amsMapping = encoded.v0;
+      amsMapping2 = encoded.v1;
     } else {
       amsMapping = Array.from({ length: Math.max(5, baseMapping.length, projectMetadata.projectFilamentCount) }, (_, i) =>
         i < baseMapping.length ? baseMapping[i] : -1

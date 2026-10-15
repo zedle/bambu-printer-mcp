@@ -280,16 +280,21 @@ function externalTray(raw: Record<string,any>, model: string, trayIndex: number)
   return !dual || raw.vt_tray.id === undefined || Number(raw.vt_tray.id) === trayIndex ? raw.vt_tray : undefined;
 }
 function mappedTray(raw: Record<string,any>, index: number): Record<string,any> {
-  const unit = index >= 128 ? 128 : Math.floor(index / 4);
-  const slot = index >= 128 ? index - 128 : index % 4;
+  // BambuStudio DevFilaSystem::GetTrayIndexMap: AMS units 0-3 hold four trays each (index unit * 4 + slot); an AMS-HT
+  // unit (ids 128-135) holds one, so its index is its unit id with slot 0.
+  if (!Number.isInteger(index) || index < 0 || (index > 15 && index < 128) || index > 135) throw new Error(`AMS mapped slot ${index} is not an AMS tray.`);
+  const unit = index >= 128 ? index : Math.floor(index / 4);
+  const slot = index >= 128 ? 0 : index % 4;
   const units = raw.ams?.ams;
   const ams = Array.isArray(units) ? units.find((value:any) => Number(value?.id) === unit) : undefined;
   const tray = Array.isArray(ams?.tray) ? ams.tray.find((value:any) => Number(value?.id) === slot) : undefined;
   if (!object(tray)) throw new Error(`AMS mapped slot ${index} is not present in the fresh printer report.`);
-  const bits = index >= 128 ? ams?.tray_exist_bits : raw.ams?.tray_exist_bits;
+  // Presence is the top-level ams.tray_exist_bits: bit unit * 4 + slot for AMS units, bit 16 + (unit - 128) for AMS-HT
+  // (DevAms::GetTrayId / sGetAmsFlagBit). AMS-HT units carry no bits of their own.
+  const bits = raw.ams?.tray_exist_bits;
   if (bits !== undefined) {
     let present: boolean;
-    try { present = (BigInt(typeof bits === "string" ? `0x${bits.replace(/^0x/i, "")}` : bits) & (1n << BigInt(index >= 128 ? slot : index))) !== 0n; }
+    try { present = (BigInt(typeof bits === "string" ? `0x${bits.replace(/^0x/i, "")}` : bits) & (1n << BigInt(index >= 128 ? 16 + index - 128 : index))) !== 0n; }
     catch { throw new Error("AMS slot presence report is malformed."); }
     if (!present) throw new Error(`AMS mapped slot ${index} is reported empty.`);
   }

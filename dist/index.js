@@ -14,12 +14,12 @@ import { BambuNetworkBridge } from "./bambu-network-bridge.js";
 import { assertBambuNativeAvailable, validateBambuNativeMetadata, validateBambuNativeControlMessage, buildBambuNativeFanCommand, buildBambuNativeTemperatureCommand, printWithBambuNative, sendCommandWithBambuNative, uploadWithBambuNative, } from "./bambu-native.js";
 import { importFileViaBambuConnect } from "./bambu-connect.js";
 import { BlenderMcpBridge } from "./blender-mcp-bridge.js";
-import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue } from "./ams-mapping.js";
+import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue, studioTrayMapping } from "./ams-mapping.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, parse3MF } from './3mf_parser.js';
 import { BambuImplementation, assertDirectPrintSupported } from "./printers/bambu.js";
 import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
-import { externalSpoolMapping } from "./safety/models.js";
+import { externalSpoolMapping, extruderCount } from "./safety/models.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
 dotenv.config();
@@ -722,18 +722,10 @@ function stringifyBridgeJson(value) {
         return value;
     return JSON.stringify(value);
 }
-function nativeAmsMapping2(mapping) {
+function nativeAmsMapping2(mapping, model) {
     if (!mapping || mapping.length === 0)
         return undefined;
-    return JSON.stringify(mapping.map((value) => {
-        if (value < 0 || value === 255)
-            return { ams_id: 255, slot_id: 255 };
-        if (value === 254)
-            return { ams_id: 254, slot_id: 254 };
-        if (value >= 128)
-            return { ams_id: 128, slot_id: value - 128 };
-        return { ams_id: Math.floor(value / 4), slot_id: value % 4 };
-    }));
+    return JSON.stringify(studioTrayMapping(mapping, extruderCount(model) === 1).v1);
 }
 /**
  * Bambu Studio's cloud print mapping fields for a checked positional tray mapping (SelectMachine.cpp,
@@ -742,11 +734,8 @@ function nativeAmsMapping2(mapping) {
  * nozzle (right 0, left 1, from the file's filament_map). Without them the printer runs the job as use_ams false.
  */
 function studioCloudMappings(mapping, inspection, trayColour) {
-    const v0 = mapping.map(tray => (tray === 254 || tray === 255 ? -1 : tray));
-    const v1 = mapping.map(tray => tray < 0 ? { ams_id: 255, slot_id: 255 } : tray >= 128 ? { ams_id: tray, slot_id: 0 } : { ams_id: Math.floor(tray / 4), slot_id: tray % 4 });
-    v1.forEach((entry, position) => { if (mapping[position] === 254 || mapping[position] === 255)
-        v1[position] = { ams_id: mapping[position], slot_id: 0 }; });
-    const info = mapping.map((tray, position) => {
+    const { v0, v1, trays } = studioTrayMapping(mapping, extruderCount(inspection.model) === 1);
+    const info = trays.map((tray, position) => {
         if (tray < 0)
             return { ams: -1, targetColor: "", filamentId: "", filamentType: "" };
         const logical = inspection.nozzleDiameters.length === 2 ? inspection.filamentMap?.[position] : undefined;
@@ -1259,7 +1248,8 @@ class BambuPrinterMCPServer {
                     host: devIp, serial: devId, token: password || bambuToken, filePath: snapshot,
                     projectName: String(params.task_name), presetName, remoteName: remoteFileName,
                     plateIndex, bedType: printBedType, useAMS,
-                    amsMapping, amsMapping2: nativeAmsMapping2(mapping),
+                    amsMapping: cloudMappings ? JSON.stringify(cloudMappings.v0) : amsMapping, amsMapping2: nativeAmsMapping2(mapping, inspection.model),
+                    ...(cloudMappings ? { amsMappingInfo: JSON.stringify(cloudMappings.info) } : {}),
                     bedLeveling: params.task_bed_leveling,
                     flowCalibration: params.task_flow_cali,
                     vibrationCalibration: params.task_vibration_cali,
