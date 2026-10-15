@@ -70,7 +70,8 @@ export declare class BambuImplementation {
         light: string;
         mode: string;
     }>;
-    setAmsDrying(host: string, serial: string, token: string, action: string, amsId: number): Promise<any>;
+    /** Tool arguments: action, ams_id and, to start, filament, temperature, duration_hours (see normalizeAmsDryingRequest). */
+    setAmsDrying(host: string, serial: string, token: string, args: Record<string, unknown>): Promise<any>;
     skipObjects(host: string, serial: string, token: string, objectIds: number[]): Promise<{
         status: string;
         message: string;

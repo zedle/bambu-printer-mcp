@@ -15,6 +15,7 @@ import { assertBambuNativeAvailable, validateBambuNativeMetadata, validateBambuN
 import { importFileViaBambuConnect } from "./bambu-connect.js";
 import { BlenderMcpBridge } from "./blender-mcp-bridge.js";
 import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue } from "./ams-mapping.js";
+import { assertAmsDryingSupported, buildAmsDryingCommand, normalizeAmsDryingRequest } from "./ams-drying.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, parse3MF } from './3mf_parser.js';
 import { BambuImplementation, assertDirectPrintSupported } from "./printers/bambu.js";
 import { inspectPrintFile } from "./safety/print-file.js";
@@ -2391,7 +2392,7 @@ class BambuPrinterMCPServer {
                     },
                     {
                         name: "set_ams_drying",
-                        description: "Start or stop the AMS filament drying cycle. X2D on macOS uses the native official plug-in route and supports AMS-HT id 128.",
+                        description: "Start or stop drying filament in an AMS 2 Pro or AMS HT, with Bambu Studio's ams_filament_drying command. Start is refused unless a fresh printer report shows remote drying support (fun2 bit 5), the unit can dry, and the printer lists no reason it can't; stop is always sent.",
                         inputSchema: {
                             type: "object",
                             properties: {
@@ -2402,8 +2403,13 @@ class BambuPrinterMCPServer {
                                 },
                                 ams_id: {
                                     type: "number",
-                                    description: "AMS unit index from 0 to 3, or 128 for an X2D AMS-HT."
+                                    description: "AMS unit id as the printer reports it: 0 to 3, or 128 to 135 for an AMS HT."
                                 },
+                                filament: { type: "string", description: "Start only: filament type being dried (PLA, PETG, ABS, PA, TPU, ...)." },
+                                temperature: { type: "number", description: "Start only: drying temperature in °C (AMS 2 Pro up to 65, AMS HT up to 85)." },
+                                duration_hours: { type: "number", description: "Start only: drying time in whole hours, 1 to 24." },
+                                rotate_tray: { type: "boolean", description: "Start only: rotate the spools while drying (default false)." },
+                                cooling_temperature: { type: "number", description: "Start only: the filament's cooling temperature in °C. Defaults to Bambu Studio's preset for the filament type (filament_dev_drying_cooling_temperature) when its profiles are installed." },
                                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
                                 bambu_token: { type: "string", description: "Access token (default: value from env)" }
@@ -3114,37 +3120,27 @@ class BambuPrinterMCPServer {
                             result = await this.bambu.skipObjects(host, bambuSerial, bambuToken, args.object_ids.map((id) => Number(id)));
                         }
                         break;
-                    case "set_ams_drying":
+                    case "set_ams_drying": {
                         if (!args?.action || args?.ams_id === undefined) {
                             throw new Error("Missing required parameters: action and ams_id");
                         }
+                        const drying = normalizeAmsDryingRequest(args);
                         if (nativeControls) {
-                            const action = String(args.action).trim().toLowerCase();
-                            const amsId = Number(args.ams_id);
-                            if (action !== "start" && action !== "stop") {
-                                throw new Error("AMS drying action must be one of: start, stop.");
-                            }
-                            if ((!Number.isInteger(amsId) || (amsId < 0 || amsId > 3)) && amsId !== 128) {
-                                throw new Error("X2D ams_id must be 0 to 3, or 128 for AMS-HT.");
-                            }
                             result = await signedCommand({
                                 host,
                                 serial: bambuSerial,
                                 token: bambuToken,
-                                messageJson: JSON.stringify({
-                                    print: {
-                                        command: "ams_control",
-                                        sequence_id: String(Date.now()),
-                                        ams_id: amsId,
-                                        param: action === "start" ? "start_drying" : "stop_drying",
-                                    },
-                                }),
-                            });
+                                messageJson: JSON.stringify(buildAmsDryingCommand(drying, String(Date.now()))),
+                            }, drying.action === "start"
+                                ? { beforeDispatch: async () => assertAmsDryingSupported((await this.bambu.getSafetyStatus(host, bambuSerial, bambuToken))?.raw, drying) }
+                                : {});
+                            result = { ...result, action: drying.action, ams_id: drying.amsId };
                         }
                         else {
-                            result = await this.bambu.setAmsDrying(host, bambuSerial, bambuToken, String(args.action), Number(args.ams_id));
+                            result = await this.bambu.setAmsDrying(host, bambuSerial, bambuToken, args);
                         }
                         break;
+                    }
                     case "extend_stl_base":
                         if (!args?.stl_path || args?.extension_height === undefined) {
                             throw new Error("Missing required parameters: stl_path and extension_height");

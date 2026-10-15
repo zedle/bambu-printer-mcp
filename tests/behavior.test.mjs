@@ -368,9 +368,9 @@ test("X2D public task and AMS tools dispatch through the native helper, includin
     await client.callTool({ name: "set_ams_drying", arguments: { action: "stop", ams_id: 128 } })
   );
   const dryingMessage = JSON.parse(drying.updates[0]).message.print;
-  assert.equal(dryingMessage.command, "ams_control");
+  assert.equal(dryingMessage.command, "ams_filament_drying");
   assert.equal(dryingMessage.ams_id, 128);
-  assert.equal(dryingMessage.param, "stop_drying");
+  assert.equal(dryingMessage.mode, 0);
 
   const rfid = parseJsonResult(
     await client.callTool({ name: "reread_ams_rfid", arguments: { ams_id: 128, slot_id: 0 } })
@@ -1538,90 +1538,111 @@ test("delete_printer_file accepts explicit timelapse/ and logs/ paths", async ()
   assert.deepEqual(calls, ["/timelapse/2026-04-26_12-00.mp4", "/logs/printer.log"]);
 });
 
-test("set_ams_drying rejects invalid action values", async () => {
+function dryingPrinter(raw) {
   const bambu = new BambuImplementation(async () => true);
-  bambu.getPrinter = async () => ({
-    publish: async () => {},
-  });
+  const published = [];
+  let reads = 0;
+  bambu.getSafetyStatus = async () => { reads++; return { raw }; };
+  bambu.getPrinter = async () => ({ publish: async (payload) => { published.push(payload); } });
+  return { bambu, published, reads: () => reads };
+}
 
-  await assert.rejects(
-    bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", "toggle", 0),
-    /must be one of: start, stop/i
-  );
-  await assert.rejects(
-    bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", "", 0),
-    /must be one of: start, stop/i
-  );
+// X2D-style report: fun2 bit 5 set, unit 0 an AMS 2 Pro (info type 3), unit 128 an AMS HT (type 4), unit 1 a plain AMS.
+const dryingReport = (overrides = {}) => ({
+  fun2: "B7B77",
+  ams: { ams: [
+    { id: "0", info: "11002103", dry_sf_reason: [] },
+    { id: "1", info: "1101" },
+    { id: "128", info: "2004", dry_sf_reason: [] },
+  ] },
+  ...overrides,
+});
+const startDrying = { action: "start", ams_id: 0, filament: "PLA", temperature: 55, duration_hours: 8, cooling_temperature: 45 };
+
+test("set_ams_drying rejects invalid action values", async () => {
+  const { bambu, published } = dryingPrinter(dryingReport());
+  await assert.rejects(bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", { action: "toggle", ams_id: 0 }), /must be one of: start, stop/i);
+  await assert.rejects(bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", { action: "", ams_id: 0 }), /must be one of: start, stop/i);
+  assert.deepEqual(published, []);
 });
 
 test("set_ams_drying rejects invalid ams_id values", async () => {
-  const bambu = new BambuImplementation(async () => true);
-  bambu.getPrinter = async () => ({
-    publish: async () => {},
-  });
-
-  await assert.rejects(
-    bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", "start", -1),
-    /must be an integer from 0 to 3/i
-  );
-  await assert.rejects(
-    bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", "start", 4),
-    /must be an integer from 0 to 3/i
-  );
-  await assert.rejects(
-    bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", "start", -999),
-    /must be an integer from 0 to 3/i
-  );
+  const { bambu, published } = dryingPrinter(dryingReport());
+  for (const ams_id of [-1, 4, 127, 136, -999, 1.5]) {
+    await assert.rejects(bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", { ...startDrying, ams_id }), /integer AMS unit id/i, String(ams_id));
+  }
+  assert.deepEqual(published, []);
 });
 
-test("set_ams_drying sends correct MQTT command for start", async () => {
-  const bambu = new BambuImplementation(async () => true);
-  let publishPayload = null;
-  bambu.getPrinter = async () => ({
-    publish: async (payload) => {
-      publishPayload = payload;
-    },
-  });
-
-  const result = await bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", "start", 1);
-
-  assert.deepEqual(publishPayload, {
-    print: {
-      command: "ams_control",
-      ams_id: 1,
-      param: "start_drying",
-      sequence_id: "0",
-    },
-  });
+test("set_ams_drying start sends Bambu Studio's ams_filament_drying payload", async () => {
+  const { bambu, published, reads } = dryingPrinter(dryingReport());
+  const result = await bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", { ...startDrying, rotate_tray: true });
+  assert.equal(reads(), 1, "start reads a fresh report");
+  // DevFilaSystemCtrl.cpp CtrlAmsStartDryingHour, key for key.
+  assert.deepEqual(published, [{ print: {
+    command: "ams_filament_drying", sequence_id: "0", ams_id: 0, mode: 1, filament: "PLA", temp: 55, duration: 8,
+    humidity: 0, rotate_tray: true, cooling_temp: 45, close_power_conflict: false,
+  } }]);
   assert.equal(result.status, "success");
   assert.equal(result.action, "start");
-  assert.equal(result.ams_id, 1);
-  assert.match(result.message, /started.*AMS 1/i);
+  assert.equal(result.ams_id, 0);
+  assert.match(result.message, /started.*AMS 0/i);
+  const ht = dryingPrinter(dryingReport());
+  await ht.bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", { ...startDrying, ams_id: 128, filament: "PA", temperature: 85, duration_hours: 12, cooling_temperature: 150 });
+  assert.equal(ht.published[0].print.ams_id, 128);
+  assert.equal(ht.published[0].print.temp, 85);
+  assert.equal(ht.published[0].print.rotate_tray, false);
 });
 
-test("set_ams_drying sends correct MQTT command for stop", async () => {
-  const bambu = new BambuImplementation(async () => true);
-  let publishPayload = null;
-  bambu.getPrinter = async () => ({
-    publish: async (payload) => {
-      publishPayload = payload;
-    },
-  });
-
-  const result = await bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", "stop", 0);
-
-  assert.deepEqual(publishPayload, {
-    print: {
-      command: "ams_control",
-      ams_id: 0,
-      param: "stop_drying",
-      sequence_id: "0",
-    },
-  });
+test("set_ams_drying stop sends Studio's mode 0 with zeros and needs no report", async () => {
+  const { bambu, published, reads } = dryingPrinter(undefined);
+  const result = await bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", { action: "stop", ams_id: 129 });
+  assert.equal(reads(), 0);
+  // DevFilaSystemCtrl.cpp CtrlAmsStopDrying.
+  assert.deepEqual(published, [{ print: {
+    command: "ams_filament_drying", sequence_id: "0", ams_id: 129, mode: 0, filament: "", temp: 0, duration: 0,
+    humidity: 0, rotate_tray: false, cooling_temp: 0, close_power_conflict: false,
+  } }]);
   assert.equal(result.status, "success");
   assert.equal(result.action, "stop");
-  assert.equal(result.ams_id, 0);
-  assert.match(result.message, /stopped.*AMS 0/i);
+  assert.match(result.message, /stopped.*AMS 129/i);
+});
+
+for (const [name, report, args, error] of [
+  ["a printer without remote drying (fun2 bit 5 clear)", dryingReport({ fun2: "E" }), startDrying, /fun2 bit 5/],
+  ["a printer that reports no fun2", dryingReport({ fun2: undefined }), startDrying, /fun2 bit 5/],
+  ["a plain AMS unit", dryingReport(), { ...startDrying, ams_id: 1 }, /can't dry filament/],
+  ["an unreported unit", dryingReport(), { ...startDrying, ams_id: 2 }, /no AMS unit 2/],
+  ["an AMS 2 Pro above 65 °C", dryingReport(), { ...startDrying, temperature: 70 }, /up to 65/],
+  ["a unit the printer says can't dry", dryingReport({ ams: { ams: [{ id: "0", info: "1023", dry_sf_reason: [1, 3] }] } }), startDrying, /insufficient power; filament is at the AMS outlet/],
+  ["a missing filament type", dryingReport(), { ...startDrying, filament: undefined }, /requires filament/],
+  ["a missing duration", dryingReport(), { ...startDrying, duration_hours: undefined }, /duration_hours/],
+  ["a fractional temperature", dryingReport(), { ...startDrying, temperature: 55.5 }, /temperature/],
+]) test(`set_ams_drying start refuses ${name} before publishing`, async () => {
+  const { bambu, published } = dryingPrinter(report);
+  await assert.rejects(bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", args), error);
+  assert.deepEqual(published, []);
+});
+
+test("set_ams_drying takes the cooling temperature from Bambu Studio's filament preset", async (t) => {
+  const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), "drying-presets-"));
+  t.after(() => fs.promises.rm(root, { recursive: true, force: true }));
+  await fs.promises.mkdir(path.join(root, "BBL", "filament"), { recursive: true });
+  await fs.promises.writeFile(path.join(root, "BBL", "filament", "fdm_filament_common.json"), JSON.stringify({ filament_dev_drying_cooling_temperature: ["35.0"] }));
+  await fs.promises.writeFile(path.join(root, "BBL", "filament", "fdm_filament_abs.json"), JSON.stringify({ inherits: "fdm_filament_common", filament_dev_drying_cooling_temperature: ["75"] }));
+  await fs.promises.writeFile(path.join(root, "BBL", "filament", "fdm_filament_asa.json"), JSON.stringify({ inherits: "fdm_filament_common" }));
+  const previous = process.env.BAMBU_PROFILES_ROOT;
+  process.env.BAMBU_PROFILES_ROOT = root;
+  t.after(() => { if (previous === undefined) delete process.env.BAMBU_PROFILES_ROOT; else process.env.BAMBU_PROFILES_ROOT = previous; });
+  const { cooling_temperature, ...withoutCooling } = startDrying;
+  for (const [filament, expected] of [["ABS", 75], ["ASA", 35]]) {
+    const { bambu, published } = dryingPrinter(dryingReport());
+    await bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", { ...withoutCooling, filament, temperature: 60 });
+    assert.equal(published[0].print.cooling_temp, expected, filament);
+  }
+  const { bambu, published } = dryingPrinter(dryingReport());
+  await assert.rejects(bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", { ...withoutCooling, filament: "PEEK" }), /pass cooling_temperature/);
+  assert.deepEqual(published, []);
 });
 
 test("Bambu report snapshots are cleared with connection state", () => {

@@ -119,7 +119,7 @@ test("native heater-off needs neither fresh state nor confirmation", async t => 
 
 for (const [method, args] of [
   ["rereadAmsRfid", [0.5, 0]], ["rereadAmsRfid", [0, 0.5]],
-  ["setAmsDrying", ["start", 0.5]], ["setAmsDrying", ["stop", -0.5]],
+  ["setAmsDrying", [{ action: "start", ams_id: 0.5 }]], ["setAmsDrying", [{ action: "stop", ams_id: -0.5 }]],
 ]) test(`${method} rejects fractional addresses ${JSON.stringify(args)} before connecting`, async t => {
   const s = setup(t);
   await assert.rejects(s.printer[method](host, serial, token, ...args), /integer/i);

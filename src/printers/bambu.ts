@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFreshPrinterStatus } from "../safety/printer-state.js";
+import { assertAmsDryingSupported, buildAmsDryingCommand, normalizeAmsDryingRequest } from "../ams-drying.js";
 import fs from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
@@ -1227,41 +1228,21 @@ export class BambuImplementation {
     };
   }
 
-  async setAmsDrying(
-    host: string,
-    serial: string,
-    token: string,
-    action: string,
-    amsId: number
-  ): Promise<any> {
-    const normalizedAction = action.trim().toLowerCase();
-    if (normalizedAction !== "start" && normalizedAction !== "stop") {
-      throw new Error("AMS drying action must be one of: start, stop.");
-    }
-
-    const normalizedAmsId = amsId;
-    if (!Number.isInteger(normalizedAmsId) || normalizedAmsId < 0 || normalizedAmsId > 3) {
-      throw new Error("ams_id must be an integer from 0 to 3.");
-    }
-
-    const param = normalizedAction === "start" ? "start_drying" : "stop_drying";
+  /** Tool arguments: action, ams_id and, to start, filament, temperature, duration_hours (see normalizeAmsDryingRequest). */
+  async setAmsDrying(host: string, serial: string, token: string, args: Record<string, unknown>): Promise<any> {
+    const request = normalizeAmsDryingRequest(args);
+    // Start needs a fresh report: Studio only offers drying when the printer and the unit support it.
+    if (request.action === "start") assertAmsDryingSupported((await this.getSafetyStatus(host, serial, token))?.raw, request);
     const printer = await this.getPrinter(host, serial, token);
-    await printer.publish({
-      print: {
-        command: "ams_control",
-        ams_id: normalizedAmsId,
-        param,
-        sequence_id: "0",
-      },
-    });
+    await printer.publish(buildAmsDryingCommand(request, "0"));
     await sleep(COMMAND_SETTLE_MS);
 
-    const label = normalizedAction === "start" ? "started" : "stopped";
+    const label = request.action === "start" ? "started" : "stopped";
     return {
       status: "success",
-      message: `AMS drying ${label} for AMS ${normalizedAmsId}.`,
-      action: normalizedAction,
-      ams_id: normalizedAmsId,
+      message: `AMS drying ${label} for AMS ${request.amsId}.`,
+      action: request.action,
+      ams_id: request.amsId,
     };
   }
 

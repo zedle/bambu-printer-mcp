@@ -202,7 +202,7 @@ The optional FULU **BambuNetwork bridge** exposes `bambu_network_bridge_status`,
 - Cancel, pause, and resume in-progress print jobs via MQTT
 - Skip specific objects during a running multi-object print via `skip_objects` (use `list_3mf_plate_objects` to find object IDs first)
 - Set print speed mode (`silent`/`standard`/`sport`/`ludicrous`), clear HMS/print errors, trigger AMS RFID re-read, and control H2/P2 airduct mode (`cooling`/`heating`) via MQTT
-- **Start/stop AMS filament drying** (`set_ams_drying`) on heated AMS units (AMS Pro / AMS-HT). Sends `print.ams_control` MQTT command.
+- **Start/stop AMS filament drying** (`set_ams_drying`) on AMS 2 Pro and AMS HT units, with Bambu Studio's `print.ams_filament_drying` command. Start is checked against a fresh printer report first.
 - Set nozzle and bed temperature via G-code dispatch over MQTT
 - Confirm print starts and positive manual heating through a human preflight prompt. Finished-bed clearance and hardware-error clearing require explicit human acknowledgment; see [hardware safety and headless configuration](https://github.com/DMontgomery40/bambu-printer-mcp/blob/main/docs/SLICING.md).
 - Set fan speed (part, auxiliary, chamber) and chamber light mode (on/off/flashing) via MQTT
@@ -857,15 +857,17 @@ Skip specific object IDs during a running multi-object print. Use `list_3mf_plat
 
 #### set_ams_drying
 
-Start or stop the AMS filament drying cycle on heated AMS units (AMS Pro / AMS-HT). The `action` parameter accepts `start` or `stop`. The `ams_id` must be an integer from 0 to 3.
+Start or stop drying filament in an AMS 2 Pro or AMS HT, the way Bambu Studio does (`print.ams_filament_drying`, mode 1 to start, mode 0 to stop). `ams_id` is the unit id the printer reports: 0 to 3, or 128 to 135 for an AMS HT.
+
+Starting needs `filament` (the filament type), `temperature` (°C; AMS 2 Pro up to 65, AMS HT up to 85) and `duration_hours` (1 to 24). `rotate_tray` is optional (default false). `cooling_temperature` defaults to Bambu Studio's preset for the filament type (`filament_dev_drying_cooling_temperature` in the installed profiles; pass it when no Studio profiles are installed). A start is refused, with nothing sent, unless a fresh printer report shows remote drying support (`fun2` bit 5, as Studio checks), the unit is an AMS 2 Pro or AMS HT, and the printer lists no reason it can't dry (`dry_sf_reason`). Stop is always sent.
 
 ```json
 {
   "action": "start",
   "ams_id": 0,
-  "host": "192.168.1.100",
-  "bambu_serial": "01P00A123456789",
-  "bambu_token": "your_access_token"
+  "filament": "PETG",
+  "temperature": 65,
+  "duration_hours": 8
 }
 ```
 

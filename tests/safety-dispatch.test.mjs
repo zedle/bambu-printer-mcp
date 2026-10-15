@@ -324,7 +324,7 @@ for (const [name, changes, error] of [
   });
 }
 
-async function interceptedMcp(t, { blockBridgeInitialization = false, realBridgeRequest = false, model = "p1s", nozzleDiameters = [0.4], ams, bridgeResponse = { ok: true, value: 0 } } = {}) {
+async function interceptedMcp(t, { blockBridgeInitialization = false, realBridgeRequest = false, model = "p1s", nozzleDiameters = [0.4], ams, bridgeResponse = { ok: true, value: 0 }, env = {} } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bambu-bridge-safety-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const eventsPath = path.join(dir, "events.jsonl");
@@ -368,13 +368,34 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
       return ${JSON.stringify(bridgeResponse)};
     };`}
   `);
-  const transport = new StdioClientTransport({ command: process.execPath, args: ["--import", preload, path.join(root, "dist/index.js")], cwd: dir, stderr: "pipe", env: { ...process.env, MCP_TRANSPORT: "stdio", BAMBU_MODEL: "", BAMBU_PRINTER_MODEL: "", BAMBU_PRINTER_HOST: host, BAMBU_PRINTER_SERIAL: serial, BAMBU_SERIAL: serial, BAMBU_PRINTER_ACCESS_TOKEN: token, BAMBU_TOKEN: token, BAMBU_DEV_ID: serial, BAMBU_NETWORK_BRIDGE_COMMAND: "" } });
+  const transport = new StdioClientTransport({ command: process.execPath, args: ["--import", preload, path.join(root, "dist/index.js")], cwd: dir, stderr: "pipe", env: { ...process.env, MCP_TRANSPORT: "stdio", BAMBU_MODEL: "", BAMBU_PRINTER_MODEL: "", BAMBU_PRINTER_HOST: host, BAMBU_PRINTER_SERIAL: serial, BAMBU_SERIAL: serial, BAMBU_PRINTER_ACCESS_TOKEN: token, BAMBU_TOKEN: token, BAMBU_DEV_ID: serial, BAMBU_NETWORK_BRIDGE_COMMAND: "", BAMBU_DEFAULT_CONNECTION_MODE: "", ...env } });
   const client = new Client({ name: "safety-dispatch-tests", version: "1" }, { capabilities: { elicitation: { form: {} } } });
   client.setRequestHandler(ElicitRequestSchema, async () => ({ action: "accept", content: { confirmed: true } }));
   t.after(() => client.close());
   await client.connect(transport);
   return { client, eventsPath, releaseAgent: () => fs.writeFile(releasePath, "release"), setReportedStatus: reported => fs.writeFile(statusPath, JSON.stringify(reported)) };
 }
+
+const bridgeMode = { BAMBU_DEFAULT_CONNECTION_MODE: "bambu_network", BAMBU_NETWORK_BRIDGE_COMMAND: "fake-bridge" };
+const readEvents = async eventsPath => (await fs.readFile(eventsPath, "utf8").catch(() => "")).trim().split("\n").filter(Boolean).map(JSON.parse);
+
+test("signed AMS drying checks a fresh report, then sends Studio's payload through the bridge", async (t) => {
+  const server = await interceptedMcp(t, { env: bridgeMode });
+  const start = { action: "start", ams_id: 128, filament: "PETG", temperature: 65, duration_hours: 8, cooling_temperature: 60 };
+  await server.setReportedStatus({ fun2: "E", ams: { ams: [{ id: "128", info: "2004", dry_sf_reason: [] }] } });
+  const refused = await server.client.callTool({ name: "set_ams_drying", arguments: start });
+  assert.equal(refused.isError, true);
+  assert.match(refused.content[0].text, /fun2 bit 5/);
+  assert.ok(!(await readEvents(server.eventsPath)).some(event => event.method === "net.send_message"), "a refused start sends nothing");
+  await server.setReportedStatus({ fun2: "B7B77", ams: { ams: [{ id: "128", info: "2004", dry_sf_reason: [] }] } });
+  const started = await server.client.callTool({ name: "set_ams_drying", arguments: start });
+  assert.notEqual(started.isError, true, started.content?.[0]?.text);
+  const sent = (await readEvents(server.eventsPath)).filter(event => event.method === "net.send_message").map(event => JSON.parse(event.payload.msg));
+  assert.equal(sent.length, 1);
+  const { sequence_id, ...print } = sent[0].print;
+  assert.match(sequence_id, /^\d+$/);
+  assert.deepEqual(print, { command: "ams_filament_drying", ams_id: 128, mode: 1, filament: "PETG", temp: 65, duration: 8, humidity: 0, rotate_tray: false, cooling_temp: 60, close_power_conflict: false });
+});
 
 test("raw BambuNetwork start_print cannot bypass the inspected print handler", async (t) => {
   const { client, eventsPath } = await interceptedMcp(t);
