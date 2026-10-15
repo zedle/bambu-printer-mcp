@@ -46,6 +46,27 @@ export type LanProjectFileOptions = {
 export declare function buildLanProjectFile(options: LanProjectFileOptions): {
     print: Record<string, unknown>;
 };
+/** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
+export declare function dispatchStatusLabel(dispatch: "started" | "unconfirmed"): "success" | "dispatched_unconfirmed";
+type DispatchVerdict = {
+    kind: "started";
+} | {
+    kind: "rejected";
+} | {
+    kind: "failed";
+    message: string;
+} | {
+    kind: "cancelled";
+};
+/**
+ * What a printer report says about a print command just sent (`before` = the report from right before it):
+ * - rejected: a new HMS 0500-0500-0001-0007 (an unsigned command refused);
+ * - failed: the printer's project_file reply says "fail" (Studio: "Failed to start printing job"), or this job is
+ *   reported FAILED, or a new print_error appeared;
+ * - started: a printing state for this job: its name as subtask_name or gcode_file, a new task id, or (when the
+ *   report or pushed delta names no job) a printer that was idle before.
+ */
+export declare function judgeDispatchReport(report: any, before: any, jobName: string | undefined): DispatchVerdict | undefined;
 export declare function assertDirectPrintSupported(model: string | undefined, serial?: string): void;
 interface BambuPrintOptionsInternal {
     projectName: string;
@@ -138,7 +159,7 @@ export declare class BambuImplementation {
         printRequested: boolean;
         inspected: boolean;
     } | {
-        status: string;
+        status: "success" | "dispatched_unconfirmed";
         uploaded: boolean;
         printRequested: boolean;
         dispatch: "started" | "unconfirmed";
@@ -150,11 +171,19 @@ export declare class BambuImplementation {
      * A published print command is not proof the printer took it. Listen to the
      * reports the printer pushes anyway (no extra pushall polling on weak P1
      * boards): a new command-verification HMS means the firmware refused the
-     * command; PREPARE/SLICING/RUNNING means it started. Attach before publishing.
+     * command; PREPARE/SLICING/RUNNING for this job means it started. Attach before publishing.
      */
     private watchDispatch;
+    private settleDispatch;
+    /**
+     * Confirm a job handed to Bambu's network plugin from the printer's own reports, as Studio waits for the job
+     * (PrintJob wait_fn) instead of trusting the plugin's return code: poll fresh full reports (Studio's minimum
+     * pushall interval, 3 s) for up to BAMBU_DISPATCH_CHECK_MS. "started" needs this job's name in the report or a
+     * new task id with a printing state; a refusal or a failed start throws; otherwise "unconfirmed".
+     */
+    confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string, assertActive: () => void): Promise<"started" | "unconfirmed">;
     startJob(host: string, serial: string, token: string, filename: string, bambuModel?: string): Promise<{
-        status: string;
+        status: "success" | "dispatched_unconfirmed";
         uploaded: boolean;
         printRequested: boolean;
         dispatch: "started" | "unconfirmed";

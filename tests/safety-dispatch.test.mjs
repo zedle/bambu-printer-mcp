@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import JSZip from "jszip";
-import { BambuImplementation, printerRequiresSignedCommands } from "../dist/printers/bambu.js";
+import { BambuImplementation, judgeDispatchReport, printerRequiresSignedCommands } from "../dist/printers/bambu.js";
 import { BambuNetworkBridge } from "../dist/bambu-network-bridge.js";
 import { withPrintSnapshot } from "../dist/safety/artifact.js";
 
@@ -178,7 +178,7 @@ test("an inspected print uploads its private copy when the caller's file changes
     return safetyStatus();
   };
   const result = await printer.print3mf(host, serial, token, { projectName: "snapshot", filePath: file, bambuModel: "p1s", useAMS: false });
-  assert.equal(result.status, "success");
+  assert.equal(result.status, "dispatched_unconfirmed");
   const upload = events.find(({ action }) => action === "upload");
   assert.notEqual(upload.file, file);
   assert.deepEqual(upload.bytes, expected, "uploaded bytes must be the file that passed inspection");
@@ -197,6 +197,41 @@ test("the signed-command flag is read like Bambu's plugin: fun bit 29, else flag
     [{}, false],
     [undefined, false],
   ]) assert.equal(printerRequiresSignedCommands(raw), expected, JSON.stringify(raw));
+});
+
+test("a report after a print command is judged by this job's identity", () => {
+  const idle = { gcode_state: "IDLE", task_id: "100", subtask_id: "100", print_error: 0, hms: [] };
+  const job = "cache/checked-1234-cube.gcode.3mf";
+  for (const [name, report, kind] of [
+    ["this job running", { gcode_state: "RUNNING", subtask_name: "checked-1234-cube" }, "started"],
+    ["this job by file name", { gcode_state: "PREPARE", gcode_file: "/data/Metadata/checked-1234-cube.gcode.3mf" }, "started"],
+    ["a new task id", { gcode_state: "PREPARE", task_id: "101" }, "started"],
+    ["a delta naming no job", { gcode_state: "PREPARE" }, "started"],
+    ["another job running", { gcode_state: "RUNNING", subtask_name: "other", task_id: "101" }, undefined],
+    ["still idle", { gcode_state: "IDLE" }, undefined],
+    ["the printer's project_file refusal", { command: "project_file", result: "fail", reason: "file broken" }, "failed"],
+    ["this job FAILED", { gcode_state: "FAILED", subtask_name: "checked-1234-cube" }, "failed"],
+    ["a new print error", { gcode_state: "IDLE", print_error: 0x0700_8012 }, "failed"],
+    ["the unsigned-command refusal", { hms: [{ attr: 0x05000500, code: 0x00010007 }] }, "rejected"],
+  ]) assert.equal(judgeDispatchReport(report, idle, job)?.kind, kind, name);
+  assert.equal(judgeDispatchReport({ gcode_state: "RUNNING" }, { ...idle, gcode_state: "RUNNING" }, job), undefined, "no name while already printing proves nothing");
+});
+
+test("the LAN dispatch watch ignores another job's pushed report", async (t) => {
+  const file = await fixture(t);
+  const { printer, events } = isolatedPrinter();
+  const { EventEmitter } = await import("node:events");
+  const mqtt = new EventEmitter();
+  mqtt.publish = async payload => {
+    events.push({ action: "publish", payload });
+    setTimeout(() => mqtt.emit("rawMessage", `device/${serial}/report`, Buffer.from(JSON.stringify({ print: { gcode_state: "RUNNING", subtask_name: "someone else" } }))), 50);
+  };
+  printer.getPrinter = async () => mqtt;
+  process.env.BAMBU_DISPATCH_CHECK_MS = "500";
+  t.after(() => { process.env.BAMBU_DISPATCH_CHECK_MS = "0"; });
+  const result = await printer.print3mf(host, serial, token, { projectName: "mine", filePath: file, bambuModel: "p1s", useAMS: false });
+  assert.equal(result.dispatch, "unconfirmed");
+  assert.equal(result.status, "dispatched_unconfirmed");
 });
 
 const signedOnly = [["fun bit 29", { fun: "14023FF1AFFF9CB7" }], ["flag3 bit 4", { flag3: 31 }]];
@@ -318,7 +353,7 @@ test("remote start uploads and starts a uniquely named copy of the inspected dow
     await fs.copyFile(file, destination);
   };
   const result = await printer.startJob(host, serial, token, "old-job.gcode", "p1s");
-  assert.equal(result.status, "success");
+  assert.equal(result.status, "dispatched_unconfirmed");
   assert.deepEqual(downloads, [{ targetHost: host, targetToken: token, remote: "cache/old-job.gcode" }]);
   const upload = events.find(({ action }) => action === "upload");
   assert.deepEqual(upload.bytes, expected);
@@ -367,7 +402,7 @@ for (const [name, changes, error] of [
   });
 }
 
-async function interceptedMcp(t, { blockBridgeInitialization = false, realBridgeRequest = false, model = "p1s", nozzleDiameters = [0.4], ams, bridgeResponse = { ok: true, value: 0 }, env = {} } = {}) {
+async function interceptedMcp(t, { blockBridgeInitialization = false, realBridgeRequest = false, model = "p1s", nozzleDiameters = [0.4], ams, bridgeResponse = { ok: true, value: 0 }, env = {}, afterPrint } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bambu-bridge-safety-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const eventsPath = path.join(dir, "events.jsonl");
@@ -380,13 +415,15 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
     import { BambuNetworkBridge } from ${JSON.stringify(pathToFileURL(path.join(root, "dist/bambu-network-bridge.js")).href)};
     import { STLManipulator } from ${JSON.stringify(pathToFileURL(path.join(root, "dist/stl/stl-manipulator.js")).href)};
     const log = event => fs.appendFileSync(${JSON.stringify(eventsPath)}, JSON.stringify(event) + '\\n');
+    // What the printer reports once a print request went out (B3 confirmation tests).
+    let printSent = false;
     BambuImplementation.prototype.ftpUpload = async (_host, _token, file, remote) => log({action:'upload', file, remote});
     BambuImplementation.prototype.ftpDownload = async () => { throw new Error('Remote artifact unavailable for inspection'); };
     BambuImplementation.prototype.getPrinter = async () => ({publish: async payload => log({action:'publish', payload})});
     STLManipulator.prototype.sliceSTL = async () => { log({action:'slice'}); throw new Error('Test slicer must not be invoked'); };
     BambuImplementation.prototype.getSafetyStatus = async () => {
       const now = Date.now();
-      const reported=fs.existsSync(${JSON.stringify(statusPath)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(statusPath)},'utf8')) : {};
+      const reported={...(fs.existsSync(${JSON.stringify(statusPath)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(statusPath)},'utf8')) : {}), ...(printSent ? ${JSON.stringify(afterPrint ?? {})} : {})};
       return {connected:true, model:${JSON.stringify(model)}, status:reported.gcode_state??'IDLE', serial:${JSON.stringify(serial)},
         raw:{model:${JSON.stringify(model)},gcode_state:'IDLE',nozzle_diameter:${JSON.stringify(String(nozzleDiameters[0]))},device:{nozzle:{info:${JSON.stringify(nozzleDiameters.map((diameter, id) => ({ id, diameter, type: "HH01", stat: 0 })))}}},print_error:0,hms:[],...${JSON.stringify(ams ? { ams } : {})},...reported},
         observation:{source:'mqtt',requestedAt:now,receivedAt:now,identitySource:'report'}};
@@ -409,6 +446,9 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
       }}};
     };` : `BambuNetworkBridge.prototype.request = async (method, payload) => {
       log({ action:'bridge', method, payload });
+      if (method.startsWith('net.start_')) {
+        printSent = true;
+      }
       return ${JSON.stringify(bridgeResponse)};
     };`}
   `);
@@ -450,6 +490,29 @@ test("with the bridge as default, print_3mf lan_mqtt_ftps goes through the signe
   assert.deepEqual(events.filter(event => event.action === "publish" || event.action === "upload"), [], "no unsigned MQTT print or FTPS upload");
   assert.ok(events.some(event => event.method === "net.start_print"), "the bridge carries the print");
   assert.equal(JSON.parse(result.content[0].text).routedFrom, "lan_mqtt_ftps");
+});
+
+for (const [name, afterPrint, status, dispatch] of [
+  ["the printer reports the job running", { gcode_state: "RUNNING" }, "success", "started"],
+  ["the printer runs a different job", { gcode_state: "RUNNING", subtask_name: "someone else's part" }, "dispatched_unconfirmed", "unconfirmed"],
+  ["the printer stays idle", {}, "dispatched_unconfirmed", "unconfirmed"],
+]) test(`a bridge print returning 0 is confirmed from the printer: ${name}`, async (t) => {
+  const server = await interceptedMcp(t, { afterPrint, env: { BAMBU_DISPATCH_CHECK_MS: "3500" } });
+  const file = await fixture(t);
+  const result = await server.client.callTool({ name: "print_3mf_bambu_network", arguments: { three_mf_path: file, bambu_model: "p1s", bed_type: "textured_plate", use_ams: false, connection_type: "cloud" } });
+  assert.notEqual(result.isError, true, result.content?.[0]?.text);
+  const body = JSON.parse(result.content[0].text);
+  assert.equal(body.status, status);
+  assert.equal(body.dispatch, dispatch);
+  if (dispatch === "unconfirmed") assert.match(body.message, /has not reported starting.*do not send it again/i);
+  assert.equal((await readEvents(server.eventsPath)).filter(event => event.method === "net.start_print").length, 1);
+});
+
+test("a bridge print the printer reports FAILED for is an error, not a success", async (t) => {
+  const server = await interceptedMcp(t, { afterPrint: { gcode_state: "FAILED", print_error: 0x0500400e }, env: { BAMBU_DISPATCH_CHECK_MS: "3500" } });
+  const result = await server.client.callTool({ name: "print_3mf_bambu_network", arguments: { three_mf_path: await fixture(t), bambu_model: "p1s", bed_type: "textured_plate", use_ams: false, connection_type: "cloud" } });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /print error 0500400E/);
 });
 
 test("raw BambuNetwork start_print cannot bypass the inspected print handler", async (t) => {
@@ -794,7 +857,7 @@ test("unattended by default: checked prints, error clears and heating run withou
   printer.getSafetyStatus = async () => safetyStatus({ state: "FINISH", subtask_name: "previous-part" });
   const result = await printer.print3mf(host, serial, token, { projectName: "agent", filePath: file, bambuModel: "p1s", useAMS: false });
   assert.deepEqual(prompts, [], "no prompt without BAMBU_REQUIRE_CONFIRMATION=1");
-  assert.equal(result.status, "success");
+  assert.equal(result.status, "dispatched_unconfirmed");
   const upload = events.find(({ action }) => action === "upload");
   assert.ok(upload, "the checked file was uploaded");
   assert.match(JSON.stringify(events.filter(({ action }) => action === "publish").at(-1).payload), new RegExp(path.posix.basename(upload.remote).replaceAll(".", "\\.")));

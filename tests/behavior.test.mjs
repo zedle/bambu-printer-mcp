@@ -975,7 +975,7 @@ test("H2 ams_slots expand into project-level ams_mapping and ams_mapping2", asyn
     });
 
     assert.equal(uploaded, true, "print3mf should upload before publishing");
-    assert.equal(result.status, "success");
+    assert.equal(result.status, "dispatched_unconfirmed", "the check is off, so the print is sent but not confirmed");
     assert.ok(publishedPayload?.print, "project_file payload should be published");
     assert.equal(publishedPayload.print.command, "project_file");
     assert.equal(publishedPayload.print.param, "Metadata/plate_1.gcode");
@@ -1018,7 +1018,7 @@ test("H2C model routes project files through the H2 print path independent of se
       bedType: "textured_plate",
     });
 
-    assert.equal(result.status, "success");
+    assert.equal(result.status, "dispatched_unconfirmed");
     assert.equal(path.posix.dirname(uploadedPath), "/");
     assert.ok(path.posix.basename(uploadedPath).endsWith(`-${path.basename(threeMfPath)}`));
     assert.equal(uploadedPath, `/${result.remoteProjectPath}`);
@@ -1078,7 +1078,7 @@ test("P2S pre-sliced .gcode.3mf uses H2-style project_file from /cache instead o
     bambuModel: "p2s",
   });
 
-  assert.equal(result.status, "success");
+  assert.equal(result.status, "dispatched_unconfirmed");
   assert.equal(uploadedPath, `/cache/${fileName}`);
   assert.equal(published.length, 1, "P2S should publish exactly one command");
   const cmd = published[0].print;
@@ -1144,7 +1144,7 @@ test("H2 two-color ams_slots expand at sparse project-level filament positions",
       bedType: "textured_plate",
     });
 
-    assert.equal(result.status, "success");
+    assert.equal(result.status, "dispatched_unconfirmed");
     assert.ok(publishedPayload?.print, "project_file payload should be published");
     assert.deepEqual(publishedPayload.print.ams_mapping, [-1, -1, -1, 1, 2, -1, -1, -1]);
     assert.deepEqual(publishedPayload.print.ams_mapping2, [

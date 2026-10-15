@@ -17,7 +17,7 @@ import { BlenderMcpBridge } from "./blender-mcp-bridge.js";
 import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue } from "./ams-mapping.js";
 import { assertAmsDryingSupported, buildAmsDryingCommand, normalizeAmsDryingRequest } from "./ams-drying.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, parse3MF } from './3mf_parser.js';
-import { BambuImplementation, assertDirectPrintSupported, unsignedLanPrintAllowed } from "./printers/bambu.js";
+import { BambuImplementation, assertDirectPrintSupported, dispatchStatusLabel, unsignedLanPrintAllowed } from "./printers/bambu.js";
 import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
@@ -712,6 +712,22 @@ function resolveBambuNetworkPrintMethod(rawMethod, connectionType) {
     }
     return method;
 }
+/** Bambu's plugin print result codes (bambu_networking.hpp), as Studio explains them. */
+const BRIDGE_PRINT_ERRORS = {
+    [-1]: "invalid agent", [-2]: "no connection to the printer", [-4]: "sending the message failed", [-14]: "file not found",
+    [-15]: "file too large", [-16]: "MD5 check failed", [-17]: "timed out", [-18]: "cancelled", [-20]: "FTP upload failed",
+    [-26]: "signing failed", [-2130]: "FTP upload failed", [-3010]: "requesting the project id failed",
+    [-3020]: "MD5 check of the upload failed", [-3030]: "uploading the 3MF config failed", [-3040]: "sending the notification failed",
+    [-3050]: "timed out waiting for the notification", [-3060]: "getting the notification failed", [-3070]: "3MF file not found",
+    [-3080]: "getting the upload slot failed", [-3090]: "the file is over 1 GB", [-3100]: "uploading the 3MF to Bambu's cloud failed",
+    [-3110]: "patching the project failed", [-3120]: "posting the print task failed", [-3130]: "the printer did not acknowledge the task in time",
+    [-3140]: "the plugin has no signing information for the printer yet (ENC_FLAG_NOT_READY)", [-4010]: "the file is over 1 GB",
+    [-4020]: "FTP upload to the printer failed", [-4030]: "publishing the print command to the printer failed",
+    [-5010]: "FTP upload to the printer failed", [-6010]: "connection to the printer failed", [-6020]: "connection to the server failed",
+};
+function bridgePrintErrorText(code) {
+    return BRIDGE_PRINT_ERRORS[code] ?? "";
+}
 function toBridgeMethod(method) {
     return `net.${method}`;
 }
@@ -1289,13 +1305,14 @@ class BambuPrinterMCPServer {
                 await this.bambuNetwork.ensureLocalChannel(devId, devIp, password, { ...channelOptions, lanOnly: reportedConnection === undefined ? true : reportedConnection === "lan" });
             }
             assertActive();
+            let dispatchStatus = confirmedStatus;
             const bridgeResult = await this.bambuNetwork.callWithAgent(bridgeMethod, { client_job_id: clientJobId, params }, {
                 ...this.bridgeOptionsFromArgs(args, "print_3mf_bambu_network"),
                 beforeDispatch: async (method) => {
                     if (method !== bridgeMethod)
                         return;
                     assertActive();
-                    const dispatchStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
+                    dispatchStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
                     validatePrinterState(dispatchStatus, requirements);
                     this.bambu.assertBedClearance(dispatchStatus, bedClearance);
                 },
@@ -1312,13 +1329,19 @@ class BambuPrinterMCPServer {
                 typeof bridgeResult.value === "number" &&
                 bridgeResult.value !== 0) {
                 const value = bridgeResult.value;
-                throw new Error(`FULU BambuNetwork bridge method ${bridgeMethod} returned non-zero result ${value}.`);
+                throw new Error(`FULU BambuNetwork bridge method ${bridgeMethod} returned ${value}${bridgePrintErrorText(value) ? ` (${bridgePrintErrorText(value)})` : ""}; the printer was not asked to print.`);
             }
             assertActive();
             this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
+            // A 0 from the plugin isn't proof (start_local_print returns ~3 s after publishing, with no printer ack):
+            // confirm the job from the printer's own reports.
+            const dispatch = await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive);
             return {
-                status: "success",
-                message: `FULU BambuNetwork ${bridgePrintMethod} command for ${threeMfFilename} sent successfully.`,
+                status: dispatchStatusLabel(dispatch),
+                dispatch,
+                message: dispatch === "started"
+                    ? `The printer reports the checked ${threeMfFilename} job started (FULU BambuNetwork ${bridgePrintMethod}).`
+                    : `FULU BambuNetwork ${bridgePrintMethod} handed ${threeMfFilename} to the printer, but it has not reported starting yet. Check get_printer_status before assuming it is printing; do not send it again.`,
                 bridgeMethod,
                 bridgeResult,
                 clientJobId,
