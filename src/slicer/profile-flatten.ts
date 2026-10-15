@@ -29,7 +29,7 @@ import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { profileJsonFiles } from './profile-files.js';
-import { NOZZLE_MATERIALS, normalizeNozzleFlow } from './extruder-config.js';
+import { HYBRID_FLOW, NOZZLE_MATERIALS, NOZZLE_VOLUME_ENUM, normalizeNozzleFlow } from './extruder-config.js';
 import type { ExtruderNozzle, FilamentSource, ReportedExtruders } from './extruder-config.js';
 
 export type ProfileKind = "machine" | "process" | "filament";
@@ -54,6 +54,10 @@ export interface FlattenedProfiles {
       /** Hotend material per extruder; undefined where its rows disagree or are absent. */
       nozzleTypes: (string | undefined)[];
       filamentMap?: number[];
+      /** Hotends per extruder by flow (Studio's extruder_nozzle_stats), on printers with a hotend rack. */
+      hotends?: Record<string, number>[];
+      /** Command-line options the slicer needs for this setup (they have no effect from a profile file). */
+      cliArgs?: string[];
     };
   };
 }
@@ -358,7 +362,7 @@ function extruderTypeAt(flat: Record<string, unknown>, index: number): string {
  * without per-extruder variants can only take matching entries. `strict`
  * (per-extruder options given) also checks matching entries.
  */
-function validateNozzleVolumeTypes(flat: Record<string, unknown>, strict: boolean): void {
+function validateNozzleVolumeTypes(flat: Record<string, unknown>, strict: boolean, hotends?: (Record<string, number> | undefined)[]): void {
   const arr = flat["nozzle_volume_type"];
   if (!Array.isArray(arr)) return;
   // Without per-extruder options, matching entries keep the profile's long-standing behaviour.
@@ -379,6 +383,19 @@ function validateNozzleVolumeTypes(flat: Record<string, unknown>, strict: boolea
     return;
   }
   arr.forEach((flow, i) => {
+    if (String(flow) === HYBRID_FLOW) {
+      // Hybrid is a mix of the extruder's own variants (get_extruder_supported_nozzle_volume_types never offers it).
+      const mix = hotends?.[i];
+      if (!mix || Object.values(mix).filter(count => count > 0).length < 2) {
+        throw new Error(`The ${extruderLabel(i, count)} of "${preset}" is set to Hybrid without hotends of two or more flows to mix; give nozzles[${i}].hotends or nozzles_from_printer.`);
+      }
+      for (const [hotend, n] of Object.entries(mix)) {
+        if (n > 0 && !variants[i].includes(`${extruderTypeAt(flat, i)} ${hotend}`)) {
+          throw new Error(`The ${extruderLabel(i, count)} of "${preset}" has no "${hotend}" nozzle in the Bambu Studio profiles; it offers: ${variants[i].map(v => v.replace(`${extruderTypeAt(flat, i)} `, "")).join(", ")}.`);
+        }
+      }
+      return;
+    }
     const variant = `${extruderTypeAt(flat, i)} ${String(flow)}`;
     if (!variants[i].includes(variant)) {
       const offered = variants[i].map(v => v.replace(`${extruderTypeAt(flat, i)} `, "")).join(", ");
@@ -428,14 +445,56 @@ function applyExtruderSetup(
     throw new Error(`The printer reports ${reported.nozzles.length} mounted nozzle(s), but "${preset}" has ${count} extruder(s).`);
   }
 
+  const diameters = machineFlat["nozzle_diameter"];
+  // Hotend racks: extruder_max_nozzle_count > 1 (the H2C's right extruder holds 6).
+  const maxCounts = Array.from({ length: count }, (_, i) => {
+    const value = Array.isArray(machineFlat["extruder_max_nozzle_count"]) ? Number((machineFlat["extruder_max_nozzle_count"] as unknown[])[i]) : 1;
+    return Number.isInteger(value) && value > 0 ? value : 1;
+  });
+  const multiNozzle = maxCounts.some(n => n > 1);
+  // The hotends each extruder can use, by flow: explicit, else (on a rack printer) the report's normal hotends of
+  // the preset's diameter, as Studio's sync from the printer fills extruder_nozzle_stats (GetNozzleGroups).
+  const hotends = Array.from({ length: count }, (_, i): Record<string, number> | undefined => {
+    const given = explicit?.[i]?.hotends;
+    if (given) {
+      if (maxCounts[i] < 2) throw new Error(`The ${extruderLabel(i, count)} of "${preset}" holds one hotend; nozzles[${i}].hotends is only for an extruder with a hotend rack.`);
+      const total = Object.values(given).reduce((sum, n) => sum + n, 0);
+      if (total > maxCounts[i]) throw new Error(`nozzles[${i}].hotends lists ${total} hotends; the ${extruderLabel(i, count)} of "${preset}" holds at most ${maxCounts[i]}.`);
+      return { ...given };
+    }
+    if (!multiNozzle || !reported?.hotends) return undefined;
+    const diameter = Array.isArray(diameters) ? Number(diameters[i]) : NaN;
+    const stats: Record<string, number> = {};
+    for (const hotend of reported.hotends) {
+      if (hotend.physical === physical[i] && Math.abs(hotend.diameter - diameter) <= 0.0001) stats[hotend.flow] = (stats[hotend.flow] ?? 0) + 1;
+    }
+    return stats;
+  });
+
   // Merge: explicit field > printer report > uniform nozzleType > profile.
   const nozzles = Array.from({ length: count }, (_, i) => {
     const fromReport = reported?.nozzles.find(n => n.physical === physical[i]);
     if (reported && !fromReport) throw new Error(`The printer report has no nozzle ${physical[i]} for the ${extruderLabel(i, count)}.`);
-    const flow = explicit?.[i]?.flow ?? fromReport?.flow;
+    // A rack holding several flows of the preset's diameter slices as Hybrid, as Studio's printer sync sets it.
+    const mixed = hotends[i] && Object.values(hotends[i]!).filter(n => n > 0).length > 1 ? HYBRID_FLOW : undefined;
+    let flow = explicit?.[i]?.flow ?? (explicit?.[i]?.hotends ? mixed ?? Object.keys(hotends[i]!).find(f => hotends[i]![f] > 0) : undefined) ?? mixed ?? fromReport?.flow;
     if (reported && !flow) {
       throw new Error(`The printer did not report a known flow type for the ${extruderLabel(i, count)}; give it in nozzles.`);
     }
+    if (flow === HYBRID_FLOW && maxCounts[i] < 2) {
+      throw new Error(`The ${extruderLabel(i, count)} of "${preset}" holds one hotend, so it can't be Hybrid (several flows at once).`);
+    }
+    const stats = hotends[i];
+    if (stats && flow && flow !== HYBRID_FLOW) {
+      // One flow: only that flow's hotends count (Studio's on_volume_type_switch); none of it is an error.
+      if (!(stats[flow] > 0)) {
+        throw new Error(explicit?.[i]?.hotends
+          ? `nozzles[${i}].hotends has no "${flow}" hotend for the ${extruderLabel(i, count)}'s ${flow} flow.`
+          : `The printer reports no ${Array.isArray(diameters) ? String(diameters[i]) : ""} mm ${flow} hotend for the ${extruderLabel(i, count)}.`);
+      }
+      hotends[i] = { [flow]: stats[flow] };
+    }
+    if (flow === HYBRID_FLOW && stats && Object.values(stats).filter(n => n > 0).length === 1) flow = Object.keys(stats).find(f => stats[f] > 0);
     return {
       diameter: explicit?.[i]?.diameter ?? fromReport?.diameter,
       flow,
@@ -443,7 +502,6 @@ function applyExtruderSetup(
     };
   });
 
-  const diameters = machineFlat["nozzle_diameter"];
   nozzles.forEach((nozzle, i) => {
     if (nozzle.diameter === undefined) return;
     const profile = Array.isArray(diameters) ? Number(diameters[i]) : NaN;
@@ -457,9 +515,19 @@ function applyExtruderSetup(
 
   if (nozzles.some(n => n.flow)) {
     const current = Array.isArray(machineFlat["nozzle_volume_type"]) ? machineFlat["nozzle_volume_type"] as unknown[] : [];
-    machineFlat["nozzle_volume_type"] = nozzles.map((n, i) => n.flow ? normalizeNozzleFlow(n.flow) : String(current[i] ?? "Standard"));
+    machineFlat["nozzle_volume_type"] = nozzles.map((n, i) => n.flow ? normalizeNozzleFlow(n.flow, true) : String(current[i] ?? "Standard"));
   }
-  validateNozzleVolumeTypes(machineFlat, true);
+  validateNozzleVolumeTypes(machineFlat, true, hotends);
+  const volumeTypes = (machineFlat["nozzle_volume_type"] as unknown[]).map(String);
+  // Every extruder's hotends by flow, for the CLI (extruder_nozzle_count / extruder_nozzle_volume_type): known
+  // stats, else the extruder's flow times its capacity (the profile's own extruder_nozzle_stats).
+  const knownHotends = multiNozzle && (volumeTypes.includes(HYBRID_FLOW) || !!explicit?.some(n => n.hotends));
+  const allHotends = knownHotends ? volumeTypes.map((flow, i) => {
+    const stats = hotends[i];
+    if (stats && Object.values(stats).some(n => n > 0)) return stats;
+    if (flow === HYBRID_FLOW) throw new Error(`The ${extruderLabel(i, count)} of "${preset}" is Hybrid but no hotends are known for it.`);
+    return { [flow]: maxCounts[i] };
+  }) : undefined;
 
   // nozzle_type has one row per hotend variant; printer_extruder_id (1-based) owns each row.
   if (nozzles.some(n => n.type)) {
@@ -488,16 +556,30 @@ function applyExtruderSetup(
     }
   }
 
-  const filamentMap = resolveFilamentMap(machineFlat, filamentFlats, filamentLeaves, physical, opts);
+  // The flows a filament on each extruder can print with: a Hybrid extruder offers each of its hotends' flows.
+  const extruderFlows = volumeTypes.map((flow, i) => flow === HYBRID_FLOW
+    ? Object.keys(hotends[i] ?? {}).filter(f => (hotends[i]![f] ?? 0) > 0) : [flow]);
+  const filamentMap = resolveFilamentMap(machineFlat, filamentFlats, filamentLeaves, physical, opts, extruderFlows);
   if (filamentMap && count > 1) {
     processFlat["filament_map_mode"] = "Manual";
     processFlat["filament_map"] = filamentMap.map(String);
+  }
+  const cliArgs: string[] = [];
+  if (volumeTypes.includes(HYBRID_FLOW)) cliArgs.push("--nozzle-volume-type", volumeTypes.join(","));
+  if (allHotends) {
+    // Sub-nozzles in Studio's map order (NozzleVolumeType enum), extruder by extruder.
+    const ordered = allHotends.map(stats => Object.entries(stats).filter(([, n]) => n > 0)
+      .sort(([a], [b]) => NOZZLE_VOLUME_ENUM[a] - NOZZLE_VOLUME_ENUM[b]));
+    cliArgs.push("--extruder-nozzle-count", ordered.map(entries => entries.reduce((sum, [, n]) => sum + n, 0)).join(","));
+    cliArgs.push("--extruder-nozzle-volume-type", ordered.flatMap(entries => entries.flatMap(([flow, n]) => Array(n).fill(flow))).join(","));
   }
 
   const rows = Array.isArray(machineFlat["nozzle_type"]) ? machineFlat["nozzle_type"] as unknown[] : [];
   const owners = Array.isArray(machineFlat["printer_extruder_id"]) ? machineFlat["printer_extruder_id"] as unknown[] : [];
   return {
-    nozzleVolumeType: (machineFlat["nozzle_volume_type"] as unknown[]).map(String),
+    nozzleVolumeType: volumeTypes,
+    ...(allHotends ? { hotends: allHotends } : {}),
+    ...(cliArgs.length ? { cliArgs } : {}),
     nozzleTypes: Array.from({ length: count }, (_, i) => {
       const own = owners.length === rows.length ? rows.filter((_, r) => Number(owners[r]) === i + 1) : count === 1 ? rows : [rows[i]];
       return own.length > 0 && own.every(t => t === own[0]) && typeof own[0] === "string" ? own[0] : undefined;
@@ -512,7 +594,8 @@ function resolveFilamentMap(
   filamentFlats: Record<string, unknown>[],
   filamentLeaves: string[],
   physical: number[],
-  opts: FlattenOptions
+  opts: FlattenOptions,
+  extruderFlows?: string[][]
 ): number[] | undefined {
   const count = physical.length;
   const slots = filamentFlats.length;
@@ -589,10 +672,12 @@ function resolveFilamentMap(
     }
     const variants = filament["filament_extruder_variant"];
     const nozzleVolume = machineFlat["nozzle_volume_type"];
-    const variant = Array.isArray(nozzleVolume) ? `${extruderTypeAt(machineFlat, extruder - 1)} ${String(nozzleVolume[extruder - 1])}` : undefined;
-    if (variant && Array.isArray(variants) && variants.length > 0 && !variants.includes(variant)) {
+    const flows = extruderFlows?.[extruder - 1] ?? (Array.isArray(nozzleVolume) ? [String(nozzleVolume[extruder - 1])] : []);
+    const offered = flows.map(flow => `${extruderTypeAt(machineFlat, extruder - 1)} ${flow}`);
+    // On a Hybrid extruder the filament needs settings for at least one of its hotends' flows.
+    if (offered.length && Array.isArray(variants) && variants.length > 0 && !offered.some(variant => variants.includes(variant))) {
       throw new Error(
-        `Filament profile "${filamentLeaves[slot]}" has no settings for the ${extruderLabel(extruder - 1, count)}'s ${variant} nozzle ` +
+        `Filament profile "${filamentLeaves[slot]}" has no settings for the ${extruderLabel(extruder - 1, count)}'s ${offered.join(" or ")} nozzle ` +
           `(it has: ${variants.join(", ")}).`
       );
     }

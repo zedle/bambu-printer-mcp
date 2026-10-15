@@ -479,3 +479,93 @@ test("real Bambu Studio CLI slices a two-colour H2C job on mixed nozzles", { tim
   assert.deepEqual(inspection.filamentMap, [2, 1]);
   assert.deepEqual(inspection.usedFilamentPositions, [0, 1]);
 });
+
+/* --- Hotend racks and Hybrid (H2C right extruder) -------------------------- */
+
+const RACK = { extruder_max_nozzle_count: ["1", "6"] };
+
+test("nozzles argument: Hybrid flow and per-flow hotend counts", () => {
+  assert.deepEqual(parseExtruderNozzlesArg([{ flow: "high flow" }, { flow: "hybrid", hotends: { standard: 3, "High Flow": "3" } }]),
+    [{ flow: "High Flow" }, { flow: "Hybrid", hotends: { Standard: 3, "High Flow": 3 } }]);
+  assert.throws(() => parseExtruderNozzlesArg([{}, { hotends: { Hybrid: 2 } }]), /Unknown nozzle flow "Hybrid"/);
+  assert.throws(() => parseExtruderNozzlesArg([{}, { hotends: { Standard: 1.5 } }]), /whole number/);
+  assert.throws(() => parseExtruderNozzlesArg([{}, { hotends: { Standard: 0 } }]), /lists no hotend/);
+});
+
+test("the report lists every normal hotend with a known flow, rack ones on the main extruder", () => {
+  const report = h2cReport();
+  report.device.nozzle.info.push({ id: 19, diameter: 0.4, type: "HH01", stat: 0 }, { id: 20, diameter: 0.4, type: "HH01", stat: 2 });
+  assert.deepEqual(extrudersFromReport(report).hotends, [
+    { physical: 0, diameter: 0.4, flow: "Standard" }, { physical: 1, diameter: 0.4, flow: "High Flow" },
+    { physical: 0, diameter: 0.2, flow: "Standard" }, { physical: 0, diameter: 0.6, flow: "Standard" }, { physical: 0, diameter: 0.4, flow: "High Flow" },
+  ], "the abnormal hotend 20 is left out");
+});
+
+test("a Hybrid rack extruder slices with its hotends' flows through the CLI's nozzle options", async () => {
+  const t = await dualTree(RACK);
+  const hybrid = await t.flatten({ extruderNozzles: [{ flow: "High Flow" }, { flow: "Hybrid", hotends: { "High Flow": 3, Standard: 3 } }] });
+  assert.deepEqual((await t.read(hybrid.machinePath)).nozzle_volume_type, ["High Flow", "Hybrid"]);
+  assert.deepEqual(hybrid.meta.extruders.hotends, [{ "High Flow": 1 }, { "High Flow": 3, Standard: 3 }]);
+  // Studio's own CLI form: Standard sub-nozzles before High Flow ones (NozzleVolumeType order).
+  assert.deepEqual(hybrid.meta.extruders.cliArgs, ["--nozzle-volume-type", "High Flow,Hybrid", "--extruder-nozzle-count", "1,6",
+    "--extruder-nozzle-volume-type", "High Flow,Standard,Standard,Standard,High Flow,High Flow,High Flow"]);
+  // Hotends of two flows without a flow make the extruder Hybrid; of one flow, that flow.
+  const implied = await t.flatten({ extruderNozzles: [{}, { hotends: { Standard: 2, "High Flow": 1 } }] });
+  assert.deepEqual(implied.meta.extruders.nozzleVolumeType, ["Standard", "Hybrid"]);
+  const single = await t.flatten({ extruderNozzles: [{}, { hotends: { "High Flow": 2 } }] });
+  assert.deepEqual(single.meta.extruders.nozzleVolumeType, ["Standard", "High Flow"]);
+  assert.deepEqual(single.meta.extruders.cliArgs, ["--extruder-nozzle-count", "1,2", "--extruder-nozzle-volume-type", "Standard,High Flow,High Flow"]);
+  // A filament needs settings for at least one of the Hybrid extruder's flows.
+  await t.flatten({ filamentLeaves: ["PLA standard-only @TEST", "PLA @TEST"], filamentMap: [2, 2],
+    extruderNozzles: [{}, { flow: "Hybrid", hotends: { Standard: 1, "High Flow": 1 } }] });
+  await assert.rejects(t.flatten({ filamentLeaves: ["PLA standard-only @TEST", "PLA @TEST"], filamentMap: [2, 2],
+    extruderNozzles: [{}, { flow: "Hybrid", hotends: { "High Flow": 2 } }] }), /no "Standard" hotend|High Flow nozzle/);
+});
+
+test("Hybrid is refused without a rack, without hotends to mix, or with a flow the extruder lacks", async () => {
+  const t = await dualTree(RACK);
+  await assert.rejects(t.flatten({ extruderNozzles: [{}, { flow: "Hybrid" }] }), /Hybrid without hotends of two or more flows/);
+  await assert.rejects(t.flatten({ extruderNozzles: [{ flow: "Hybrid", hotends: { Standard: 1 } }, {}] }), /holds one hotend/);
+  await assert.rejects(t.flatten({ extruderNozzles: [{}, { flow: "Hybrid", hotends: { Standard: 3, "E3D High Flow": 3 } }] }), /right nozzle \(extruder 2\).*has no "E3D High Flow" nozzle/);
+  await assert.rejects(t.flatten({ extruderNozzles: [{}, { flow: "Hybrid", hotends: { Standard: 4, "High Flow": 3 } }] }), /holds at most 6/);
+  await assert.rejects(t.flatten({ extruderNozzles: [{}, { flow: "Standard", hotends: { "High Flow": 2 } }] }), /no "Standard" hotend/);
+  const noRack = await dualTree();
+  await assert.rejects(noRack.flatten({ extruderNozzles: [{}, { flow: "Hybrid", hotends: { Standard: 1, "High Flow": 1 } }] }), /holds one hotend/);
+});
+
+test("a rack holding several flows at the slice diameter makes nozzles_from_printer slice the right extruder Hybrid", async () => {
+  const t = await dualTree(RACK);
+  const report = h2cReport();
+  report.device.nozzle.info.push({ id: 19, diameter: 0.4, type: "HH01", stat: 0 }, { id: 21, diameter: 0.4, type: "HH01", stat: 0 });
+  const result = await t.flatten({ reportedExtruders: extrudersFromReport(report), filamentMap: [2, 2] });
+  assert.deepEqual(result.meta.extruders.nozzleVolumeType, ["High Flow", "Hybrid"]);
+  assert.deepEqual(result.meta.extruders.hotends, [{ "High Flow": 1 }, { Standard: 1, "High Flow": 2 }], "the 0.2 and 0.6 hotends don't count");
+  // An explicit flow keeps that flow's hotends only.
+  const standard = await t.flatten({ reportedExtruders: extrudersFromReport(report), extruderNozzles: [{}, { flow: "Standard" }] });
+  assert.deepEqual(standard.meta.extruders.nozzleVolumeType, ["High Flow", "Standard"]);
+  await assert.rejects(t.flatten({ reportedExtruders: extrudersFromReport(h2cReport()), extruderNozzles: [{}, { flow: "High Flow" }] }), /reports no 0.4 mm High Flow hotend for the right nozzle/);
+});
+
+test("sliceSTL passes a Hybrid setup's nozzle options to the CLI", async (t) => {
+  if (process.platform === "win32") return t.skip("fake CLI is a POSIX shebang script");
+  const tree = await dualTree(RACK);
+  const capture = path.join(tree.root, "args.json");
+  const executable = path.join(tree.root, "bambu-studio");
+  await fs.writeFile(executable, `#!${process.execPath}\nconst fs = require('fs'); const path = require('path'); const args = process.argv.slice(2); fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify(args)); fs.writeFileSync(path.join(args[args.indexOf('--outputdir') + 1], args[args.indexOf('--export-3mf') + 1]), 'fixture output');\n`, { mode: 0o755 });
+  const saved = Object.fromEntries(["BAMBU_PROFILES_ROOT", "BAMBU_SLICER_PROFILE_DIRS"].map(k => [k, process.env[k]]));
+  t.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+  process.env.BAMBU_PROFILES_ROOT = tree.root;
+  process.env.BAMBU_SLICER_PROFILE_DIRS = "";
+  await fs.writeFile(path.join(tree.bbl, "machine", `${DUAL_MACHINE.name}.json`),
+    JSON.stringify({ ...DUAL_MACHINE, ...RACK, default_print_profile: "0.20mm @TEST", default_filament_profile: ["PLA @TEST", "PLA @TEST"] }));
+  const stl = path.join(tree.root, "model.stl");
+  await fs.writeFile(stl, "fixture STL");
+  await new STLManipulator(path.join(tree.root, "work")).sliceSTL(stl, "bambustudio", executable, undefined, undefined, DUAL_MACHINE.name,
+    { extruderNozzles: [{ flow: "High Flow" }, { flow: "Hybrid", hotends: { Standard: 2, "High Flow": 2 } }] });
+  const args = JSON.parse(await fs.readFile(capture, "utf8"));
+  const option = name => args[args.indexOf(name) + 1];
+  assert.equal(option("--nozzle-volume-type"), "High Flow,Hybrid");
+  assert.equal(option("--extruder-nozzle-count"), "1,4");
+  assert.equal(option("--extruder-nozzle-volume-type"), "High Flow,Standard,Standard,High Flow,High Flow");
+  assert.equal(args.at(-1), stl, "the input stays last");
+});

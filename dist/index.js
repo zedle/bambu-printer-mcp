@@ -27,7 +27,7 @@ import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safe
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
 import { nextSequenceId } from "./sequence-id.js";
 import { requestNozzleMapping } from "./nozzle-mapping.js";
-import { NOZZLE_FLOWS, NOZZLE_MATERIALS, extrudersFromReport, parseExtruderNozzlesArg, parseFilamentMapArg, parseFilamentSourcesArg, sliceNozzleDiameter, } from "./slicer/extruder-config.js";
+import { HYBRID_FLOW, NOZZLE_FLOWS, NOZZLE_MATERIALS, extrudersFromReport, parseExtruderNozzlesArg, parseFilamentMapArg, parseFilamentSourcesArg, sliceNozzleDiameter, } from "./slicer/extruder-config.js";
 import { normalizeModel } from "./safety/limits.js";
 dotenv.config();
 const DEFAULT_HOST = process.env.BAMBU_PRINTER_HOST || process.env.PRINTER_HOST || "localhost";
@@ -85,11 +85,16 @@ const EXTRUDER_SLICE_SCHEMA_PROPERTIES = {
             additionalProperties: false,
             properties: {
                 diameter: { type: "number", description: "Nozzle diameter in mm; must be the same on both extruders (Bambu Studio has one machine preset per diameter)." },
-                flow: { type: "string", enum: [...NOZZLE_FLOWS], description: "Nozzle flow type; must be one of this extruder's variants in the Bambu Studio profiles." },
-                type: { type: "string", enum: [...NOZZLE_MATERIALS], description: "Hotend material." }
+                flow: { type: "string", enum: [...NOZZLE_FLOWS, HYBRID_FLOW], description: "Nozzle flow type; must be one of this extruder's variants in the Bambu Studio profiles. \"Hybrid\" (an extruder with a hotend rack, the H2C's right one) slices with several flows at once, from its hotends; each filament gets one of them." },
+                type: { type: "string", enum: [...NOZZLE_MATERIALS], description: "Hotend material." },
+                hotends: {
+                    type: "object",
+                    additionalProperties: { type: "integer", minimum: 0 },
+                    description: "Extruders with a hotend rack (H2C right): the hotends it can use by flow, e.g. {\"Standard\": 3, \"High Flow\": 3}. Defaults to the printer's normal hotends of the slice diameter with nozzles_from_printer. Two or more flows make the extruder Hybrid unless flow says otherwise."
+                }
             }
         },
-        description: "Per-extruder nozzles in Bambu Studio's extruder order: [left, right] on dual-nozzle printers (H2D, H2D Pro, H2C, X2D), one entry otherwise. Example for an H2C with a left tungsten carbide High Flow and a right hardened steel Standard: [{\"flow\":\"High Flow\",\"type\":\"tungsten_carbide\"},{\"flow\":\"Standard\",\"type\":\"hardened_steel\"}]. Fields left out come from nozzles_from_printer, then the machine preset. Combinations the profiles don't have are refused."
+        description: "Per-extruder nozzles in Bambu Studio's extruder order: [left, right] on dual-nozzle printers (H2D, H2D Pro, H2C, X2D), one entry otherwise. Example for an H2C with a left tungsten carbide High Flow and a right hardened steel Standard: [{\"flow\":\"High Flow\",\"type\":\"tungsten_carbide\"},{\"flow\":\"Standard\",\"type\":\"hardened_steel\"}]. Fields left out come from nozzles_from_printer, then the machine preset; on an H2C whose rack holds hotends of several flows at the slice diameter, nozzles_from_printer slices the right extruder as Hybrid, as Bambu Studio's printer sync does. Combinations the profiles don't have are refused."
     },
     nozzles_from_printer: { type: "boolean", description: "Read the mounted nozzles (diameter, flow, material) and the AMS / external spool feeds from a fresh printer report before slicing. Explicit nozzles fields win. Default false." },
     filament_map: {

@@ -18,18 +18,27 @@
 
 import { reportedNozzles } from "../safety/printer-state.js";
 
-/** Bambu Studio's NozzleVolumeType names. */
+/** Bambu Studio's NozzleVolumeType names of one nozzle. */
 export const NOZZLE_FLOWS = ["Standard", "High Flow", "TPU High Flow", "E3D High Flow"] as const;
+/**
+ * Studio's nvtHybrid: an extruder that slices with several flows at once, from the hotends of a rack (the H2C's
+ * right extruder). Each filament then gets one of those flows.
+ */
+export const HYBRID_FLOW = "Hybrid";
+/** Studio's NozzleVolumeType enum values (filament_volume_map, extruder_nozzle_volume_type order). */
+export const NOZZLE_VOLUME_ENUM: Record<string, number> = { "Standard": 0, "High Flow": 1, "Hybrid": 2, "TPU High Flow": 3, "E3D High Flow": 5 };
 /** Bambu Studio's nozzle_type names (hotend material). */
 export const NOZZLE_MATERIALS = ["stainless_steel", "hardened_steel", "tungsten_carbide", "brass"] as const;
 
 /** One extruder's nozzle. Missing fields keep the printer report or the machine profile's value. */
 export interface ExtruderNozzle {
   diameter?: number;
-  /** One of NOZZLE_FLOWS. */
+  /** One of NOZZLE_FLOWS, or HYBRID_FLOW on an extruder with a hotend rack. */
   flow?: string;
   /** One of NOZZLE_MATERIALS. */
   type?: string;
+  /** Hotends the extruder can use, by flow (Studio's extruder_nozzle_stats), e.g. {"Standard": 3, "High Flow": 3}. */
+  hotends?: Record<string, number>;
 }
 
 /** Where a filament slot is loaded from. `unit` selects one AMS unit by its reported id. */
@@ -42,6 +51,11 @@ export interface ReportedExtruders {
   ams: { unit: number; physical: number[] | undefined }[];
   /** External spool holders, by the physical extruder they feed. */
   external: { physical: number; loaded: boolean }[];
+  /**
+   * Every hotend an extruder can print with: the mounted one plus, on a rack printer, the rack's (on the main
+   * extruder). Only normal ones with a known flow (Studio's GetNozzleGroups skips unknown and abnormal hotends).
+   */
+  hotends?: { physical: number; diameter: number; flow: string }[];
 }
 
 const token = (value: unknown) => String(value ?? "").trim().toLowerCase().replace(/[\s_-]+/g, "");
@@ -54,9 +68,11 @@ const FLOW_BY_TOKEN: Record<string, string> = {
   e3dhighflow: "E3D High Flow",
 };
 
-export function normalizeNozzleFlow(value: unknown): string {
+/** A nozzle flow name; HYBRID_FLOW too when `hybrid` (an extruder's flow, not one hotend's). */
+export function normalizeNozzleFlow(value: unknown, hybrid = false): string {
+  if (hybrid && token(value) === "hybrid") return HYBRID_FLOW;
   const flow = FLOW_BY_TOKEN[token(value)];
-  if (!flow) throw new Error(`Unknown nozzle flow "${String(value)}". Valid flows: ${NOZZLE_FLOWS.join(", ")}.`);
+  if (!flow) throw new Error(`Unknown nozzle flow "${String(value)}". Valid flows: ${[...NOZZLE_FLOWS, ...(hybrid ? [HYBRID_FLOW] : [])].join(", ")}.`);
   return flow;
 }
 
@@ -98,8 +114,8 @@ export function parseExtruderNozzlesArg(value: unknown): ExtruderNozzle[] | unde
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
       throw new Error(`nozzles[${i}] must be an object with optional diameter, flow and type.`);
     }
-    const unknown = Object.keys(entry).filter(key => !["diameter", "flow", "type"].includes(key));
-    if (unknown.length) throw new Error(`nozzles[${i}] has unknown field(s) ${unknown.join(", ")}; use diameter, flow and type.`);
+    const unknown = Object.keys(entry).filter(key => !["diameter", "flow", "type", "hotends"].includes(key));
+    if (unknown.length) throw new Error(`nozzles[${i}] has unknown field(s) ${unknown.join(", ")}; use diameter, flow, type and hotends.`);
     const raw = entry as Record<string, unknown>;
     const nozzle: ExtruderNozzle = {};
     if (raw.diameter !== undefined && raw.diameter !== null && raw.diameter !== "") {
@@ -107,7 +123,19 @@ export function parseExtruderNozzlesArg(value: unknown): ExtruderNozzle[] | unde
       if (!Number.isFinite(diameter) || diameter <= 0) throw new Error(`nozzles[${i}].diameter must be a positive number of millimetres.`);
       nozzle.diameter = diameter;
     }
-    if (raw.flow !== undefined && raw.flow !== null && raw.flow !== "") nozzle.flow = normalizeNozzleFlow(raw.flow);
+    if (raw.flow !== undefined && raw.flow !== null && raw.flow !== "") nozzle.flow = normalizeNozzleFlow(raw.flow, true);
+    if (raw.hotends !== undefined && raw.hotends !== null) {
+      if (typeof raw.hotends !== "object" || Array.isArray(raw.hotends)) throw new Error(`nozzles[${i}].hotends must map flows to hotend counts, e.g. {"Standard": 3, "High Flow": 3}.`);
+      const hotends: Record<string, number> = {};
+      for (const [flow, count] of Object.entries(raw.hotends as Record<string, unknown>)) {
+        const name = normalizeNozzleFlow(flow);
+        const number = Number(count);
+        if (!Number.isInteger(number) || number < 0) throw new Error(`nozzles[${i}].hotends["${flow}"] must be a whole number of hotends.`);
+        hotends[name] = (hotends[name] ?? 0) + number;
+      }
+      if (!Object.values(hotends).some(count => count > 0)) throw new Error(`nozzles[${i}].hotends lists no hotend.`);
+      nozzle.hotends = hotends;
+    }
     if (raw.type !== undefined && raw.type !== null && raw.type !== "") nozzle.type = normalizeNozzleMaterial(raw.type);
     return nozzle;
   });
@@ -170,6 +198,10 @@ export function extrudersFromReport(raw: Record<string, any>): ReportedExtruders
   }));
   if (nozzles.length === 0) throw new Error("The printer report lists no mounted nozzles.");
   const ids = nozzles.map(nozzle => nozzle.physical);
+  const normal = (nozzle: { stat?: number }) => nozzle.stat === undefined || ((nozzle.stat >>> 1) & 3) === 0;
+  const hotends = [...reportedNozzles(raw), ...reportedNozzles(raw, true).map(nozzle => ({ ...nozzle, index: 0 }))]
+    .filter(nozzle => normal(nozzle) && nozzle.flow && FLOW_FROM_REPORT[nozzle.flow])
+    .map(nozzle => ({ physical: nozzle.index, diameter: nozzle.diameter, flow: FLOW_FROM_REPORT[nozzle.flow!] }));
   const single = ids.length === 1;
 
   const units = Array.isArray(raw.ams?.ams) ? raw.ams.ams : [];
@@ -193,7 +225,7 @@ export function extrudersFromReport(raw: Record<string, any>): ReportedExtruders
     if (physical === undefined || !ids.includes(physical) || external.some(entry => entry.physical === physical)) continue;
     external.push({ physical, loaded: loaded(holder) });
   }
-  return { nozzles, ams, external };
+  return { nozzles, ams, external, hotends };
 }
 
 /**

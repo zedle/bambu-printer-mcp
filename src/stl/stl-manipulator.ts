@@ -192,6 +192,8 @@ interface BambuSettingsBundle {
   filamentColours?: string[];
   /** Saved per-plate tower coordinates must survive default process loading. */
   projectTowerPosition?: { wipe_tower_x?: unknown; wipe_tower_y?: unknown };
+  /** Command-line options the per-extruder setup needs (they have no effect from a profile file). */
+  cliArgs?: string[];
   /** Identity provenance before the process is merged into a generated file. */
   processSource?: { filePath: string; profile: Record<string, unknown> };
 }
@@ -606,6 +608,7 @@ export class STLManipulator extends EventEmitter {
     // Per-extruder settings are CLI fields too: keep them on standalone files.
     const extruderSetup = Boolean(bambuOptions && hasExtruderSetup(bambuOptions));
     return {
+      ...(flat.meta.extruders?.cliArgs ? { cliArgs: flat.meta.extruders.cliArgs } : {}),
       settingsArg: [
         needsResolution(machinePath, machine) ? flat.machinePath
           : extruderSetup ? withCliFields(machinePath, machine, flat.machinePath, ['nozzle_volume_type', 'nozzle_type']) : machinePath,
@@ -1745,6 +1748,7 @@ export class STLManipulator extends EventEmitter {
               args.push('--load-defaultfila');
             }
             if (bambuOptions?.loadFilamentIds) args.push('--load-filament-ids', bambuOptions.loadFilamentIds);
+            if (cliBundle.cliArgs) args.push(...cliBundle.cliArgs);
 
             args.push(stlFilePath);
             // Override outputFilePath for bambustudio since it produces 3MF, not gcode

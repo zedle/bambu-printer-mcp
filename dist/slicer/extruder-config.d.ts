@@ -15,17 +15,26 @@
  * 1 = deputy/left on dual-nozzle printers); the machine profile's
  * `physical_extruder_map` links the two.
  */
-/** Bambu Studio's NozzleVolumeType names. */
+/** Bambu Studio's NozzleVolumeType names of one nozzle. */
 export declare const NOZZLE_FLOWS: readonly ["Standard", "High Flow", "TPU High Flow", "E3D High Flow"];
+/**
+ * Studio's nvtHybrid: an extruder that slices with several flows at once, from the hotends of a rack (the H2C's
+ * right extruder). Each filament then gets one of those flows.
+ */
+export declare const HYBRID_FLOW = "Hybrid";
+/** Studio's NozzleVolumeType enum values (filament_volume_map, extruder_nozzle_volume_type order). */
+export declare const NOZZLE_VOLUME_ENUM: Record<string, number>;
 /** Bambu Studio's nozzle_type names (hotend material). */
 export declare const NOZZLE_MATERIALS: readonly ["stainless_steel", "hardened_steel", "tungsten_carbide", "brass"];
 /** One extruder's nozzle. Missing fields keep the printer report or the machine profile's value. */
 export interface ExtruderNozzle {
     diameter?: number;
-    /** One of NOZZLE_FLOWS. */
+    /** One of NOZZLE_FLOWS, or HYBRID_FLOW on an extruder with a hotend rack. */
     flow?: string;
     /** One of NOZZLE_MATERIALS. */
     type?: string;
+    /** Hotends the extruder can use, by flow (Studio's extruder_nozzle_stats), e.g. {"Standard": 3, "High Flow": 3}. */
+    hotends?: Record<string, number>;
 }
 /** Where a filament slot is loaded from. `unit` selects one AMS unit by its reported id. */
 export type FilamentSource = {
@@ -52,8 +61,18 @@ export interface ReportedExtruders {
         physical: number;
         loaded: boolean;
     }[];
+    /**
+     * Every hotend an extruder can print with: the mounted one plus, on a rack printer, the rack's (on the main
+     * extruder). Only normal ones with a known flow (Studio's GetNozzleGroups skips unknown and abnormal hotends).
+     */
+    hotends?: {
+        physical: number;
+        diameter: number;
+        flow: string;
+    }[];
 }
-export declare function normalizeNozzleFlow(value: unknown): string;
+/** A nozzle flow name; HYBRID_FLOW too when `hybrid` (an extruder's flow, not one hotend's). */
+export declare function normalizeNozzleFlow(value: unknown, hybrid?: boolean): string;
 export declare function normalizeNozzleMaterial(value: unknown): string;
 /** The `nozzles` tool argument: one object per extruder, left first. */
 export declare function parseExtruderNozzlesArg(value: unknown): ExtruderNozzle[] | undefined;

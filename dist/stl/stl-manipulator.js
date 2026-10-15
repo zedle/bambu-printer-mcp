@@ -443,6 +443,7 @@ export class STLManipulator extends EventEmitter {
         // Per-extruder settings are CLI fields too: keep them on standalone files.
         const extruderSetup = Boolean(bambuOptions && hasExtruderSetup(bambuOptions));
         return {
+            ...(flat.meta.extruders?.cliArgs ? { cliArgs: flat.meta.extruders.cliArgs } : {}),
             settingsArg: [
                 needsResolution(machinePath, machine) ? flat.machinePath
                     : extruderSetup ? withCliFields(machinePath, machine, flat.machinePath, ['nozzle_volume_type', 'nozzle_type']) : machinePath,
@@ -1376,6 +1377,8 @@ export class STLManipulator extends EventEmitter {
                         }
                         if (bambuOptions?.loadFilamentIds)
                             args.push('--load-filament-ids', bambuOptions.loadFilamentIds);
+                        if (cliBundle.cliArgs)
+                            args.push(...cliBundle.cliArgs);
                         args.push(stlFilePath);
                         // Override outputFilePath for bambustudio since it produces 3MF, not gcode
                         outputFilePath = bambuOutputPath;

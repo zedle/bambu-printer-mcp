@@ -45,6 +45,10 @@ export interface FlattenedProfiles {
             /** Hotend material per extruder; undefined where its rows disagree or are absent. */
             nozzleTypes: (string | undefined)[];
             filamentMap?: number[];
+            /** Hotends per extruder by flow (Studio's extruder_nozzle_stats), on printers with a hotend rack. */
+            hotends?: Record<string, number>[];
+            /** Command-line options the slicer needs for this setup (they have no effect from a profile file). */
+            cliArgs?: string[];
         };
     };
 }

@@ -131,6 +131,18 @@ right). `slice_stl` and `slice_with_template` take that per extruder, and so do
   refused; when every slot reaches exactly one nozzle (for the external spool,
   the loaded holder) the map is derived.
 
+- The H2C's right extruder swaps hotends from a rack of six. `nozzles[1].hotends`
+  (`{ "Standard": 3, "High Flow": 3 }`) says which it can use; with
+  `nozzles_from_printer` they come from the printer's normal hotends of the
+  slice diameter. Hotends of two or more flows make that extruder `Hybrid`
+  (Bambu Studio's `nvtHybrid`), as Bambu Studio's printer sync does: the slicer
+  then gives each filament one of those flows (`filament_volume_map`) and its own
+  hotend where it can. The MCP passes them as the CLI's `--nozzle-volume-type`,
+  `--extruder-nozzle-count` and `--extruder-nozzle-volume-type`, which have no
+  effect from a profile file. A filament needs settings for at least one of the
+  Hybrid extruder's flows. `"flow": "Hybrid"` on an extruder without a rack, or
+  without hotends of two flows, is refused.
+
 Single-nozzle printers are unchanged unless these options are given.
 
 [Sebastian's contribution](https://github.com/DMontgomery40/bambu-printer-mcp/pull/18)
