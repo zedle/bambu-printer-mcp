@@ -102,16 +102,16 @@ test('requires explicit clean print error and valid HMS severity, but permits in
   assert.doesNotThrow(() => check(fresh({hms:[{attr:0x03000100,code:0x40001}]})));
   assert.deepEqual(check(fresh({hms:[{attr:0x0C000100,code:0x0002001B},{attr:0x03000100,code:0x30001},{attr:0x03000100,code:0x40001}]})).hmsWarnings,
     ['HMS 0C00-0100-0002-001B (serious)','HMS 0300-0100-0003-0001 (common)']);
-  assert.throws(() => check(fresh({hms:[{attr:0x0C000100,code:0x0002001B},{attr:0x05000500,code:0x00010007}]})), /fatal HMS error \(HMS 0500-0500-0001-0007\)/);
-  // A blocking entry names its code, so a lingering command-verification rejection is recognizable.
-  assert.throws(() => check(fresh({hms:[{attr:0x05000500,code:0x00010007}]})), /HMS 0500-0500-0001-0007/);
+  // 0500-0500-0001-0007 is a refused unsigned command, not a printer fault: a warning. Other fatal codes still block.
+  assert.deepEqual(check(fresh({hms:[{attr:0x05000500,code:0x00010007}]})).hmsWarnings, ['HMS 0500-0500-0001-0007 (a refused unsigned command, not a printer fault)']);
+  assert.throws(() => check(fresh({hms:[{attr:0x05000500,code:0x00010008}]})), /fatal HMS error \(HMS 0500-0500-0001-0008\)/);
 });
 test('known maintenance reminders do not block, but faults beside them and unknown codes in their family do', () => {
   // H2C report: threaded rods and X/YZ/extruder-lift rails need lubrication (0501-0400-0003-0002/0004).
   const reminders=[{attr:0x05010400,code:0x00030002},{attr:0x05010400,code:0x00030004}];
   assert.doesNotThrow(() => check(fresh({hms:reminders})));
   for(const code of [0x00030003,0x00030005,0x00030006,0x00030007,0x00030010]) assert.doesNotThrow(() => check(fresh({hms:[{attr:0x05010400,code}]})));
-  assert.throws(() => check(fresh({hms:[...reminders,{attr:0x05000500,code:0x00010007}]})), /HMS 0500-0500-0001-0007/);
+  assert.throws(() => check(fresh({hms:[...reminders,{attr:0x0C000100,code:0x00010001}]})), /HMS 0C00-0100-0001-0001/);
   // Codes outside the known reminder list keep their own severity: fatal blocks, common is only a warning.
   assert.throws(() => check(fresh({hms:[{attr:0x05010400,code:0x00010044}]})), /fatal HMS/i);
   for(const [attr,code] of [[0x05010400,0x00030008],[0x05010401,0x00030002],[0x05000400,0x00030002]])
@@ -120,7 +120,12 @@ test('known maintenance reminders do not block, but faults beside them and unkno
   assert.throws(() => check(fresh({print_error:1,hms:reminders})), /error/i);
   // A canceled task (0300-400C) stays reported until the next job; it is a warning, other print errors block.
   assert.deepEqual(check(fresh({gcode_state:'FAILED',print_error:0x0300400C})).hmsWarnings, ['print_error 0300-400C (the previous task was canceled)']);
-  assert.throws(() => check(fresh({gcode_state:'FAILED',print_error:0x0300400D})), /print error \(0300-400D\)/);
+  // Every stop-class code (xxxx-4xxx) is the record of a stopped task, e.g. 0500-400E "Job was cancelled.".
+  assert.deepEqual(check(fresh({gcode_state:'FAILED',print_error:0x0500400E})).hmsWarnings, ['print_error 0500-400E (the previous task stopped)']);
+  // Pause (8xxx) and prompt (Cxxx) classes wait for an action and still block.
+  for(const print_error of [0x0300800A,0x07FF8012,0x0500C011]) assert.throws(() => check(fresh({gcode_state:'IDLE',print_error})), /print error \(/);
+  // A paused job's stop-class code is not waved through on resume.
+  assert.throws(() => check(fresh({gcode_state:'PAUSE',print_error:0x0500400E}),req({requireIdle:false})), /print error/);
 });
 const ams = {ams:[{id:'0',tray:[{id:'0',tray_type:'PLA',nozzle_temp_min:'190',nozzle_temp_max:'240'},{id:'1',tray_type:'PETG',nozzle_temp_min:'220',nozzle_temp_max:'270'}]}]};
 test('AMS requirements use positional mappings and selected slot material, including external 254', () => {
@@ -287,4 +292,14 @@ test('official H2C and H2D Pro returned serials agree with declared identity and
     assert.throws(()=>check(fresh({model_id:other,modules:[{name:'ota',sn:serial}]},{serial}),req({model,serial,nozzleDiameters:[]})),/identity|conflict|model/i);
     assert.throws(()=>check(fresh({model_id:undefined}),req({model,serial,nozzleDiameters:[]})),/identity|model/i);
   }
+});
+
+test('upload-only accepts any known printer state, including FAILED after a cancel, but keeps error gates', () => {
+  const upload = extra => req({verifyMaterials:false,requireIdle:false,uploadOnly:true,...extra});
+  for(const gcode_state of ['FAILED','PREPARE','SLICING','RUNNING','IDLE']) assert.doesNotThrow(() => check(fresh({gcode_state}),upload()), gcode_state);
+  assert.deepEqual(check(fresh({gcode_state:'FAILED',print_error:0x0500400E}),upload()).hmsWarnings, ['print_error 0500-400E (the previous task stopped)']);
+  for(const raw of [{gcode_state:'UNKNOWN'},{print_error:0x0300800A},{hms:[{attr:0x0C000100,code:0x00010001}]}]) assert.throws(() => check(fresh(raw),upload()), /state|error|HMS/i);
+  // Identity and nozzles are still verified.
+  assert.throws(() => check(fresh({gcode_state:'FAILED',nozzle_diameter:'0.6'}),upload()), /diameter/);
+  assert.throws(() => check(fresh({gcode_state:'FAILED'}),upload({model:'x1c'})), /model/);
 });

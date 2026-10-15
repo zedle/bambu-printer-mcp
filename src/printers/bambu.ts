@@ -1387,7 +1387,7 @@ export class BambuImplementation {
           }
           const status = await this.getSafetyStatus(host, serial, token);
           for (const inspection of inspections) {
-            validatePrinterState(status, { ...inspection, verifyMaterials: false, requireIdle: false });
+            validatePrinterState(status, { ...inspection, verifyMaterials: false, requireIdle: false, uploadOnly: true });
           }
         }
         assertActive();

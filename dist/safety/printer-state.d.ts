@@ -9,6 +9,8 @@ export interface PrinterStateRequirements {
     amsMapping?: number[];
     useAMS?: boolean;
     requireIdle?: boolean;
+    /** File transfer only (nothing starts): any known state is accepted, including FAILED after a cancel. */
+    uploadOnly?: boolean;
     /** Raw gcode_file transport cannot load a mapped spool before printing. */
     requireLoadedFilament?: boolean;
     /** Upload-only identity checks do not select or consume a physical filament slot. */

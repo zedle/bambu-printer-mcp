@@ -106,6 +106,8 @@ export interface PrinterStateRequirements {
   amsMapping?: number[];
   useAMS?: boolean;
   requireIdle?: boolean;
+  /** File transfer only (nothing starts): any known state is accepted, including FAILED after a cancel. */
+  uploadOnly?: boolean;
   /** Raw gcode_file transport cannot load a mapped spool before printing. */
   requireLoadedFilament?: boolean;
   /** Upload-only identity checks do not select or consume a physical filament slot. */
@@ -219,17 +221,32 @@ const isMaintenanceReminder = (attr: number, code: number) => attr === MAINTENAN
 // Only fatal entries block, like a print error: the printer itself refuses to start a job it can't run, and Bambu
 // Studio starts prints with serious/common entries listed. Those come back as warnings so the caller sees them.
 // Malformed entries and unknown severities still fail closed.
-function validateErrors(raw: Record<string,any>, requireIdle: boolean): string[] {
+// print_error class: the fifth hex digit of the code, code & 0xF000 (Bambu's HMS database). 4xxx records a task that
+// stopped (0300-400C "The task was canceled.", 0500-400E "Job was cancelled.", 0502-4010 "Printer incompatible with sliced
+// file"); 8xxx pauses for an action and Cxxx prompts. Bambu Studio never gates a new job on print_error; a stop-class
+// code stays until the next job starts, so in an idle state it is a warning. Pause and prompt classes still block.
+const PRINT_ERROR_STOP_CLASS = 0x4000;
+const hexCode = (value: number) => value.toString(16).toUpperCase().padStart(8, "0").replace(/^(.{4})/, "$1-");
+// Fatal HMS entries that are not hardware faults: 0500-0500-0001-0007 "MQTT command verification failed" is the
+// printer refusing an unsigned command (firmware 01.08.05+ outside LAN Only + Developer Mode), not a reason the
+// printer can't print. Every other fatal entry still blocks.
+const NON_FAULT_FATAL_HMS = new Set(["0500-0500-0001-0007"]);
+
+function validateErrors(raw: Record<string,any>, requireIdle: boolean, uploadOnly = false): string[] {
   const state = typeof raw.gcode_state === "string" ? raw.gcode_state.toUpperCase() : "UNKNOWN";
   // FAILED is how Bambu firmware reports a stopped or failed job; the printer is idle and takes a new job (as from
   // Bambu Studio). Like FINISH it may leave a part on the bed, so it goes through the same bed-clearance check.
-  if (requireIdle && !["IDLE","FINISH","FAILED"].includes(state)) throw new Error(`Printer state ${state} is not safely idle.`);
-  if (!requireIdle && !["IDLE","FINISH","RUNNING","PAUSE"].includes(state)) throw new Error(`Printer state ${state} is unknown or failed.`);
+  if (uploadOnly) {
+    // Studio has no state gate for a file transfer; a cancel leaves the printer in FAILED.
+    if (!["IDLE","FINISH","FAILED","RUNNING","PAUSE","PREPARE","SLICING"].includes(state)) throw new Error(`Printer state ${state} is unknown.`);
+  } else if (requireIdle && !["IDLE","FINISH","FAILED"].includes(state)) throw new Error(`Printer state ${state} is not safely idle.`);
+  else if (!requireIdle && !["IDLE","FINISH","RUNNING","PAUSE"].includes(state)) throw new Error(`Printer state ${state} is unknown or failed.`);
   const warnings: string[] = [];
   const printError = finiteNumber(raw.print_error);
-  // 0300-400C "The task was canceled." is the record of a stop, not a fault: it stays until the next job starts.
-  if (printError === 0x0300400c) warnings.push("print_error 0300-400C (the previous task was canceled)");
-  else if (printError !== 0) throw new Error(`Printer reports a print error${printError !== undefined ? ` (${printError.toString(16).toUpperCase().padStart(8, "0").replace(/^(.{4})/, "$1-")})` : " or did not report its error state"}.`);
+  if (printError !== undefined && Number.isInteger(printError) && printError > 0 && printError <= 0xffffffff &&
+      (requireIdle || uploadOnly) && (printError & 0xf000) === PRINT_ERROR_STOP_CLASS) {
+    warnings.push(`print_error ${hexCode(printError)} (${printError === 0x0300400c ? "the previous task was canceled" : "the previous task stopped"})`);
+  } else if (printError !== 0) throw new Error(`Printer reports a print error${printError !== undefined ? ` (${hexCode(printError)})` : " or did not report its error state"}.`);
   if (!Array.isArray(raw.hms)) throw new Error("Printer HMS error state is missing or malformed.");
   for (const entry of raw.hms) {
     const code = finiteNumber(entry?.code);
@@ -239,6 +256,7 @@ function validateErrors(raw: Record<string,any>, requireIdle: boolean): string[]
     const hex = (value: number) => value.toString(16).toUpperCase().padStart(8, "0");
     const label = wellFormed ? `HMS ${hex(attr!).slice(0, 4)}-${hex(attr!).slice(4)}-${hex(code!).slice(0, 4)}-${hex(code!).slice(4)}` : "";
     if (wellFormed && isMaintenanceReminder(attr!, code!)) { warnings.push(`${label} (maintenance reminder)`); continue; }
+    if (wellFormed && NON_FAULT_FATAL_HMS.has(label.slice(4))) { warnings.push(`${label} (a refused unsigned command, not a printer fault)`); continue; }
     const severity = wellFormed ? Math.floor(code! / 65536) : 0;
     if (severity === 2 || severity === 3) { warnings.push(`${label} (${severity === 2 ? "serious" : "common"})`); continue; }
     if (severity === 4) continue;
@@ -350,7 +368,7 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
   const identity = observedIdentity(raw, String(status.serial ?? ""));
   const model = normalizeModel(requirements.model);
   if (!model || !identity.model || model !== identity.model) throw new Error(`Printer model identity mismatch: requested ${requirements.model}, observed ${identity.model ?? "unknown"}.`);
-  const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false);
+  const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false, requirements.uploadOnly === true);
   if (requirements.requireLoadedFilament && (raw.ams?.tray_now !== undefined || Array.isArray(raw.ams?.ams))) {
     const current = finiteNumber(raw.ams?.tray_now);
     if (current === 255) throw new Error("The nozzle is explicitly reported unloaded. Load the declared filament before starting or resuming this G-code job.");
