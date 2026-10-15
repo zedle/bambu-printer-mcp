@@ -2792,11 +2792,11 @@ class BambuPrinterMCPServer {
           },
           {
             name: "camera_snapshot",
-            description: "Capture a single JPEG frame from the printer's chamber camera. A1/P1 use TCP-on-6000; X1/P2S/H2/X2D use RTSP via ffmpeg. Returns JPEG as base64; pass save_path to also write the bytes to disk.",
+            description: "Capture a single JPEG frame from the printer's chamber camera. A1/P1 use TCP-on-6000; X1/P2S/H2/X2D use RTSP via ffmpeg. Returns the frame as an image (plus format, size and transport as text); pass save_path to also write the JPEG to disk.",
             inputSchema: {
               type: "object",
               properties: {
-                save_path: { type: "string", description: "Optional absolute path to write the JPEG to disk. If omitted, only the base64 payload is returned." },
+                save_path: { type: "string", description: "Optional absolute path to also write the JPEG to disk." },
                 timeout_ms: { type: "number", description: "Max ms to wait for a full frame (default 8000). Camera may take a few seconds on cold start." },
                 bambu_model: { type: "string", description: "Printer model. Used to route to the correct protocol or fail fast on unsupported models. Defaults to BAMBU_MODEL." },
                 experimental: { type: "boolean", description: "Deprecated and ignored. Earlier this flag let callers probe H2 series via the A1/P1 TCP-on-6000 path; live testing on an H2S confirmed H2 uses RTSP instead, so the flag has no effect now." },
@@ -3601,6 +3601,19 @@ class BambuPrinterMCPServer {
                 "ffmpeg_path"
               ) ?? this.runtimeConfig.ffmpegPath,
             });
+            // Hand the frame back as an MCP image so agents see it; base64 inside JSON text overflowed clients'
+            // tool-result limits (~180k characters for one 1680x1080 frame).
+            const { base64, ...snapshotInfo } = result as { base64?: string } & Record<string, unknown>;
+            if (typeof base64 === "string" && base64) {
+              await progressNotifications;
+              return {
+                // Text first: clients that read content[0] as the JSON result keep working.
+                content: [
+                  { type: "text", text: JSON.stringify(snapshotInfo, null, 2) },
+                  { type: "image", data: base64, mimeType: "image/jpeg" },
+                ],
+              };
+            }
             break;
           }
 
