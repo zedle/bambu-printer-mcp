@@ -99,3 +99,40 @@ test("a LAN bridge session that fails to connect stops before anything is sent",
   }
   await assert.rejects(fakeLocalBridge().bridge.ensureLocalChannel("31BTEST", "", "CODE"), /address and LAN access code/);
 });
+
+// Bambu Studio restores the plugin's on_message / on_local_message pushes onto the last full report too.
+test("the plugin's printer pushes are restored per printer, and command replies survive the poll that saw them", async () => {
+  const bridge = new BambuNetworkBridge();
+  const queue = [];
+  bridge.request = async (method) => method === "bridge.poll_events" ? { ok: true, events: queue.splice(0) } : { ok: true };
+  const msg = (dev_id, message, name = "on_message") => ({ name, payload: { dev_id, msg: JSON.stringify(message) } });
+  queue.push(
+    msg("31BTEST", { print: { command: "push_status", msg: 1, gcode_state: "RUNNING" } }),
+    msg("31BTEST", { print: { command: "push_status", msg: 0, gcode_state: "IDLE", ams: { tray_exist_bits: "1", tray_now: "255" } } }),
+    msg("31BTEST", { print: { command: "push_status", msg: 1, ams: { tray_now: "0" } } }, "on_local_message"),
+    msg("31BOTHER", { print: { command: "push_status", msg: 0, gcode_state: "FINISH" } }),
+    msg("31BTEST", { print: { command: "clean_print_error", sequence_id: "40123", result: "success" } }),
+  );
+  assert.equal(await bridge.awaitPrinterReply("31BTEST", "40999", 0), undefined);
+  const state = bridge.printerReport("31BTEST").state();
+  assert.equal(state.gcode_state, "IDLE");
+  assert.deepEqual(state.ams, { tray_exist_bits: "1", tray_now: "0" });
+  assert.equal(bridge.printerReport("31BOTHER").state().gcode_state, "FINISH");
+  // The reply was polled while waiting for another command; it is still found for its own sequence id.
+  assert.deepEqual(await bridge.awaitPrinterReply("31BTEST", "40123", 0), { section: "print", command: "clean_print_error", result: "success" });
+});
+
+test("the printer's project_file answer for a plugin-sent print is found by command, after the send", async () => {
+  const bridge = new BambuNetworkBridge();
+  const queue = [];
+  bridge.request = async (method) => method === "bridge.poll_events" ? { ok: true, events: queue.splice(0) } : { ok: true };
+  const msg = (dev_id, message) => ({ name: "on_message", payload: { dev_id, msg: JSON.stringify(message) } });
+  queue.push(msg("31BTEST", { print: { command: "project_file", sequence_id: "7", result: "success" } }));
+  await bridge.awaitPrinterReply("31BTEST", "1", 0);
+  const since = Date.now() + 1;
+  await new Promise(resolve => setTimeout(resolve, 5));
+  assert.equal(await bridge.projectFileReply("31BTEST", since), undefined, "an answer from before the send doesn't count");
+  queue.push(msg("31BOTHER", { print: { command: "project_file", sequence_id: "20001", result: "fail" } }),
+    msg("31BTEST", { print: { command: "project_file", sequence_id: "20002", result: "fail", reason: "sdcard error" } }));
+  assert.deepEqual(await bridge.projectFileReply("31BTEST", since), { section: "print", command: "project_file", result: "fail", reason: "sdcard error" });
+});

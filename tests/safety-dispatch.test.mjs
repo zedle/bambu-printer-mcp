@@ -26,7 +26,7 @@ function safetyStatus({ model = "p1s", nozzle = "0.4", state = "IDLE", ...raw } 
   return {
     connected: true, model, status: state, serial,
     raw: { model, gcode_state: state, nozzle_diameter: nozzle, print_error: 0, hms: [], ...raw },
-    observation: { source: "mqtt", receivedAt: Date.now(), requestedAt: Date.now() - 1, identitySource: "report" },
+    observation: { source: "mqtt", receivedAt: Date.now(), requestedAt: Date.now() - 1, fullAt: Date.now() - 1, identitySource: "report" },
   };
 }
 
@@ -234,6 +234,48 @@ test("the LAN dispatch watch ignores another job's pushed report", async (t) => 
   assert.equal(result.status, "dispatched_unconfirmed");
 });
 
+test("the printer's answer to this project_file, matched by sequence id, decides a refused LAN print and is returned", async (t) => {
+  const file = await fixture(t);
+  const { EventEmitter } = await import("node:events");
+  process.env.BAMBU_DISPATCH_CHECK_MS = "500";
+  t.after(() => { process.env.BAMBU_DISPATCH_CHECK_MS = "0"; });
+  const lan = (answer) => {
+    const { printer, events } = isolatedPrinter();
+    const mqtt = new EventEmitter();
+    mqtt.publish = async payload => {
+      events.push({ action: "publish", payload });
+      const reply = (print) => setTimeout(() => mqtt.emit("rawMessage", `device/${serial}/report`, Buffer.from(JSON.stringify({ print }))), 20);
+      // Another client's refusal must not count; the reply to this command's sequence id does.
+      if (answer === "fail") { reply({ command: "project_file", sequence_id: "123", result: "success" }); reply({ command: "project_file", sequence_id: payload.print.sequence_id, result: "fail", reason: "file is damaged", err_code: 0x0500_4002 }); }
+      if (answer === "success") {
+        reply({ command: "project_file", sequence_id: payload.print.sequence_id, result: "success" });
+        setTimeout(() => mqtt.emit("rawMessage", `device/${serial}/report`, Buffer.from(JSON.stringify({ print: { command: "push_status", gcode_state: "PREPARE", subtask_name: payload.print.subtask_name } }))), 60);
+      }
+    };
+    printer.getPrinter = async () => mqtt;
+    return printer;
+  };
+  await assert.rejects(lan("fail").print3mf(host, serial, token, { projectName: "broken", filePath: file, bambuModel: "p1s", useAMS: false }),
+    /refused to start the job \(project_file replied fail: file is damaged, error 05004002; Bambu Studio: "Failed to start printing job"\)/);
+  const result = await lan("success").print3mf(host, serial, token, { projectName: "fine", filePath: file, bambuModel: "p1s", useAMS: false });
+  assert.equal(result.dispatch, "started");
+  assert.deepEqual(result.printerReply, { result: "success" });
+});
+
+test("a bridge print's project_file answer relayed by the plugin is part of the dispatch result", async () => {
+  const { printer } = isolatedPrinter(safetyStatus());
+  process.env.BAMBU_DISPATCH_CHECK_MS = "100";
+  try {
+    const refused = { poll: async () => ({ section: "print", command: "project_file", result: "fail", reason: "busy" }) };
+    await assert.rejects(printer.confirmDispatchedJob(host, serial, token, safetyStatus(), "job", () => {}, refused), /refused to start the job \(project_file replied fail: busy/);
+    const accepted = { poll: async () => ({ section: "print", command: "project_file", result: "success" }) };
+    assert.equal(await printer.confirmDispatchedJob(host, serial, token, safetyStatus(), "job", () => {}, accepted), "unconfirmed");
+    assert.deepEqual(accepted.reply, { section: "print", command: "project_file", result: "success" });
+    const silent = { poll: async () => { throw new Error("bridge gone"); } };
+    assert.equal(await printer.confirmDispatchedJob(host, serial, token, safetyStatus(), "job", () => {}, silent), "unconfirmed");
+  } finally { process.env.BAMBU_DISPATCH_CHECK_MS = "0"; }
+});
+
 const signedOnly = [["fun bit 29", { fun: "14023FF1AFFF9CB7" }], ["flag3 bit 4", { flag3: 31 }]];
 for (const [flag, raw] of signedOnly) {
   test(`unsigned LAN 3MF print refuses a printer whose ${flag} says signed-only before upload`, async (t) => {
@@ -382,6 +424,46 @@ test("a matching inspected paused job can resume after a fresh safety check", as
   assert.equal(events[2].payload.print.command, "resume");
 });
 
+test("a job paused by an error resumes only where Studio's error dialog offers Resume, answering that error", async (t) => {
+  const file = await fixture(t);
+  const hmsDir = await fs.mkdtemp(path.join(os.tmpdir(), "bambu-hms-"));
+  t.after(() => fs.rm(hmsDir, { recursive: true, force: true }));
+  // Studio's downloaded action list for this serial prefix: 0700-8012 offers Resume (2), 0700-8013 only OK (11).
+  await fs.writeFile(path.join(hmsDir, `hms_action_${serial.slice(0, 3)}.json`), JSON.stringify({ data: [
+    { actions: [2, 6], device: serial.slice(0, 3), ecode: "07008012" }, { actions: [11], device: serial.slice(0, 3), ecode: "07008013" }] }));
+  const previous = process.env.BAMBU_HMS_DIR;
+  process.env.BAMBU_HMS_DIR = hmsDir;
+  t.after(() => { if (previous === undefined) delete process.env.BAMBU_HMS_DIR; else process.env.BAMBU_HMS_DIR = previous; });
+  const { printer, events } = isolatedPrinter();
+  const started = await printer.print3mf(host, serial, token, { projectName: "resume", filePath: file, bambuModel: "p1s", useAMS: false });
+  const paused = changes => async () => safetyStatus({ state: "PAUSE", gcode_file: started.remoteProjectPath, job_id: "5551212", ...changes });
+  events.length = 0;
+  printer.getSafetyStatus = paused({ print_error: 0x0700_8012 });
+  const result = await printer.resumeJob(host, serial, token);
+  const { sequence_id, ...resume } = events.find(({ action }) => action === "publish").payload.print;
+  assert.deepEqual(resume, { command: "resume", err: String(0x0700_8012), param: "reserve", job_id: "5551212" });
+  assert.equal(result.answeredError, 0x0700_8012);
+  // The signed route gets the same command from the same check.
+  let signed;
+  await printer.resumeJob(host, serial, token, async (_active, beforeDispatch, command) => { await beforeDispatch(); signed = command; return { status: "success" }; });
+  assert.equal(signed.print.err, String(0x0700_8012));
+  // No Resume button for the code, or a code the list doesn't know: still refused.
+  for (const code of [0x0700_8013, 0x0700_8099]) {
+    printer.getSafetyStatus = paused({ print_error: code });
+    events.length = 0;
+    await assert.rejects(printer.resumeJob(host, serial, token), /print error/);
+    assert.deepEqual(events.filter(({ action }) => action === "publish"), []);
+  }
+  // A paused processing task (job_attr bits 4-7 above 1) resumes only on the printer, as in Studio.
+  printer.getSafetyStatus = paused({ job_attr: 0x20 });
+  await assert.rejects(printer.resumeJob(host, serial, token), /processing task/);
+  // A plain pause keeps Studio's plain resume.
+  printer.getSafetyStatus = paused({});
+  events.length = 0;
+  await printer.resumeJob(host, serial, token);
+  assert.equal(events.find(({ action }) => action === "publish").payload.print.param, "");
+});
+
 for (const [name, changes, error] of [
   ["a different paused job", { gcode_file: "cache/unverified.gcode", subtask_name: "another job" }, /identity|artifact|match/i],
   ["a changed nozzle", { nozzle: "0.6" }, /nozzle|diameter/i],
@@ -426,7 +508,7 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
       const reported={...(fs.existsSync(${JSON.stringify(statusPath)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(statusPath)},'utf8')) : {}), ...(printSent ? ${JSON.stringify(afterPrint ?? {})} : {})};
       return {connected:true, model:${JSON.stringify(model)}, status:reported.gcode_state??'IDLE', serial:${JSON.stringify(serial)},
         raw:{model:${JSON.stringify(model)},gcode_state:'IDLE',nozzle_diameter:${JSON.stringify(String(nozzleDiameters[0]))},device:{nozzle:{info:${JSON.stringify(nozzleDiameters.map((diameter, id) => ({ id, diameter, type: "HH01", stat: 0 })))}}},print_error:0,hms:[],...${JSON.stringify(ams ? { ams } : {})},...reported},
-        observation:{source:'mqtt',requestedAt:now,receivedAt:now,identitySource:'report'}};
+        observation:{source:'mqtt',requestedAt:now,receivedAt:now,fullAt:now,identitySource:'report'}};
     };
     BambuNetworkBridge.prototype.ensurePrinterChannel = async (devId) => { log({ action: 'bridge-channel', devId }); };
     BambuNetworkBridge.prototype.ensureLocalChannel = async (devId, devIp) => { log({ action: 'bridge-local-channel', devId, devIp }); };
@@ -947,6 +1029,23 @@ test("manual positive heating requires confirmation but heater-off does not", as
   assert.match(events.find(event => event.action === "publish").payload.print.param, /M104 S0/);
 });
 
+test("LAN stop, pause and skip_objects go out at QoS 1 like Bambu Studio, other commands at QoS 0", async () => {
+  const printer = new BambuImplementation(async () => true);
+  const sent = [];
+  const client = {
+    config: { serialNumber: serial },
+    mqttClient: { publish: (topic, payload, options, callback) => { sent.push({ topic, print: JSON.parse(payload).print, qos: options.qos }); callback(); } },
+    publish: async payload => { sent.push({ print: payload.print, qos: 0 }); },
+  };
+  printer.getPrinter = async () => client;
+  await printer.cancelJob(host, serial, token);
+  await printer.pauseJob(host, serial, token);
+  await printer.skipObjects(host, serial, token, [3]);
+  await printer.setPrintSpeed(host, serial, token, "silent");
+  assert.deepEqual(sent.map(({ print, qos, topic }) => [print.command, qos, topic]), [
+    ["stop", 1, `device/${serial}/request`], ["pause", 1, `device/${serial}/request`], ["skip_objects", 1, `device/${serial}/request`], ["print_speed", 0, undefined]]);
+});
+
 test("hardware errors cannot be cleared without human confirmation", async () => {
   const { printer, events } = isolatedPrinter(safetyStatus({ print_error: 123, hms: [{ attr: 1, code: 0x20001 }] }));
   const prompts = [];
@@ -968,6 +1067,30 @@ test("cleared hardware codes are returned and acknowledged again before printing
   await assert.rejects(printer.print3mf(host, serial, token, { projectName: "confirm", filePath: file, bambuModel: "p1s", useAMS: false }), /confirmation.*declined/i);
   assert.match(prompts[0], /Previously cleared hardware codes: print_error:123/);
   assertNoDispatch(events);
+});
+
+test("clearing a print error also closes its dialog like Bambu Studio (uiop), after clean_print_error", async () => {
+  const { printer, events } = isolatedPrinter(safetyStatus({ print_error: 0x0700_8012, subtask_id: "777", hms: [] }));
+  const cleared = await printer.clearHmsErrors(host, serial, token);
+  const published = events.filter(({ action }) => action === "publish").map(({ payload }) => payload);
+  assert.equal(published.length, 2);
+  assert.equal(published[0].print.command, "clean_print_error");
+  assert.equal(published[0].print.print_error, 0x0700_8012);
+  const { sequence_id, ...uiop } = published[1].system;
+  assert.match(sequence_id, /^4\d{4}$/);
+  assert.deepEqual(uiop, { command: "uiop", name: "print_error", action: "close", source: 1, type: "dialog", err: "07008012" });
+  assert.equal(cleared.closedErrorDialog, "07008012");
+  // Only HMS entries: no print_error dialog to close.
+  const hmsOnly = isolatedPrinter(safetyStatus({ print_error: 0, hms: [{ attr: 1, code: 0x30001 }] }));
+  const result = await hmsOnly.printer.clearHmsErrors(host, serial, token);
+  assert.equal(hmsOnly.events.filter(({ action }) => action === "publish").length, 1);
+  assert.equal(result.closedErrorDialog, undefined);
+  // Signed routes send it through the same dispatch, with no state check (the clear changed the codes).
+  const signed = isolatedPrinter(safetyStatus({ print_error: 0x0500_400e, hms: [] }));
+  const dispatched = [];
+  const viaBridge = await signed.printer.clearHmsErrors(host, serial, token, async (_active, beforeDispatch, command) => { await beforeDispatch(); dispatched.push(command); return { status: "success" }; });
+  assert.deepEqual(dispatched.map(command => Object.keys(command)[0] + "." + Object.values(command)[0].command), ["print.clean_print_error", "system.uiop"]);
+  assert.equal(viaBridge.closedErrorDialog, "0500400E");
 });
 
 test("changed hardware codes during confirmation are not cleared", async () => {
@@ -1023,10 +1146,11 @@ test("LAN and signed error clears send the same Studio-form clean_print_error", 
   const status = safetyStatus({ state: "FAILED", print_error: 0x0700_8012, subtask_id: "4567", hms: [] });
   const { printer, events } = isolatedPrinter(status);
   await printer.clearHmsErrors(host, serial, token);
-  const lan = events.filter(({ action }) => action === "publish").map(({ payload }) => payload.print);
+  // The uiop dialog close follows as a system-section message.
+  const lan = events.filter(({ action, payload }) => action === "publish" && payload.print).map(({ payload }) => payload.print);
   assert.equal(lan.length, 1);
   let signed;
-  await printer.clearHmsErrors(host, serial, token, async (_active, beforeDispatch, command) => { await beforeDispatch(); signed = command.print; });
+  await printer.clearHmsErrors(host, serial, token, async (_active, beforeDispatch, command) => { await beforeDispatch(); signed ??= command.print; });
   for (const command of [lan[0], signed]) {
     assert.deepEqual(Object.keys(command).sort(), ["command", "print_error", "sequence_id", "subtask_id"]);
     assert.equal(command.command, "clean_print_error");

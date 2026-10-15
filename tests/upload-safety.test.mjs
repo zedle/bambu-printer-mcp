@@ -45,7 +45,7 @@ function capturedUpload(raw = {}) {
     const now = Date.now();
     return { connected: true, model: "p1s", serial: credentials[1], status: "RUNNING",
       raw: { model: "p1s", gcode_state: "RUNNING", nozzle_diameter: "0.4", print_error: 0, hms: [], ...raw },
-      observation: { source: "mqtt", requestedAt: now, receivedAt: now, identitySource: "report" } };
+      observation: { source: "mqtt", requestedAt: now, receivedAt: now, fullAt: now, identitySource: "report" } };
   };
   return { printer, uploads };
 }
@@ -216,7 +216,7 @@ for (const tool of ["upload_file", "upload_gcode"]) {
       BambuImplementation.prototype.getSafetyStatus=async()=>{
         const now=Date.now();return {connected:true,model:'p1s',serial:'01PTESTUPLOAD',status:'RUNNING',
           raw:{model:'p1s',gcode_state:'RUNNING',nozzle_diameter:'0.4',print_error:0,hms:[]},
-          observation:{source:'mqtt',requestedAt:now,receivedAt:now,identitySource:'report'}};
+          observation:{source:'mqtt',requestedAt:now,receivedAt:now,fullAt:now,identitySource:'report'}};
       };
     `);
     const transport = new StdioClientTransport({ command: process.execPath, args: ["--import", preload, fileURLToPath(new URL("../dist/index.js", import.meta.url))], cwd: dir, stderr: "pipe", env: {

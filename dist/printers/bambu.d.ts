@@ -1,3 +1,4 @@
+import { printerReplyField, type CommandReply } from "../command-reply.js";
 import { inspectPrintFile } from "../safety/print-file.js";
 import { type PrinterStateRequirements } from "../safety/printer-state.js";
 import { type ControlCommand } from "./control-commands.js";
@@ -62,6 +63,23 @@ export declare function withHmsWarnings<T extends Record<string, unknown>>(resul
 export declare function buildCleanPrintError(raw: Record<string, any> | undefined, sequenceId?: string): {
     print: Record<string, unknown>;
 };
+/**
+ * Bambu Studio's acknowledgement that the error's dialog was closed (MachineObject::command_clean_print_error_uiop),
+ * sent with clean_print_error when the person confirms the error (DeviceErrorDialog DBL_CHECK_OK) and whenever its
+ * error dialog closes: `{"system": {"command": "uiop", "name": "print_error", "action": "close", "source": 1,
+ * "type": "dialog", "err": "<print_error as 8 hex digits>"}}` (source 1 = Studio, 0 = the printer's own screen).
+ */
+export declare function buildCleanPrintErrorUiop(printError: number, sequenceId?: string): {
+    system: Record<string, unknown>;
+};
+/**
+ * Bambu Studio's resume: command_task_resume (`resume`, param "") after a pause the person made, command_hms_resume
+ * (`resume` with the print_error in decimal as `err`, param "reserve" and the report's job_id) for a job paused by
+ * an error, which is what its error dialog's Resume buttons send.
+ */
+export declare function buildResumeCommand(raw: Record<string, any> | undefined, sequenceId?: string): {
+    print: Record<string, unknown>;
+};
 /** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
 export declare function dispatchStatusLabel(dispatch: "started" | "unconfirmed"): "success" | "dispatched_unconfirmed";
 type DispatchVerdict = {
@@ -83,6 +101,15 @@ type DispatchVerdict = {
  *   report or pushed delta names no job) a printer that was idle before.
  */
 export declare function judgeDispatchReport(report: any, before: any, jobName: string | undefined): DispatchVerdict | undefined;
+/**
+ * The printer's reply to a print command (project_file / gcode_file): a refusal ("fail", a non-zero err_code) means
+ * the job didn't start (Bambu Studio's "Failed to start printing job"); an accepted reply alone doesn't prove it did.
+ */
+export declare function dispatchReplyVerdict(reply: CommandReply | undefined): DispatchVerdict | undefined;
+/** The printer's reply to a print command, as print results carry it (`printerReply`), when one arrived. */
+export declare function dispatchReplyField(reply: CommandReply | undefined): {
+    printerReply?: ReturnType<typeof printerReplyField>;
+};
 export declare function assertDirectPrintSupported(model: string | undefined, serial?: string): void;
 interface BambuPrintOptionsInternal {
     projectName: string;
@@ -137,9 +164,13 @@ export declare class BambuImplementation {
     private print3mfPrepared;
     cancelJob(host: string, serial: string, token: string, dispatch?: () => Promise<any>): Promise<any>;
     pauseJob(host: string, serial: string, token: string, dispatch?: () => Promise<any>): Promise<any>;
-    resumeJob(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>) => Promise<any>): Promise<any>;
+    resumeJob(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: {
+        print: Record<string, unknown>;
+    }) => Promise<any>): Promise<any>;
     clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: {
         print: Record<string, unknown>;
+    } | {
+        system: Record<string, unknown>;
     }) => Promise<any>): Promise<any>;
     setPrintSpeed(host: string, serial: string, token: string, speedMode: string | number): Promise<any>;
     /** Send a control-commands.ts command: through the dispatch callback (signed) or LAN MQTT with reply matching. */
@@ -191,12 +222,13 @@ export declare class BambuImplementation {
         printRequested: boolean;
         inspected: boolean;
     } | ({
+        message: string;
+        printerReply?: ReturnType<typeof printerReplyField>;
         status: "success" | "dispatched_unconfirmed";
         uploaded: boolean;
         printRequested: boolean;
         dispatch: "started" | "unconfirmed";
         remotePath: string;
-        message: string;
     } & {
         hmsWarnings?: string[];
     })>;
@@ -215,14 +247,18 @@ export declare class BambuImplementation {
      * pushall interval, 3 s) for up to BAMBU_DISPATCH_CHECK_MS. "started" needs this job's name in the report or a
      * new task id with a printing state; a refusal or a failed start throws; otherwise "unconfirmed".
      */
-    confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string, assertActive: () => void): Promise<"started" | "unconfirmed">;
+    confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string, assertActive: () => void, replies?: {
+        poll: () => Promise<CommandReply | undefined>;
+        reply?: CommandReply;
+    }): Promise<"started" | "unconfirmed">;
     startJob(host: string, serial: string, token: string, filename: string, bambuModel?: string): Promise<{
+        message: string;
+        printerReply?: ReturnType<typeof printerReplyField>;
         status: "success" | "dispatched_unconfirmed";
         uploaded: boolean;
         printRequested: boolean;
         dispatch: "started" | "unconfirmed";
         remotePath: string;
-        message: string;
     } & {
         hmsWarnings?: string[];
     }>;

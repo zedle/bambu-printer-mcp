@@ -275,7 +275,7 @@ test('Studio\'s filament prohibitions block the job', async () => {
 test('Studio printer_type codes identify models; cloud model ids name no printer', () => {
   for (const [code, model] of [['N1', 'a1mini'], ['A1M', 'a1mini'], ['N7', 'p2s'], ['N7-V2', 'p2s'], ['O1D-V2', 'h2d'], ['3DPrinter-X1-Carbon', 'x1c'], ['3DPrinter-X1', 'x1'], ['BL-P001', 'x1c'], ['C13', 'x1e']]) {
     const raw = { gcode_state: 'IDLE', print_error: 0, hms: [], printer_type: code };
-    const status = { connected: true, serial: '', raw, observation: { source: 'mqtt', requestedAt: Date.now(), receivedAt: Date.now() } };
+    const status = { connected: true, serial: '', raw, observation: { source: 'mqtt', requestedAt: Date.now(), receivedAt: Date.now(), fullAt: Date.now() } };
     assert.doesNotThrow(() => validatePrinterState(status, { model, nozzleDiameters: [], verifyMaterials: false }), code);
   }
   // The recorded reports' cloud model ids are ignored; the serial prefix identifies the printer.

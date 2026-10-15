@@ -22,7 +22,7 @@ const safety = await import('../../dist/safety/printer-state.js');
 const fresh = (raw = {}, extra = {}) => ({
   connected: true, model: 'P1S', serial: '01PTEST', status:'IDLE',
   raw: { model_id:'C12', gcode_state:'IDLE', print_error:0, hms:[], nozzle_diameter:'0.4', nozzle_type:'hardened_steel', ...raw },
-  observation:{source:'mqtt',requestedAt:Date.now(),receivedAt:Date.now(),identitySource:'report'}, ...extra,
+  observation:{source:'mqtt',requestedAt:Date.now(),receivedAt:Date.now(),fullAt:Date.now(),identitySource:'report'}, ...extra,
 });
 const req = (extra = {}) => ({model:'P1S',nozzleDiameters:[0.4],materials:['PLA'],useAMS:false,...extra});
 const check = (status, requirements=req()) => safety.validatePrinterState(status, requirements);
@@ -149,7 +149,8 @@ test('reported spool temperature ranges constrain results and malformed ranges r
 test('fresh read ignores cache, pre-request events, acknowledgements and other device topics', async () => {
   const printer = rawPrinter((_payload, emit) => { emit({print:{command:'push_status',gcode_state:'IDLE',model_id:'C12',print_error:0,hms:[]}},'device/OTHER/report'); emit({print:{command:'push_status',sequence_id:'1'}}); });
   await assert.rejects(safety.readFreshPrinterStatus(printer,'01PTEST',20),/fresh|timed out/i);
-  assert.equal(printer.listenerCount('rawMessage'),0);
+  // Only the per-client report tracker (printer-report.ts) stays attached; the read's own listener is gone.
+  assert.equal(printer.listenerCount('rawMessage'),1);
 });
 test('fresh read obtains missing model from current get_version ota response', async () => {
   const printer = rawPrinter((payload, emit) => {
@@ -160,7 +161,7 @@ test('fresh read obtains missing model from current get_version ota response', a
   assert.equal(status.model,'p1s'); assert.equal(status.observedSerial,'01PTEST');
   assert.equal(status.observation.identitySource,'module-serial');
   assert.doesNotThrow(() => check(status));
-  assert.equal(printer.listenerCount('rawMessage'),0);
+  assert.equal(printer.listenerCount('rawMessage'),1);
 });
 test('fresh read fails on disconnect or publish failure, and bounds hung request', async () => {
   const disconnected = rawPrinter((_payload,_emit,p) => p.emit('client:disconnect'));

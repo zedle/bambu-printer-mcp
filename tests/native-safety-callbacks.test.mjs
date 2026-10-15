@@ -17,7 +17,7 @@ function setup(t, raw = {}) {
   printer.getSafetyStatus = async () => {
     reads++;
     return { connected: true, serial, model: report.model, status: report.gcode_state, raw: structuredClone(report),
-      observation: { source: "mqtt", requestedAt: Date.now() - 1, receivedAt: Date.now(), identitySource: "report" } };
+      observation: { source: "mqtt", requestedAt: Date.now() - 1, receivedAt: Date.now(), fullAt: Date.now() - 1, identitySource: "report" } };
   };
   printer.getPrinter = async () => { throw new Error("Unexpected printer connection"); };
   return { printer, report, confirmations: () => confirmations, reads: () => reads };

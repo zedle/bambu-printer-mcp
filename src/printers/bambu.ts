@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { readFreshPrinterStatus, serialModel } from "../safety/printer-state.js";
 import { nextSequenceId } from "../sequence-id.js";
 import { requestNozzleMapping } from "../nozzle-mapping.js";
-import { assertCommandAccepted, commandReplyWaitMs, matchCommandReply, withCommandReply, withPrinterReplyField, type CommandReply } from "../command-reply.js";
+import { lanPrinterReport, mergeReport, requestPushAll } from "../printer-report.js";
+import { assertCommandAccepted, commandReplyFailure, commandReplyWaitMs, commandSequenceId, matchCommandReply, printerReplyField, withCommandReply, withPrinterReplyField, type CommandReply } from "../command-reply.js";
 import { assertAmsDryingSupported, buildAmsDryingCommand, hexFlagBit, normalizeAmsDryingRequest } from "../ams-drying.js";
 import fs from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
@@ -13,6 +14,7 @@ import { readSafe3mfArchive } from "../safety/archive.js";
 import { inspectPrintFile, type PrintFileInspection } from "../safety/print-file.js";
 import { normalizeModel, validateTemperature } from "../safety/limits.js";
 import { validatePrinterState, manualHeatingRequirements, type PrinterStateRequirements } from "../safety/printer-state.js";
+import { printErrorResumable } from "../safety/hms-actions.js";
 import { DEPUTY_EXTRUDER_ID, MAIN_EXTRUDER_ID, externalSpoolMapping, extruderCount, isExternalTray, printerTypeModel } from "../safety/models.js";
 import { normalizeBridgeAmsTrayValue, studioTrayMapping } from "../ams-mapping.js";
 import { assertBedSupported, studioBedType, studioPrintOptions, usedExtruderCount, usedFilamentTypes } from "./print-options.js";
@@ -24,7 +26,6 @@ import * as mqtt from "mqtt";
 import {
   BambuClient,
   GCodeFileCommand,
-  PushAllCommand,
   UpdateLightCommand,
   UpdateStateCommand,
 } from "bambu-node";
@@ -173,6 +174,30 @@ export function buildCleanPrintError(raw: Record<string, any> | undefined, seque
   return { print: { command: "clean_print_error", sequence_id: sequenceId, subtask_id: String(raw?.subtask_id ?? ""), print_error: Number(raw?.print_error ?? 0) } };
 }
 
+/**
+ * Bambu Studio's acknowledgement that the error's dialog was closed (MachineObject::command_clean_print_error_uiop),
+ * sent with clean_print_error when the person confirms the error (DeviceErrorDialog DBL_CHECK_OK) and whenever its
+ * error dialog closes: `{"system": {"command": "uiop", "name": "print_error", "action": "close", "source": 1,
+ * "type": "dialog", "err": "<print_error as 8 hex digits>"}}` (source 1 = Studio, 0 = the printer's own screen).
+ */
+export function buildCleanPrintErrorUiop(printError: number, sequenceId: string = nextSequenceId()): { system: Record<string, unknown> } {
+  return { system: { command: "uiop", sequence_id: sequenceId, name: "print_error", action: "close", source: 1, type: "dialog",
+    err: (printError >>> 0).toString(16).toUpperCase().padStart(8, "0") } };
+}
+
+/**
+ * Bambu Studio's resume: command_task_resume (`resume`, param "") after a pause the person made, command_hms_resume
+ * (`resume` with the print_error in decimal as `err`, param "reserve" and the report's job_id) for a job paused by
+ * an error, which is what its error dialog's Resume buttons send.
+ */
+export function buildResumeCommand(raw: Record<string, any> | undefined, sequenceId: string = nextSequenceId()): { print: Record<string, unknown> } {
+  const printError = Number(raw?.print_error ?? 0);
+  if (Number.isInteger(printError) && printError > 0) {
+    return { print: { command: "resume", err: String(printError), param: "reserve", job_id: String(raw?.job_id ?? ""), sequence_id: sequenceId } };
+  }
+  return { print: { command: "resume", param: "", sequence_id: sequenceId } };
+}
+
 /** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
 export function dispatchStatusLabel(dispatch: "started" | "unconfirmed"): "success" | "dispatched_unconfirmed" {
   return dispatch === "started" ? "success" : "dispatched_unconfirmed";
@@ -219,6 +244,22 @@ export function judgeDispatchReport(report: any, before: any, jobName: string | 
   // A report (or pushed delta) that names no job: a printer that was idle before is now running what was just sent.
   if (!names.length && !PRINTING_STATES.has(String(before?.gcode_state ?? "").toUpperCase())) return { kind: "started" };
   return undefined;
+}
+
+/**
+ * The printer's reply to a print command (project_file / gcode_file): a refusal ("fail", a non-zero err_code) means
+ * the job didn't start (Bambu Studio's "Failed to start printing job"); an accepted reply alone doesn't prove it did.
+ */
+export function dispatchReplyVerdict(reply: CommandReply | undefined): DispatchVerdict | undefined {
+  if (!commandReplyFailure(reply)) return undefined;
+  const code = reply!.errCode !== undefined && reply!.errCode !== 0 ? `, error ${(reply!.errCode >>> 0).toString(16).toUpperCase().padStart(8, "0")}` : "";
+  const why = reply!.reason && reply!.reason.toLowerCase() !== String(reply!.result ?? "").toLowerCase() ? `: ${reply!.reason}` : "";
+  return { kind: "failed", message: `The printer refused to start the job (${reply!.command ?? "print command"} replied ${reply!.result ?? "with an error"}${why}${code}; Bambu Studio: "Failed to start printing job"). Nothing is printing; check get_printer_status before printing again.` };
+}
+
+/** The printer's reply to a print command, as print results carry it (`printerReply`), when one arrived. */
+export function dispatchReplyField(reply: CommandReply | undefined): { printerReply?: ReturnType<typeof printerReplyField> } {
+  return reply ? { printerReply: printerReplyField(reply) } : {};
 }
 
 /** How long to watch fresh reports after a print command (BAMBU_DISPATCH_CHECK_MS, 0 disables). */
@@ -340,8 +381,8 @@ export function queryLanPrinter<T>(printer: any, message: Record<string, unknown
 }
 
 /** Publish a command without waiting for its reply (print starts, whose outcome the dispatch watcher judges). */
-async function invokeWithoutAck(printer: BambuClient, command: BambuNodeCommand) {
-  await printer.publish(await bambuNodeMessage(command));
+async function publishWithoutAck(printer: BambuClient, message: Record<string, any>) {
+  await printer.publish(message);
   await sleep(COMMAND_SETTLE_MS);
 }
 
@@ -374,7 +415,7 @@ function pendingRepliesFor(printer: any): Map<string, (reply: CommandReply) => v
  * sequence_id. A refusal (result "fail", a non-zero err_code) throws; no reply is not an error (older firmware
  * doesn't answer every command). `waitedMs` is 0 when no reply could be awaited (a client without events).
  */
-async function sendCommand(printer: any, command: Record<string, any> | BambuNodeCommand): Promise<{ reply?: CommandReply; waitedMs: number }> {
+async function sendCommand(printer: any, command: Record<string, any> | BambuNodeCommand, qos: 0 | 1 = 0): Promise<{ reply?: CommandReply; waitedMs: number }> {
   const message = typeof (command as BambuNodeCommand).invoke === "function"
     ? await bambuNodeMessage(command as BambuNodeCommand)
     : command as Record<string, any>;
@@ -384,7 +425,7 @@ async function sendCommand(printer: any, command: Record<string, any> | BambuNod
   const sequenceId = String(message[section].sequence_id);
   const waitMs = commandReplyWaitMs();
   if (waitMs === 0 || typeof printer?.on !== "function") {
-    await printer.publish(message);
+    await publishWithQos(printer, message, qos);
     await sleep(COMMAND_SETTLE_MS);
     return { waitedMs: 0 };
   }
@@ -395,7 +436,7 @@ async function sendCommand(printer: any, command: Record<string, any> | BambuNod
     timer = setTimeout(() => resolve(undefined), waitMs);
   });
   try {
-    await printer.publish(message);
+    await publishWithQos(printer, message, qos);
     const reply = await replied;
     assertCommandAccepted(reply);
     return { reply, waitedMs: reply ? 0 : waitMs };
@@ -403,6 +444,23 @@ async function sendCommand(printer: any, command: Record<string, any> | BambuNod
     clearTimeout(timer);
     pending.delete(sequenceId);
   }
+}
+
+/**
+ * Publish at Bambu Studio's QoS: it sends stop, pause, resume, skip_objects, set_nozzle_temp, set_ctt and the hms
+ * commands with QoS 1 (publish_json(j, 1)), everything else with 0. bambu-node's publish has no QoS option, so QoS 1
+ * goes through its MQTT client on the same request topic.
+ */
+async function publishWithQos(printer: any, message: Record<string, any>, qos: 0 | 1): Promise<void> {
+  const client = printer?.mqttClient;
+  const serial = printer?.config?.serialNumber;
+  if (qos !== 1 || !client || typeof client.publish !== "function" || typeof serial !== "string" || !serial) {
+    await printer.publish(message);
+    return;
+  }
+  const topic = `device/${serial}/request`;
+  await new Promise<void>((resolve, reject) => client.publish(topic, JSON.stringify(message), { qos: 1 },
+    (error?: Error) => error ? reject(new Error(`Error publishing to topic '${topic}': ${error.message}`)) : resolve()));
 }
 
 /** A dispatch callback's result (a signed command) may carry the printer's reply; copy it onto this result. */
@@ -582,7 +640,8 @@ class BambuClientStore {
     }
 
     const previous = this.reportSnapshots.get(key) || {};
-    this.reportSnapshots.set(key, { ...previous, ...update });
+    // Pushes are often deltas: restore them onto the cached report like Bambu Studio (nested objects merge).
+    this.reportSnapshots.set(key, mergeReport(previous, update));
     this.resolveInitialReport(key);
   }
 
@@ -653,6 +712,8 @@ class BambuClientStore {
       accessToken: token,
     });
     this.ensureInitialReportPromise(key);
+    // Restore the printer's state from every report from the start (safety reads use it).
+    lanPrinterReport(printer, serial);
 
     printer.on("rawMessage", (_topic, payload) => {
       try {
@@ -778,7 +839,7 @@ export class BambuImplementation {
     const loaded = manualHeatingRequirements(status, inspection.model, inspection.nozzleDiameters[0], usedMaterials[0]);
     const mapping = Array<number>(inspection.materials.length).fill(-1);
     inspection.usedFilamentPositions.forEach(position => { mapping[position] = loaded.amsMapping?.[0] ?? 254; });
-    const requirements = { ...inspection, useAMS: loaded.useAMS, amsMapping: mapping, usedNozzleIndices: loaded.usedNozzleIndices, requireLoadedFilament: true };
+    const requirements = { ...inspection, useAMS: loaded.useAMS, amsMapping: mapping, usedNozzleIndices: loaded.usedNozzleIndices, requireLoadedFilament: true, printStart: true };
     const { hmsWarnings } = validatePrinterState(status, requirements);
     return { requirements, hmsWarnings };
   }
@@ -867,9 +928,10 @@ export class BambuImplementation {
       const printer = await this.getPrinter(host, serial, token);
 
       try {
-        await invokeWithoutAck(printer, new PushAllCommand());
+        // Studio's pushall, at most one per 3 s (a display read inside that window uses the cached report).
+        if (await requestPushAll(printer)) await sleep(COMMAND_SETTLE_MS);
       } catch (error) {
-        console.warn("PushAllCommand failed, continuing with cached status", error);
+        console.warn("Full push request failed, continuing with cached status", error);
       }
 
       const cachedData = await this.printerStore.waitForInitialReport(host, serial, token);
@@ -1096,7 +1158,7 @@ export class BambuImplementation {
         throw new Error("Legacy gcode_file printing requires a single plate_1.gcode. Export only the selected plate or use a .3mf project_file export.");
       }
     }
-    const mappedRequirements: PrinterStateRequirements = { ...inspection, amsMapping: baseMapping, useAMS: options.useAMS !== false };
+    const mappedRequirements: PrinterStateRequirements = { ...inspection, amsMapping: baseMapping, useAMS: options.useAMS !== false, printStart: true, timelapse: options.timelapse ?? false };
     const initialStatus = await this.getSafetyStatus(host, serial, token);
     this.validatePrintState(initialStatus, inspection, mappedRequirements, legacyContainer);
     assertUnsignedPrintAccepted(initialStatus);
@@ -1123,12 +1185,13 @@ export class BambuImplementation {
     const mappingWarnings = asked?.warning ? [asked.warning] : [];
     assertActive();
     if (legacyContainer) {
-      const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath);
-      try { await invokeWithoutAck(printer, new GCodeFileCommand({ fileName: remoteProjectPath })); } catch (error) { watcher.dispose(); throw error; }
+      const gcodeFileCmd = await bambuNodeMessage(new GCodeFileCommand({ fileName: remoteProjectPath }));
+      const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath, commandSequenceId(gcodeFileCmd));
+      try { await publishWithoutAck(printer, gcodeFileCmd); } catch (error) { watcher.dispose(); throw error; }
       this.recordCheckedJob(host, serial, remoteProjectPath, requirements);
       const dispatch = await watcher.settled();
       return withHmsWarnings({
-        status: dispatchStatusLabel(dispatch), dispatch, remoteProjectPath,
+        status: dispatchStatusLabel(dispatch), dispatch, remoteProjectPath, ...dispatchReplyField(watcher.reply()),
         message: dispatch === "started"
           ? `The printer accepted and started the checked gcode.3mf print: ${options.projectName}`
           : `Uploaded the checked gcode.3mf and sent the print command for ${options.projectName}; the printer has not reported starting yet. ` +
@@ -1163,7 +1226,7 @@ export class BambuImplementation {
       ...(asked?.checked ? { nozzleMapping: asked.checked.mapping } : {}),
     });
 
-    const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath);
+    const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath, commandSequenceId(projectFileCmd));
     try { await printer.publish(projectFileCmd); } catch (error) { watcher.dispose(); throw error; }
     this.recordCheckedJob(host, serial, remoteProjectPath, requirements);
     await new Promise((resolve) => setTimeout(resolve, 300));
@@ -1172,6 +1235,7 @@ export class BambuImplementation {
     return withHmsWarnings({
       status: dispatchStatusLabel(dispatch),
       dispatch,
+      ...dispatchReplyField(watcher.reply()),
       message: dispatch === "started"
         ? `The printer accepted and started the checked 3MF print: ${options.projectName}`
         : `Uploaded the checked 3MF and sent the print command for ${options.projectName}; the printer has not reported starting yet. ` +
@@ -1192,7 +1256,7 @@ export class BambuImplementation {
 
     try {
       if (dispatch) return await dispatch();
-      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "stop" }));
+      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "stop" }), 1);
       this.checkedJobs.delete(`${host}\n${serial}`);
       return withCommandReply({ status: "success", message: "Cancel command sent successfully." }, sent.reply, sent.waitedMs);
     } catch (error) {
@@ -1204,22 +1268,33 @@ export class BambuImplementation {
     const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
     try {
       if (dispatch) return await dispatch();
-      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "pause" }));
+      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "pause" }), 1);
       return withCommandReply({ status: "success", message: "Pause command sent successfully." }, sent.reply, sent.waitedMs);
     } catch (error) {
       throw new Error(`Failed to pause print: ${(error as Error).message}`);
     }
   }
 
-  async resumeJob(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>) => Promise<any>): Promise<any> {
+  async resumeJob(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: { print: Record<string, unknown> }) => Promise<any>): Promise<any> {
     return withPrinterOperation(host, serial, async assertActive => {
       const checked = this.checkedJobs.get(`${host}\n${serial}`);
       if (!checked) throw new Error("Resume requires a job inspected and started by this server instance. Verify other jobs on the printer before resuming them there.");
+      let command: { print: Record<string, unknown> } | undefined;
       const beforeDispatch = async () => {
         assertActive();
         const status = await this.getSafetyStatus(host, serial, token);
-        validatePrinterState(status, { ...checked.requirements, requireIdle: false });
+        const printError = Number(status.raw?.print_error ?? 0);
+        // Bambu Studio resumes a job paused by an error only from the error's dialog, and only when the dialog offers
+        // Resume for that code (hms_action list); a plain resume is for a pause the person made.
+        const resumable = Number.isInteger(printError) && printError > 0 && printErrorResumable(serial, printError) ? printError : undefined;
+        validatePrinterState(status, { ...checked.requirements, requireIdle: false, resumableError: resumable });
         if (status.raw.gcode_state !== "PAUSE") throw new Error("Resume requires a freshly reported paused job.");
+        // MachineObject::check_resume_condition: job_attr bits 4-7 above 1 is a processing task (laser, cutting).
+        const jobAttr = Number(status.raw.job_attr);
+        if (Number.isInteger(jobAttr) && ((jobAttr >>> 4) & 0xf) > 1) throw new Error("This is a processing task (such as laser); like Bambu Studio, it can only be resumed on the printer.");
+        const next = buildResumeCommand(status.raw, command?.print.sequence_id as string | undefined);
+        if (command && JSON.stringify(command) !== JSON.stringify(next)) throw new Error("The printer's error state changed before resuming. Check get_printer_status and retry.");
+        command = next;
         const stem = (value: string) => path.posix.basename(value).replace(/(?:\.gcode)?\.3mf$|\.gcode$/i, "");
         const names = [status.raw.gcode_file, status.raw.subtask_name].filter(value => typeof value === "string");
         if (!names.some(value => stem(value) === stem(checked.remotePath))) throw new Error("Paused job identity does not match this server's inspected artifact.");
@@ -1228,14 +1303,15 @@ export class BambuImplementation {
       await beforeDispatch();
       const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
       assertActive();
-      const result = { status: "success", message: "Resume command sent successfully." };
-      if (dispatch) return withDispatchedReply(result, await dispatch(assertActive, beforeDispatch));
-      const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "resume" }));
+      const answered = command!.print.err !== undefined ? { answeredError: Number(command!.print.err) } : {};
+      const result = { status: "success", message: "Resume command sent successfully.", ...answered };
+      if (dispatch) return withDispatchedReply(result, await dispatch(assertActive, beforeDispatch, command!));
+      const sent = await sendCommand(printer!, command!, 1);
       return withCommandReply(result, sent.reply, sent.waitedMs);
     });
   }
 
-  async clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: { print: Record<string, unknown> }) => Promise<any>): Promise<any> {
+  async clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: { print: Record<string, unknown> } | { system: Record<string, unknown> }) => Promise<any>): Promise<any> {
     return withPrinterOperation(host, serial, async assertActive => {
       const codesFor = (status: any): string[] => {
         if (!Array.isArray(status.raw?.hms) || status.raw?.print_error === undefined) throw new Error("Fresh error codes are required before clearing hardware errors.");
@@ -1258,15 +1334,28 @@ export class BambuImplementation {
       const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
       assertActive();
       const result = { status: "success", message: "Confirmed HMS clear command sent. The next print requires acknowledgment of these cleared codes.", cleared_codes: codes };
+      // Like Studio when the person confirms an error, close its dialog too (uiop) once the error is cleared.
+      const printError = Number(freshRaw?.print_error ?? 0);
+      const uiop = Number.isInteger(printError) && printError > 0 && printError <= 0xffffffff ? buildCleanPrintErrorUiop(printError) : undefined;
+      const withUiop = async <T extends Record<string, unknown>>(cleared: T, send: () => Promise<unknown>): Promise<T> => {
+        if (!uiop) return cleared;
+        try {
+          await send();
+          return { ...cleared, closedErrorDialog: uiop.system.err };
+        } catch (error) {
+          return { ...cleared, closedErrorDialog: null, uiopError: `The error was cleared, but closing its dialog (uiop) failed: ${(error as Error).message}` };
+        }
+      };
       if (dispatch) {
         const dispatched = await dispatch(assertActive, beforeDispatch, command);
         this.clearedErrors.set(serial, codes);
         await sleep(COMMAND_SETTLE_MS);
-        return withDispatchedReply(result, dispatched);
+        // The clear changed the codes beforeDispatch pins; the dialog close needs no state check.
+        return withUiop(withDispatchedReply(result, dispatched), () => dispatch(assertActive, async () => {}, uiop!));
       }
       const sent = await sendCommand(printer!, command);
       this.clearedErrors.set(serial, codes);
-      return withCommandReply(result, sent.reply, sent.waitedMs);
+      return withUiop(withCommandReply(result, sent.reply, sent.waitedMs), () => publishWithoutAck(printer!, uiop!));
     });
   }
 
@@ -1305,7 +1394,7 @@ export class BambuImplementation {
   private async sendControl(host: string, serial: string, token: string, command: ControlCommand,
     dispatch?: (command: ControlCommand) => Promise<any>): Promise<SentControl> {
     if (dispatch) return { dispatched: await dispatch(command) };
-    return sendCommand(await this.getPrinter(host, serial, token), JSON.parse(command.messageJson));
+    return sendCommand(await this.getPrinter(host, serial, token), JSON.parse(command.messageJson), command.qos);
   }
 
   async setAirductMode(host: string, serial: string, token: string, mode: string,
@@ -1423,7 +1512,7 @@ export class BambuImplementation {
       for (const command of commands) {
         sent = dispatch
           ? { dispatched: await dispatch(command, assertActive, beforeDispatch) }
-          : await sendCommand(printer!, JSON.parse(command.messageJson));
+          : await sendCommand(printer!, JSON.parse(command.messageJson), command.qos);
       }
       const sentCommands = commands.map(command => command.gcode?.trim() ?? JSON.stringify(JSON.parse(command.messageJson).print));
       return withSentReply({ status: "success", message: `Temperature command sent for ${normalizedComponent}.`, command: sentCommands.join("; ") }, sent);
@@ -1533,7 +1622,7 @@ export class BambuImplementation {
         command: "skip_objects",
         obj_list: normalizedObjectIds,
       },
-    });
+    }, 1);
 
     return withCommandReply({
       status: "success",
@@ -1679,12 +1768,13 @@ export class BambuImplementation {
     this.assertBedClearance(dispatchStatus, bedClearance);
     const printer = await this.getPrinter(host, serial, token);
     assertActive();
-    const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remotePath);
-    try { await invokeWithoutAck(printer, new GCodeFileCommand({ fileName: remotePath })); } catch (error) { watcher.dispose(); throw error; }
+    const gcodeFileCmd = await bambuNodeMessage(new GCodeFileCommand({ fileName: remotePath }));
+    const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remotePath, commandSequenceId(gcodeFileCmd));
+    try { await publishWithoutAck(printer, gcodeFileCmd); } catch (error) { watcher.dispose(); throw error; }
     this.recordCheckedJob(host, serial, remotePath, requirements);
     const dispatch = await watcher.settled();
     return withHmsWarnings({
-      status: dispatchStatusLabel(dispatch), uploaded: true, printRequested: true, dispatch, remotePath,
+      status: dispatchStatusLabel(dispatch), uploaded: true, printRequested: true, dispatch, remotePath, ...dispatchReplyField(watcher.reply()),
       message: dispatch === "started"
         ? `The printer accepted and started ${remotePath}.`
         : `Sent the print command for ${remotePath}; the printer has not reported starting yet. Check get_printer_status before assuming it is printing.`,
@@ -1697,16 +1787,24 @@ export class BambuImplementation {
    * boards): a new command-verification HMS means the firmware refused the
    * command; PREPARE/SLICING/RUNNING for this job means it started. Attach before publishing.
    */
-  private watchDispatch(printer: any, host: string, serial: string, token: string, before: any, assertActive: () => void, jobName?: string):
-    { settled: () => Promise<"started" | "unconfirmed">; dispose: () => void } {
+  private watchDispatch(printer: any, host: string, serial: string, token: string, before: any, assertActive: () => void, jobName?: string, sequenceId?: string):
+    { settled: () => Promise<"started" | "unconfirmed">; dispose: () => void; reply: () => CommandReply | undefined } {
     const windowMs = dispatchCheckMs();
-    if (windowMs === 0) return { settled: async () => { assertActive(); return "unconfirmed"; }, dispose: () => {} };
+    let reply: CommandReply | undefined;
+    if (windowMs === 0) return { settled: async () => { assertActive(); return "unconfirmed"; }, dispose: () => {}, reply: () => undefined };
     let resolveOutcome!: (value: DispatchVerdict | undefined) => void;
     const outcome = new Promise<DispatchVerdict | undefined>((resolve) => { resolveOutcome = resolve; });
     const onRaw = (topic: string, payload: Buffer) => {
       if (topic !== `device/${serial}/report`) return;
       let parsed: any;
       try { parsed = JSON.parse(payload.toString()); } catch { return; }
+      // The printer's answer to this print command, matched by its sequence_id like any other command reply.
+      const answer = sequenceId ? matchCommandReply(parsed, sequenceId) : undefined;
+      if (answer) {
+        reply = answer;
+        const verdict = dispatchReplyVerdict(answer);
+        if (verdict) { resolveOutcome(verdict); return; }
+      }
       // Pushed reports are deltas: judge only what this one carries.
       const verdict = judgeDispatchReport(parsed?.print, before?.raw, jobName);
       if (verdict) resolveOutcome(verdict);
@@ -1724,6 +1822,7 @@ export class BambuImplementation {
     };
     return {
       dispose,
+      reply: () => reply,
       settled: async () => {
         let verdict: DispatchVerdict | undefined;
         try { verdict = await outcome; } finally { dispose(); }
@@ -1752,15 +1851,25 @@ export class BambuImplementation {
    * pushall interval, 3 s) for up to BAMBU_DISPATCH_CHECK_MS. "started" needs this job's name in the report or a
    * new task id with a printing state; a refusal or a failed start throws; otherwise "unconfirmed".
    */
-  async confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string, assertActive: () => void): Promise<"started" | "unconfirmed"> {
+  async confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string, assertActive: () => void,
+    replies?: { poll: () => Promise<CommandReply | undefined>; reply?: CommandReply }): Promise<"started" | "unconfirmed"> {
     const deadline = Date.now() + dispatchCheckMs();
     const cancelled = () => { try { assertActive(); return false; } catch { return true; } };
     let verdict: DispatchVerdict | undefined;
+    // The printer's project_file answer, relayed by the network plugin (Studio: "Failed to start printing job").
+    const checkReply = async () => {
+      if (!replies || replies.reply) return;
+      try { replies.reply = await replies.poll(); } catch { return; }
+      if (replies.reply) verdict = dispatchReplyVerdict(replies.reply);
+    };
     while (!verdict && !cancelled() && Date.now() < deadline) {
       await sleep(Math.min(3000, Math.max(0, deadline - Date.now())));
       if (cancelled()) break;
+      await checkReply();
+      if (verdict) break;
       try { verdict = judgeDispatchReport((await this.getSafetyStatus(host, serial, token))?.raw, before?.raw, jobName); } catch { /* try again until the deadline */ }
     }
+    if (!verdict && !cancelled()) await checkReply();
     return this.settleDispatch(host, serial, verdict, cancelled());
   }
 

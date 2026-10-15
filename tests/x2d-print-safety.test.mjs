@@ -81,7 +81,7 @@ test("X2D MCP print requests stop before slicing, status, uploads, and connectio
     BambuImplementation.prototype.getSafetyStatus = async (_host, serial) => ({
       connected:true, serial, model:'x2d', status:'IDLE',
       raw:{model:'x2d',gcode_state:'IDLE',print_error:0,hms:[],nozzle_diameter:['0.4','0.4']},
-      observation:{source:'mqtt',requestedAt:Date.now()-1,receivedAt:Date.now(),identitySource:'report'}
+      observation:{source:'mqtt',requestedAt:Date.now()-1,receivedAt:Date.now(),fullAt:Date.now(),identitySource:'report'}
     });
   `;
   const transport = new StdioClientTransport({

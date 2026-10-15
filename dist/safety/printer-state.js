@@ -1,8 +1,12 @@
-import { GetVersionCommand, PushAllCommand } from "bambu-node";
+import { GetVersionCommand } from "bambu-node";
+import { PUSHINFO_TIMEOUT_MS, lanPrinterReport, lastPushAllAt, notePushAll, pushAllMessage, pushAllMinIntervalMs } from "../printer-report.js";
+import { nextSequenceId } from "../sequence-id.js";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
 import { filamentProhibition } from "./filament-rules.js";
+import { printStartGates } from "./state-gates.js";
 import { DEPUTY_EXTRUDER_ID, DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, printerTypeModel, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
-const MAX_REPORT_AGE_MS = 15000;
+/** A safety check must run within this long of asking the printer for its state (Studio's PUSHINFO_TIMEOUT). */
+const MAX_REPORT_AGE_MS = PUSHINFO_TIMEOUT_MS;
 const SERIAL_MODELS = {
     "093": "H2S", "094": "H2D", "31B": "H2C", "239": "H2D Pro", "20P": "X2D",
     "00M": "X1C", "00W": "X1", "03W": "X1E", "01S": "P1P", "01P": "P1S", "22E": "P2S", "039": "A1", "030": "A1 Mini",
@@ -44,16 +48,26 @@ function observedIdentity(raw, configuredSerial) {
     const model = models[0];
     return { model, observedSerial: serials[0], identitySource: hasReportedModel ? "report" : "module-serial" };
 }
-/** Only raw reports received after this request are evidence. Never read printer.data here. */
+/**
+ * A fresh report for a safety check: the printer's state restored the way Bambu Studio does it (printer-report.ts),
+ * from a full report at most one full-push interval (3 s, Studio's REQUEST_PUSH_MIN_TIME) older than this request,
+ * with at least one push merged after the request. Studio sends at most one full-push request per 3 s; a request
+ * inside that window waits for the printer's next push, and only asks again once the window has passed. Never
+ * read printer.data here: bambu-node's cache is display state.
+ */
 export function readFreshPrinterStatus(printer, serial, timeoutMs = 5000) {
+    const report = lanPrinterReport(printer, serial);
     return new Promise((resolve, reject) => {
-        let raw = {};
         const requestedAt = Date.now();
-        let receivedAt = 0;
+        const minInterval = pushAllMinIntervalMs();
+        const last = lastPushAllAt(printer);
+        const delay = last === undefined ? 0 : Math.max(0, last + minInterval - requestedAt);
         let requestsPublished = false;
         let complete = false;
+        let pushAllTimer;
         const cleanup = () => {
             clearTimeout(timer);
+            clearTimeout(pushAllTimer);
             printer.off("rawMessage", onRaw);
             printer.off("client:disconnect", onDisconnect);
             printer.off("client:error", onError);
@@ -66,9 +80,16 @@ export function readFreshPrinterStatus(printer, serial, timeoutMs = 5000) {
             reject(error instanceof Error ? error : new Error(String(error)));
         };
         const maybeResolve = () => {
-            if (complete || !requestsPublished || !receivedAt || !Object.prototype.hasOwnProperty.call(raw, "gcode_state") ||
-                !Object.prototype.hasOwnProperty.call(raw, "print_error") || !Object.prototype.hasOwnProperty.call(raw, "hms"))
+            if (complete || !requestsPublished || report.fullAt === undefined || report.receivedAt === undefined)
                 return;
+            if (report.receivedAt < requestedAt || requestedAt - report.fullAt > minInterval)
+                return;
+            const state = report.state();
+            if (!state || !Object.prototype.hasOwnProperty.call(state, "gcode_state") ||
+                !Object.prototype.hasOwnProperty.call(state, "print_error") || !Object.prototype.hasOwnProperty.call(state, "hms"))
+                return;
+            const raw = report.modules && report.modulesAt !== undefined && requestedAt - report.modulesAt <= minInterval
+                ? { ...state, modules: report.modules } : state;
             try {
                 const identity = observedIdentity(raw, serial);
                 if (!identity.model)
@@ -77,40 +98,40 @@ export function readFreshPrinterStatus(printer, serial, timeoutMs = 5000) {
                 cleanup();
                 resolve({ connected: true, model: identity.model, status: raw.gcode_state, serial,
                     observedSerial: identity.observedSerial, raw,
-                    observation: { source: "mqtt", requestedAt, receivedAt, identitySource: identity.identitySource } });
+                    observation: { source: "mqtt", requestedAt, receivedAt: report.receivedAt, fullAt: report.fullAt, identitySource: identity.identitySource } });
             }
             catch (error) {
                 fail(error);
             }
         };
-        const onRaw = (topic, payload) => {
+        const onRaw = (topic) => {
             if (complete || topic !== `device/${serial}/report`)
                 return;
-            let parsed;
-            try {
-                parsed = JSON.parse(payload.toString());
-            }
-            catch {
-                return;
-            }
-            if (object(parsed.print) && parsed.print.command === "push_status") {
-                raw = { ...raw, ...parsed.print };
-                receivedAt = Date.now();
-            }
-            if (object(parsed.info) && parsed.info.command === "get_version" && Array.isArray(parsed.info.module)) {
-                raw = { ...raw, modules: parsed.info.module };
-            }
             maybeResolve();
         };
         const onDisconnect = () => fail(new Error("Printer disconnected while waiting for a fresh safety report."));
         const onError = (error) => fail(error);
-        const timer = setTimeout(() => fail(new Error("Timed out waiting for a fresh MQTT safety report with observed printer identity, state and errors; cached status cannot authorize an operation.")), timeoutMs);
+        const timer = setTimeout(() => fail(new Error("Timed out waiting for a fresh MQTT safety report with observed printer identity, state and errors; cached status cannot authorize an operation.")), timeoutMs + delay);
         printer.on("rawMessage", onRaw);
         printer.on("client:disconnect", onDisconnect);
         printer.on("client:error", onError);
-        // invoke() publishes only; executeCommand() would add an ACK dependency that H2 firmware lacks.
-        void Promise.all([new PushAllCommand().invoke(printer), new GetVersionCommand().invoke(printer)])
-            .then(() => { requestsPublished = true; maybeResolve(); }, fail);
+        const pushAll = () => {
+            if (complete)
+                return Promise.resolve();
+            notePushAll(printer);
+            return printer.publish(pushAllMessage(nextSequenceId()));
+        };
+        // publish only; executeCommand() would add an ACK dependency that H2 firmware lacks.
+        if (delay === 0) {
+            void Promise.all([pushAll(), new GetVersionCommand().invoke(printer)])
+                .then(() => { requestsPublished = true; maybeResolve(); }, fail);
+        }
+        else {
+            // A full push was asked for under 3 s ago: the next push the printer sends is enough, else ask again once
+            // Studio's interval has passed.
+            pushAllTimer = setTimeout(() => { pushAll().catch(fail); }, delay);
+            void new GetVersionCommand().invoke(printer).then(() => { requestsPublished = true; maybeResolve(); }, fail);
+        }
     });
 }
 function finiteNumber(value) {
@@ -229,7 +250,7 @@ const hexCode = (value) => value.toString(16).toUpperCase().padStart(8, "0").rep
 // printer refusing an unsigned command (firmware 01.08.05+ outside LAN Only + Developer Mode), not a reason the
 // printer can't print. Every other fatal entry still blocks.
 const NON_FAULT_FATAL_HMS = new Set(["0500-0500-0001-0007"]);
-function validateErrors(raw, requireIdle, uploadOnly = false) {
+function validateErrors(raw, requireIdle, uploadOnly = false, resumableError) {
     const state = typeof raw.gcode_state === "string" ? raw.gcode_state.toUpperCase() : "UNKNOWN";
     // FAILED is how Bambu firmware reports a stopped or failed job; the printer is idle and takes a new job (as from
     // Bambu Studio). Like FINISH it may leave a part on the bed, so it goes through the same bed-clearance check.
@@ -247,6 +268,10 @@ function validateErrors(raw, requireIdle, uploadOnly = false) {
     if (printError !== undefined && Number.isInteger(printError) && printError > 0 && printError <= 0xffffffff &&
         (requireIdle || uploadOnly) && (printError & 0xf000) === PRINT_ERROR_STOP_CLASS) {
         warnings.push(`print_error ${hexCode(printError)} (${printError === 0x0300400c ? "the previous task was canceled" : "the previous task stopped"})`);
+    }
+    else if (!requireIdle && !uploadOnly && printError !== undefined && printError !== 0 && printError === resumableError) {
+        // A pause for this error that Bambu Studio's error dialog offers Resume for (hms-actions.ts).
+        warnings.push(`print_error ${hexCode(printError)} (the job is paused for it; resuming answers it like Bambu Studio's Resume button)`);
     }
     else if (printError !== 0)
         throw new Error(`Printer reports a print error${printError !== undefined ? ` (${hexCode(printError)})` : " or did not report its error state"}.`);
@@ -393,8 +418,14 @@ export function validatePrinterState(status, requirements) {
         throw new Error("A connected printer is required for safety validation.");
     const observation = status.observation;
     const now = Date.now();
+    // Freshness, like Studio's MachineObject::is_info_ready (a full report, and a push within PUSHINFO_TIMEOUT) but per
+    // check: the full report the state is restored from (fullAt) is at most one full-push interval older than the
+    // request, a push was merged after the request (receivedAt), and the check runs within PUSHINFO_TIMEOUT (15 s).
     if (!observation || observation.source !== "mqtt" || !Number.isFinite(observation.requestedAt) || !Number.isFinite(observation.receivedAt) ||
-        observation.receivedAt < observation.requestedAt || observation.receivedAt > now || now - observation.requestedAt > MAX_REPORT_AGE_MS) {
+        !Number.isFinite(observation.fullAt) || observation.fullAt > observation.receivedAt ||
+        observation.requestedAt - observation.fullAt > pushAllMinIntervalMs() ||
+        observation.receivedAt < observation.requestedAt || observation.receivedAt > now ||
+        now - observation.receivedAt > PUSHINFO_TIMEOUT_MS || now - observation.requestedAt > MAX_REPORT_AGE_MS) {
         throw new Error("A fresh observed MQTT report is required; cached or stale status cannot authorize an operation.");
     }
     if (!object(status.raw))
@@ -404,7 +435,15 @@ export function validatePrinterState(status, requirements) {
     const model = normalizeModel(requirements.model);
     if (!model || !identity.model || model !== identity.model)
         throw new Error(`Printer model identity mismatch: requested ${requirements.model}, observed ${identity.model ?? "unknown"}.`);
-    const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false, requirements.uploadOnly === true);
+    const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false, requirements.uploadOnly === true, requirements.resumableError);
+    if (requirements.printStart && requirements.requireIdle !== false && !requirements.uploadOnly) {
+        const positions = requirements.usedFilamentPositions ?? (requirements.materials ?? []).map((_, index) => index);
+        hmsWarnings.push(...printStartGates(raw, {
+            model, filamentCount: requirements.materials?.length, timelapse: requirements.timelapse === true,
+            maxChamberTemperature: requirements.maxChamberTemperature,
+            trays: requirements.useAMS ? positions.map(position => requirements.amsMapping?.[position]).filter((tray) => tray !== undefined) : [],
+        }));
+    }
     if (requirements.requireLoadedFilament && (raw.ams?.tray_now !== undefined || Array.isArray(raw.ams?.ams))) {
         const current = finiteNumber(raw.ams?.tray_now);
         if (current === 255)
@@ -553,6 +592,11 @@ export function validatePrinterState(status, requirements) {
             const reportedType = typeof tray?.tray_type === "string" ? tray.tray_type.trim() : "";
             if (reportedType && normalizeMaterial(reportedType) !== material)
                 throw new Error(`Reported material ${reportedType} in slot ${trayIndex} contradicts declared ${materials[position]}.`);
+            // A present tray whose type was never set (no RFID tag, nothing entered): Studio shows it as unset, so the
+            // declared material is the only evidence.
+            if (object(tray) && !reportedType) {
+                hmsWarnings.push(`${isExternalTray(trayIndex) ? `external spool ${trayIndex}` : `AMS slot ${trayIndex}`} reports no filament type; ${materials[position]} is as declared, not as reported`);
+            }
             if (!requirements.usedNozzleIndices) {
                 const dual = DUAL_EXTRUDER_MODELS.has(model);
                 const logical = dual ? (requirements.filamentMap?.[position] ?? 1) - 1 : 0;

@@ -42,7 +42,7 @@ import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayVa
 import { assertAmsDryingSupported, buildAmsDryingCommand, normalizeAmsDryingRequest } from "./ams-drying.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, parse3MF } from './3mf_parser.js';
 import type { ThreeMFAmsRequirements } from "./types.js";
-import { BambuImplementation, assertDirectPrintSupported, dispatchStatusLabel, unsignedLanPrintAllowed, withHmsWarnings } from "./printers/bambu.js";
+import { BambuImplementation, assertDirectPrintSupported, dispatchReplyField, dispatchStatusLabel, unsignedLanPrintAllowed, withHmsWarnings } from "./printers/bambu.js";
 import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
 import { withCommandReply } from "./command-reply.js";
@@ -1734,7 +1734,7 @@ class BambuPrinterMCPServer {
         inspection.usedFilamentPositions.forEach((position, index) => { mapping![position] = finalAmsSlots[index]; });
       }
       if (!useAMS) mapping = externalSpoolMapping(inspection.model, inspection);
-      const requirements = { ...inspection, amsMapping: mapping, useAMS };
+      const requirements = { ...inspection, amsMapping: mapping, useAMS, printStart: true, timelapse: args?.timelapse !== undefined ? Boolean(args.timelapse) : false };
       const initialStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
       validatePrinterState(initialStatus, requirements);
       const bedClearance = await this.bambu.confirmPrintPreflight(devId, initialStatus, inspection);
@@ -1856,6 +1856,9 @@ class BambuPrinterMCPServer {
       assertActive();
       let dispatchStatus: any = confirmedStatus;
       let bridgeResult: unknown;
+      // The printer's project_file answer comes back through the plugin's message callbacks.
+      const dispatchedAt = Date.now();
+      const replies = { poll: () => this.bambuNetwork.projectFileReply(devId, dispatchedAt, channelOptions) } as { poll: () => Promise<any>; reply?: any };
       try {
         bridgeResult = await this.bambuNetwork.callWithAgent(
           bridgeMethod,
@@ -1877,8 +1880,8 @@ class BambuPrinterMCPServer {
         if (!(error instanceof BridgeDispatchUncertainError)) throw error;
         // Never resend: the job may still start. Look at the printer instead.
         this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
-        if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive) === "started") {
-          return withHmsWarnings({ status: "success", dispatch: "started", message: `Bambu's network plugin did not answer, but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params), ...(nozzleMapping ? { nozzleMapping: { mapping: nozzleMapping.mapping, hotends: nozzleMapping.assignments } } : {}) }, [...hmsWarnings, ...mappingWarnings]);
+        if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive, replies) === "started") {
+          return withHmsWarnings({ status: "success", dispatch: "started", message: `Bambu's network plugin did not answer, but the printer reports ${threeMfFilename} printing. It was not sent again.`, ...dispatchReplyField(replies.reply), bridgeMethod, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params), ...(nozzleMapping ? { nozzleMapping: { mapping: nozzleMapping.mapping, hotends: nozzleMapping.assignments } } : {}) }, [...hmsWarnings, ...mappingWarnings]);
         }
         throw error;
       }
@@ -1896,8 +1899,8 @@ class BambuPrinterMCPServer {
         if (BRIDGE_PRINT_MAYBE_STARTED.has(value)) {
           // The cloud task exists but the printer's ack didn't arrive in time: it may still start.
           this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
-          if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive) === "started") {
-            return withHmsWarnings({ status: "success", dispatch: "started", message: `The plugin reported ${value} (${bridgePrintErrorText(value)}), but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, bridgeResult, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params), ...(nozzleMapping ? { nozzleMapping: { mapping: nozzleMapping.mapping, hotends: nozzleMapping.assignments } } : {}) }, [...hmsWarnings, ...mappingWarnings]);
+          if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive, replies) === "started") {
+            return withHmsWarnings({ status: "success", dispatch: "started", message: `The plugin reported ${value} (${bridgePrintErrorText(value)}), but the printer reports ${threeMfFilename} printing. It was not sent again.`, ...dispatchReplyField(replies.reply), bridgeMethod, bridgeResult, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params), ...(nozzleMapping ? { nozzleMapping: { mapping: nozzleMapping.mapping, hotends: nozzleMapping.assignments } } : {}) }, [...hmsWarnings, ...mappingWarnings]);
           }
           throw new Error(`FULU BambuNetwork bridge method ${bridgeMethod} returned ${value} (${bridgePrintErrorText(value)}). The job was posted and may still start. Do not send it again: check get_printer_status (gcode_state and the job name) first.`);
         }
@@ -1908,7 +1911,7 @@ class BambuPrinterMCPServer {
       this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
       // A 0 from the plugin isn't proof (start_local_print returns ~3 s after publishing, with no printer ack):
       // confirm the job from the printer's own reports.
-      const dispatch = await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive);
+      const dispatch = await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive, replies);
 
       return withHmsWarnings({
         status: dispatchStatusLabel(dispatch),
@@ -1916,6 +1919,7 @@ class BambuPrinterMCPServer {
         message: dispatch === "started"
           ? `The printer reports the checked ${threeMfFilename} job started (FULU BambuNetwork ${bridgePrintMethod}).`
           : `FULU BambuNetwork ${bridgePrintMethod} handed ${threeMfFilename} to the printer, but it has not reported starting yet. Check get_printer_status before assuming it is printing; do not send it again.`,
+        ...dispatchReplyField(replies.reply),
         bridgeMethod,
         bridgeResult,
         clientJobId,
@@ -3683,8 +3687,9 @@ class BambuPrinterMCPServer {
           case "resume_print":
             result = await this.bambu.resumeJob(host, bambuSerial, bambuToken,
               nativeControls
-                ? (assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
-                    messageJson: JSON.stringify({ print: { command: "resume", param: "", sequence_id: nextSequenceId() } }), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
+                // The resume form Studio picks from the fresh report (plain, or answering the error that paused the job).
+                ? (assertActive, beforeDispatch, command) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
+                    messageJson: JSON.stringify(command), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
                 : undefined);
             break;
 

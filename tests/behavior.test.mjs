@@ -91,7 +91,7 @@ function stubFreshSafetyStatus(bambu, model) {
           { id: "131", tray: [{ id: "0", tray_type: "PETG", nozzle_temp_min: "220", nozzle_temp_max: "260" }] },
         ] },
       },
-      observation: { source: "mqtt", requestedAt: now, receivedAt: now, identitySource: "report" },
+      observation: { source: "mqtt", requestedAt: now, receivedAt: now, fullAt: now, identitySource: "report" },
     };
   };
 }

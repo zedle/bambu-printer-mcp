@@ -28,7 +28,7 @@ async function capture(t, model, serial, { sparse = false, useAMS = true, suffix
     const now = Date.now();
     return { connected: true, model, status: "IDLE", serial,
       raw: { model, gcode_state: "IDLE", nozzle_diameter: "0.4", nozzle_type: "hardened_steel", device: { nozzle: { info: nozzleDiameters.map((diameter, id) => ({ id, diameter, type: "HH01", stat: 0 })) } }, print_error: 0, hms, ams: { tray_now: "254", ams: [{ id: "0", tray: [{ id: "1", tray_type: "PLA", nozzle_temp_min: "190", nozzle_temp_max: "240" }] }] } },
-      observation: { source: "mqtt", requestedAt: now, receivedAt: now, identitySource: "report" } };
+      observation: { source: "mqtt", requestedAt: now, receivedAt: now, fullAt: now, identitySource: "report" } };
   };
   printer.getPrinter = async () => ({ publish: async (message) => { published.push(typeof message === "string" ? JSON.parse(message) : message); } });
   const result = await printer.print3mf("127.0.0.1", serial, "test", {
