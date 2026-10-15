@@ -391,16 +391,22 @@ export class BambuNetworkBridge {
         const polled = await this.request("bridge.poll_events", { limit: 256 }, options) as { events?: Array<{ name?: string; payload?: Record<string, unknown> }> };
         for (const event of polled?.events ?? []) {
           if (event.name === "on_subscribe_failure") throw new Error(`Bambu's cloud refused the subscription to printer ${devId}; is it bound to the signed-in account?`);
-          if (event.name === "on_printer_connected" || (event.name === "on_message" && event.payload?.dev_id === devId)) printerConnected = true;
+          // on_printer_connected comes first, but send_message only works once the printer's own messages flow.
+          if (event.name === "on_message" && event.payload?.dev_id === devId) printerConnected = true;
         }
         if (!printerConnected) await new Promise(resolve => setTimeout(resolve, 500));
       }
       if (!printerConnected) throw new Error(`Bambu's cloud did not connect to printer ${devId} within 15 seconds; nothing was sent.`);
       this.subscribedDevices.add(devId);
     }
-    const response = await this.callWithAgent("net.send_message", { dev_id: devId, msg: messageJson, qos: options.qos ?? 1, flag: 0 }, options);
-    assertBridgeOk(response, "net.send_message");
-    const code = bridgeValueAsNumber(response, "net.send_message");
+    let code = -2;
+    // -2 (CONNECT_FAILED) right after subscribing means the channel is still settling: retry briefly.
+    for (let attempt = 0; attempt < 4 && code === -2; attempt++) {
+      if (attempt) await new Promise(resolve => setTimeout(resolve, 2000));
+      const response = await this.callWithAgent("net.send_message", { dev_id: devId, msg: messageJson, qos: options.qos ?? 1, flag: 0 }, options);
+      assertBridgeOk(response, "net.send_message");
+      code = bridgeValueAsNumber(response, "net.send_message");
+    }
     if (code !== 0) throw new Error(`Bambu's network plugin refused the printer command (send_message returned ${code}).`);
     return code;
   }

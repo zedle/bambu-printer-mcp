@@ -17,7 +17,7 @@ function fakeBridge(responses = {}) {
   };
   bridge.request = async (method) => {
     calls.push({ method });
-    if (method === "bridge.poll_events") return { ok: true, events: responses.events ?? [{ name: "on_printer_connected", payload: { topic_str: "31BTEST" } }] };
+    if (method === "bridge.poll_events") return { ok: true, events: responses.events ?? [{ name: "on_printer_connected", payload: { topic_str: "31BTEST" } }, { name: "on_message", payload: { dev_id: "31BTEST", msg: "{}" } }] };
     return { ok: true };
   };
   return { bridge, calls };
