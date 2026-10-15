@@ -57,6 +57,15 @@ function bridgeValueAsNumber(value, method) {
     }
     throw new Error(`FULU BambuNetwork bridge method ${method} did not return a numeric value.`);
 }
+/** Folder holding Bambu's slicer_base64.cer client certificate for the network plugin. */
+function resolveCertDir() {
+    const candidates = [
+        trimEnv(process.env.BAMBU_NETWORK_CERT_DIR),
+        trimEnv(process.env.BAMBU_PROFILES_ROOT) ? path.join(path.dirname(trimEnv(process.env.BAMBU_PROFILES_ROOT)), "cert") : undefined,
+        trimEnv(process.env.PJARCZAK_BAMBU_PLUGIN_DIR),
+    ];
+    return candidates.find(dir => !!dir && fs.existsSync(path.join(dir, "slicer_base64.cer")));
+}
 function assertBridgeOk(value, method) {
     if (isBridgeFailure(value)) {
         const errorText = value.error === undefined ? "unknown bridge error" : String(value.error);
@@ -227,7 +236,18 @@ export class BambuNetworkBridge {
         };
         await withAgent("net.set_config_dir", { config_dir: configDir });
         await withAgent("net.init_log");
+        // Bambu Studio's order (GUI_App.cpp): the plugin's TLS client certificate and the client headers come before
+        // start. Without them the agent signs in but never reaches Bambu's cloud (is_server_connected stays false).
+        const certDir = resolveCertDir();
+        if (certDir)
+            await withAgent("net.set_cert_file", { folder: certDir, filename: "slicer_base64.cer" }, false);
         await withAgent("net.set_country_code", { country_code: countryCode });
+        const clientVersion = typeof this.handshake?.network_actual_abi_version === "string"
+            ? this.handshake.network_actual_abi_version : "02.08.02.54";
+        await withAgent("net.set_extra_http_header", { headers: {
+                "X-BBL-Client-Type": "slicer", "X-BBL-Client-Name": "BambuStudio", "X-BBL-Client-Version": clientVersion,
+                "X-BBL-OS-Type": process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux", "X-BBL-Language": "en",
+            } }, false);
         await withAgent("net.start");
         await withAgent("net.connect_server", {}, false);
         if (userInfo) {

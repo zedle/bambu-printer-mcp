@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- Start the BambuNetwork agent in Bambu Studio's order: register the plugin's `slicer_base64.cer` client certificate (`BAMBU_NETWORK_CERT_DIR`, else Bambu Studio's `resources/cert`, else the bridge runtime) and the client headers before `net.start`. Without them the agent signed in but never connected to Bambu's cloud, so cloud printing and control could not work.
 - Run hardware actions unattended by default so agents can drive the printer: print starts, heating, finished-bed clearance and error clearing no longer ask for confirmation. `BAMBU_REQUIRE_CONFIRMATION=1` asks a person for every one of them. File inspection, fresh printer-state, nozzle, material and HMS checks run either way.
 - With `BAMBU_DEFAULT_CONNECTION_MODE=bambu_network` and the FULU bridge configured, control commands (clear errors, pause, resume, cancel, speed, light, fans, airduct, AMS, heating, skip objects) go through Bambu's signed cloud path, since firmware 01.08.05+ refuses unsigned LAN MQTT control outside LAN Only and Developer Mode. The bridge client signs in, waits for the cloud connection and subscribes to the printer before sending (the plugin crashes otherwise).
 
