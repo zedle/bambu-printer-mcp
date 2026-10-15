@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- Inspect two-colour H2C jobs from BambuStudio 02.08: resolve project filament-variant tables (`filament_self_index` and `filament_extruder_variant`, one row per filament per hotend variant) through the plate's selected variants instead of rejecting them, and accept the idle-hotend `M104 T<extruder> S<target> N0` pre-cooling/pre-heating form, `M620.15 P` nozzle-change pre-cooling, `M620.14 X Y` prime-tower position at filament changes, and the `M9711` timelapse capture command. Every target keeps its independent machine and material limits; other models, other parameters and out-of-bed tower positions remain rejected. Validated offline against a stock 02.08.02.61 two-colour H2C slice; no physical print was run.
+
 ## [1.1.27] – 2026-10-14
 
 ### Added

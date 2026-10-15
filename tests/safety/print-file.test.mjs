@@ -475,12 +475,51 @@ test('H2C startup forms reject other models, late commands, extra parameters and
   const forms=['M620 N','M104 O-80 A','M140 D55','M190 D55','M620.14 X95.5 Y336','G383.3 U140 L0','G383 O2 U140 L0','G383.7 U140 J0','========== record data =========='];
   for(const command of forms) {
     await assert.rejects(inspect(t,header()+'; EXECUTABLE_BLOCK_START\n'+command+'\n',{model:'p1s'}),/unsupported|syntax|missing/i,command);
+    // Filament changes repeat M620.14 with the prime tower centre (see the two-colour test).
+    if(command==='M620.14 X95.5 Y336') continue;
     await assert.rejects(inspect(t,h2cHeader()+'; EXECUTABLE_BLOCK_START\nM104 S220\n; MACHINE_START_GCODE_END\n'+command+'\n',{model:'h2c'}),/unsupported|syntax|missing|startup/i,command);
   }
   for(const command of ['M140 D130','M190 D130','M140 D55 S400','M104 O20 A','M104 O-80 A S330','G383.3 U400 L0','G383.3 U140 L8','G383.7 U140 J1','M620 N1','M620.14 X95 Y336 T400','M104 S330'])
     await assert.rejects(inspect(t,h2cHeader()+'; EXECUTABLE_BLOCK_START\n'+command+'\n; MACHINE_START_GCODE_END\n',{model:'h2c'}),/unsupported|parameter|temperature|limit|material|declared/i,command);
   await assert.rejects(inspect(t,h2cHeader().replace('= 220','= 400')+'; EXECUTABLE_BLOCK_START\nM104 O-80 A\n; MACHINE_START_GCODE_END\n',{model:'h2c'}),/temperature|limit/i);
   await assert.rejects(inspect(t,header('H2C','PLA','0.4;0.4')+'; EXECUTABLE_BLOCK_START\nM104 O-80 A\n; MACHINE_START_GCODE_END\n',{model:'h2c'}),/metadata|temperature/i);
+});
+// BambuStudio 02.08.02.61 two-colour H2C job (one filament per nozzle): change_filament_gcode,
+// the idle-hotend pre-cooling/pre-heating forms and time_lapse_gcode's capture command.
+const h2cTwoColour='; EXECUTABLE_BLOCK_START\nM104 O-80 A\n; MACHINE_START_GCODE_END\nM620 S0A H-1\nT0 H-1\nM621 S0A\nM104 T1 S25 N0 ;Multi extruder pre cooling\nG1 X10 Y10 E1\n'+
+  'M104 T1 S200 N0 ;Multi extruder pre heating\nM620 S1A H-1\nM620.14 X40.4635 Y226.381\nM620.15 P180\nM620.15 C210\nT1 H-1\nM621 S1A\n'+
+  'M104 T0 S25 N0 ;Multi extruder pre cooling\nM9711 M0 E0 Z2.6 S11 C10 O0 T3000\nM104 T1 S220 N0 ;Wipe tower reheat before wipe\nG1 X12 Y10 E1\n';
+const h2cTwoColourHeader=()=>header('H2C','PLA;PLA','0.4;0.4')+'; nozzle_temperature_initial_layer = 220,220\n';
+test('BambuStudio 02.08 H2C two-colour filament-change forms pass with independent temperature checks',async t=>{
+  const r=await inspect(t,h2cTwoColourHeader()+h2cTwoColour,{model:'h2c'});
+  assert.equal(r.maxNozzleTemperature,220);assert.deepEqual(r.usedFilamentPositions,[0,1]);
+  for(const [form,bad] of [['M104 T1 S200 N0','M104 T1 S400 N0'],['M104 T1 S200 N0','M104 T1 S200 N1'],['M104 T1 S200 N0','M104 S200 N0'],['M104 T1 S200 N0','M104 T1 S200 R300 N0'],
+    ['M104 T1 S200 N0','M104 T2 S200 N0'],['M620.15 P180','M620.15 P400'],['M620.15 P180','M620.15 P180 C200'],['M620.14 X40.4635 Y226.381','M620.14 X400 Y226'],
+    ['M620.14 X40.4635 Y226.381','M620.14 X40 Y226 T400'],['M9711 M0 E0 Z2.6 S11 C10 O0 T3000','M9711 M0 E0 Z2.6 S11 C10 O0 T3000 M104'],['M9711 M0 E0 Z2.6 S11 C10 O0 T3000','M9711 M0 G1 X0'],
+    ['M9711 M0 E0 Z2.6 S11 C10 O0 T3000','M9711 M0 E0 Z2.6 R300']])
+    await assert.rejects(inspect(t,h2cTwoColourHeader()+h2cTwoColour.replace(form,bad),{model:'h2c'}),/unsupported|parameter|temperature|limit|declared|duplicate/i,bad);
+  for(const model of ['P1S','H2D','X1C']) for(const command of ['M104 T1 S25 N0','M620.15 P180','M620.14 X40.4635 Y226.381','M9711 M0 E0 Z2.6 S11 C10 O0 T3000'])
+    await assert.rejects(inspect(t,header(model,'PLA;PLA',model==='H2D'?'0.4;0.4':'0.4')+command+'\n',{model:model.toLowerCase()}),/unsupported|parameter|command/i,`${model} ${command}`);
+});
+test('H2C filament-variant project tables resolve through the selected variant',async t=>{
+  const variants=['Direct Drive Standard','Direct Drive High Flow','Direct Drive E3D High Flow'];
+  const project=temps=>({printer_model:'Bambu Lab H2C',nozzle_diameter:['0.4','0.4'],filament_type:['PLA','PLA'],filament_self_index:['1','1','1','2','2','2'],
+    filament_extruder_variant:[...variants,...variants],nozzle_temperature_initial_layer:temps});
+  const gcode=(selected,temps)=>h2cTwoColourHeader().replace('= 220,220',`= ${temps}`)+`; filament_extruder_variant = ${selected}\n`+h2cTwoColour;
+  const job=(temps,selected='"Direct Drive Standard";"Direct Drive Standard"',header='220,220')=>({'Metadata/project_settings.config':project(temps),'Metadata/plate_1.gcode':gcode(selected,header)});
+  const r=await inspect(t,'',{model:'h2c'},job(['220','230','230','220','230','230']));assert.equal(r.maxNozzleTemperature,220);
+  await inspect(t,'',{model:'h2c'},job(['220','230','230','220','230','230'],'"Direct Drive Standard";"Direct Drive High Flow"','220,230'));
+  // The header's values must be the selected variant's rows, never another row or a maximum.
+  await assert.rejects(inspect(t,'',{model:'h2c'},job(['220','230','230','220','230','230'],'"Direct Drive High Flow";"Direct Drive Standard"')),/contradictory/i);
+  await assert.rejects(inspect(t,'',{model:'h2c'},job(['400','230','230','220','230','230'],undefined,'400,220')),/temperature|limit/i);
+  await assert.rejects(inspect(t,'',{model:'h2c'},job(['220','230','230','220','230','230'],'"Direct Drive Standard"')),/metadata/i);
+  const unlabelled=job(['220','230','230','220','230','230']);delete unlabelled['Metadata/project_settings.config'].filament_self_index;
+  await assert.rejects(inspect(t,'',{model:'h2c'},unlabelled),/malformed/i);
+  // Without variant labels a filament's rows must agree.
+  const agreeing=job(['220','220','220','220','220','220']);delete agreeing['Metadata/project_settings.config'].filament_extruder_variant;
+  await inspect(t,'',{model:'h2c'},agreeing);
+  const disagreeing=job(['220','230','230','220','230','230']);delete disagreeing['Metadata/project_settings.config'].filament_extruder_variant;
+  await assert.rejects(inspect(t,'',{model:'h2c'},disagreeing),/malformed/i);
 });
 test('config layer_change_gcode does not close startup but a real layer marker does',async t=>{
   const config='; CONFIG_BLOCK_START\n; layer_change_gcode = ; layer num/total_layer_count: {layer_num+1}/[total_layer_count]\\nM104 S220\n; CONFIG_BLOCK_END\n';

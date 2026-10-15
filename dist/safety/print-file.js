@@ -303,6 +303,42 @@ export async function inspectPrintFile(filePath, options) {
         const values = list(value);
         return values.length && values.every(v => !!normalizeMaterial(v)) ? values.map(v => normalizeMaterial(v)) : undefined;
     }, 'filament material');
+    // Multi-variant printers (H2C in Bambu Studio 02.08) write per-filament settings to
+    // project_settings.config as a filament-variant table: one row per filament per hotend
+    // variant, labelled by filament_self_index and filament_extruder_variant. The plate
+    // G-code header holds the per-filament values and variants it sliced with. Resolve each
+    // filament's row through both labels; never pick a row by position or take a maximum.
+    const filamentValues = (key) => {
+        const field = key.replace(/_/g, ' ');
+        const resolve = (value) => {
+            const entries = list(value);
+            if (entries.length === materials.length)
+                return value;
+            const owners = list(project.filament_self_index);
+            const variants = list(project.filament_extruder_variant);
+            if (owners.length !== entries.length || !owners.every(owner => /^[1-9]\d*$/.test(owner) && Number(owner) <= materials.length))
+                return undefined;
+            const selected = variants.length ? consistent(metadataValues(headers, ['filament_extruder_variant']), variant => {
+                const values = list(variant);
+                return values.length === materials.length && values.every(Boolean) ? values : undefined;
+            }, 'selected filament extruder variant') : undefined;
+            if (selected && variants.length !== entries.length)
+                return undefined;
+            const resolved = [];
+            for (let position = 0; position < materials.length; position++) {
+                const rows = owners.flatMap((owner, row) => Number(owner) === position + 1 && (!selected || variants[row] === selected[position]) ? [row] : []);
+                // Without variant labels, every row of a filament must agree.
+                if (!rows.length || (selected ? rows.length !== 1 : !rows.every(row => entries[row] === entries[rows[0]])))
+                    return undefined;
+                resolved.push(entries[rows[0]]);
+            }
+            return resolved;
+        };
+        const table = metadataValues([project], [key]).map(resolve);
+        if (table.some(value => value === undefined))
+            return fail(`unknown or malformed ${field} metadata`);
+        return [...table, ...metadataValues(headers, [key])];
+    };
     const bedValues = metadataValues([...metadata, plate], ['curr_bed_type', 'bed_type']);
     const bedType = bedValues.length ? consistent(bedValues, normalizeBed, 'bed type') : undefined;
     if (options.bedType && (!bedType || normalizeBed(options.bedType) !== bedType))
@@ -392,6 +428,15 @@ export async function inspectPrintFile(filePath, options) {
             const code = command[1].toUpperCase() + String(Number(base)) + (subcode === undefined ? '' : '.' + subcode);
             const argumentsText = line.slice(command[0].length).trim();
             commandCount++;
+            // H2C timelapse capture (time_lapse_gcode): M9711 M<timelapse type> E<extruder> U V Z S C O T.
+            // Its M is a parameter, not a second command; it sets no heater target.
+            const timelapseCapture = code === 'M9711' && model === 'h2c';
+            if (timelapseCapture) {
+                const args = parameters(argumentsText);
+                if ([...args.keys()].some(key => !'MEUVZSCOT'.includes(key)))
+                    fail('unsupported H2C timelapse capture parameters');
+                continue;
+            }
             if (!['M117', 'M118', 'M1002', 'M1006', 'M900', 'M970', 'M983.1', 'G383'].includes(code) && /[GM]\s*\d/i.test(argumentsText))
                 fail('multiple commands on one line are unsupported');
             // Coordinated extrusion closes the startup-only allowance even when the
@@ -425,7 +470,7 @@ export async function inspectPrintFile(filePath, options) {
                     // editable maxima or an unchecked offset as thermal evidence.
                     if (code !== 'M104' || !h2cStartup(index) || args.size !== 2 || args.get('O') !== -80 || !Number.isNaN(args.get('A')))
                         fail('unsupported H2C startup offset parameters');
-                    const targets = consistent(metadataValues(metadata, ['nozzle_temperature_initial_layer']), value => {
+                    const targets = consistent(filamentValues('nozzle_temperature_initial_layer'), value => {
                         const values = list(value);
                         return values.length === materials.length && values.every(v => NUMBER.test(v) && Number.isFinite(Number(v))) ? values.map(Number) : undefined;
                     }, 'first-layer nozzle temperature');
@@ -445,8 +490,13 @@ export async function inspectPrintFile(filePath, options) {
                     continue;
                 }
                 const vendorWait = code === 'M109' && ['a1', 'a1mini'].includes(model);
+                // H2C multi-extruder pre-cooling/pre-heating/tower reheat of the idle hotend:
+                // M104 T<physical extruder> S<target> N0. S stays the checked target (all materials).
+                const idleHotend = code === 'M104' && model === 'h2c' && args.has('N');
+                if (idleHotend && (args.get('N') !== 0 || !args.has('T') || !args.has('S') || args.size !== 3))
+                    fail('unsupported H2C idle-hotend M104 parameters');
                 for (const key of args.keys())
-                    if (!'SRTA'.includes(key) && !(key === 'H' && vendorWait))
+                    if (!'SRTA'.includes(key) && !(key === 'H' && vendorWait) && !(key === 'N' && idleHotend))
                         fail(`unsupported ${code} temperature parameter ${key}`);
                 if (args.has('H') && (!Number.isFinite(args.get('H')) || args.get('H') < 0 || args.get('H') > 300))
                     fail(`unsupported ${code} wait parameter H`);
@@ -523,8 +573,9 @@ export async function inspectPrintFile(filePath, options) {
             }
             else if (code === 'M620.14') {
                 const args = parameters(argumentsText);
-                // H2C tower coordinates include the rear wipe area outside object bounds.
-                if (!h2cStartup(index) || args.size !== 2 || !['X', 'Y'].every(key => args.has(key) && Number.isFinite(args.get(key)) && args.get(key) >= 0 && args.get(key) <= 350))
+                // H2C tower coordinates include the rear wipe area outside object bounds. Startup
+                // sets the default; every filament change repeats it with the prime tower centre.
+                if (model !== 'h2c' || (!h2cStartup(index) && !depositionStarted) || args.size !== 2 || !['X', 'Y'].every(key => args.has(key) && Number.isFinite(args.get(key)) && args.get(key) >= 0 && args.get(key) <= 350))
                     fail('unsupported H2C startup tower parameters');
             }
             else if (model === 'h2c' && ['G383', 'G383.3', 'G383.7'].includes(code) && /U/i.test(argumentsText)) {
@@ -565,11 +616,12 @@ export async function inspectPrintFile(filePath, options) {
             }
             else if (code === 'M620.15') {
                 // H2D change_filament_gcode supplies the incoming filament's cooling
-                // temperature as C{new_filament_temp - filament_cooling_before_tower}.
+                // temperature as C{new_filament_temp - filament_cooling_before_tower}; H2C also
+                // sends its nozzle-change pre-cooling target as P[filament_pre_cooling_temperature_nc].
                 const args = parameters(argumentsText);
-                if (args.size !== 1 || !args.has('C'))
+                if (args.size !== 1 || !(args.has('C') || (args.has('P') && model === 'h2c')))
                     fail('unsupported M620.15 cooling temperature parameters');
-                heat('nozzle', args.get('C'), pending ?? active);
+                heat('nozzle', args.get('C') ?? args.get('P'), pending ?? active);
             }
             else if (code === 'M620.17') {
                 const args = parameters(argumentsText);
