@@ -12,5 +12,5 @@ export function mockReport(name) {
 export function mockStatus(name, overrides = {}) {
   const serial = `${PREFIX[name]}MOCK${name}`;
   const raw = { ...mockReport(name), gcode_state: 'IDLE', print_error: 0, hms: [], modules: [{ name: 'ota', sn: serial }], ...overrides };
-  return { connected: true, serial, raw, observation: { source: 'mqtt', requestedAt: Date.now(), receivedAt: Date.now(), identitySource: 'module-serial' } };
+  return { connected: true, serial, raw, observation: { source: 'mqtt', requestedAt: Date.now(), receivedAt: Date.now(), fullAt: Date.now() - 1, identitySource: 'module-serial' } };
 }

@@ -121,3 +121,19 @@ test('a read within the full-push interval waits for the next push instead of as
     if (previous === undefined) delete process.env.BAMBU_PUSHALL_MIN_MS; else process.env.BAMBU_PUSHALL_MIN_MS = previous;
   }
 });
+
+test('checks require a restored full report from around the request and a recent push (Studio is_info_ready)', () => {
+  const now = Date.now();
+  const status = (observation) => ({ connected: true, model: 'P1S', serial: '01PTEST', raw: full().print, observation: { source: 'mqtt', identitySource: 'report', ...observation } });
+  const requirements = { model: 'P1S', nozzleDiameters: [0.4], materials: ['PLA'], useAMS: false };
+  assert.doesNotThrow(() => safety.validatePrinterState(status({ requestedAt: now - 10, fullAt: now - 1000, receivedAt: now - 5 }), requirements));
+  for (const observation of [
+    { requestedAt: now - 10, receivedAt: now - 5 },                       // no full report behind it
+    { requestedAt: now - 10, fullAt: now - 10_000, receivedAt: now - 5 }, // the base is older than one full-push interval
+    { requestedAt: now - 10, fullAt: now - 1, receivedAt: now - 5 },      // a "full" report newer than the push it is part of
+    { requestedAt: now - 10, fullAt: now - 20, receivedAt: now - 20 },    // nothing pushed after the request
+    { requestedAt: now - 16_000, fullAt: now - 16_000, receivedAt: now - 15_500 }, // older than PUSHINFO_TIMEOUT
+  ]) {
+    assert.throws(() => safety.validatePrinterState(status(observation), requirements), /fresh observed MQTT report/, JSON.stringify(observation));
+  }
+});

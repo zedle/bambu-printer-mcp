@@ -26,7 +26,7 @@ function safetyStatus({ model = "p1s", nozzle = "0.4", state = "IDLE", ...raw } 
   return {
     connected: true, model, status: state, serial,
     raw: { model, gcode_state: state, nozzle_diameter: nozzle, print_error: 0, hms: [], ...raw },
-    observation: { source: "mqtt", receivedAt: Date.now(), requestedAt: Date.now() - 1, identitySource: "report" },
+    observation: { source: "mqtt", receivedAt: Date.now(), requestedAt: Date.now() - 1, fullAt: Date.now() - 1, identitySource: "report" },
   };
 }
 
@@ -426,7 +426,7 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
       const reported={...(fs.existsSync(${JSON.stringify(statusPath)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(statusPath)},'utf8')) : {}), ...(printSent ? ${JSON.stringify(afterPrint ?? {})} : {})};
       return {connected:true, model:${JSON.stringify(model)}, status:reported.gcode_state??'IDLE', serial:${JSON.stringify(serial)},
         raw:{model:${JSON.stringify(model)},gcode_state:'IDLE',nozzle_diameter:${JSON.stringify(String(nozzleDiameters[0]))},device:{nozzle:{info:${JSON.stringify(nozzleDiameters.map((diameter, id) => ({ id, diameter, type: "HH01", stat: 0 })))}}},print_error:0,hms:[],...${JSON.stringify(ams ? { ams } : {})},...reported},
-        observation:{source:'mqtt',requestedAt:now,receivedAt:now,identitySource:'report'}};
+        observation:{source:'mqtt',requestedAt:now,receivedAt:now,fullAt:now,identitySource:'report'}};
     };
     BambuNetworkBridge.prototype.ensurePrinterChannel = async (devId) => { log({ action: 'bridge-channel', devId }); };
     BambuNetworkBridge.prototype.ensureLocalChannel = async (devId, devIp) => { log({ action: 'bridge-local-channel', devId, devIp }); };

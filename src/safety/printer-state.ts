@@ -1,11 +1,12 @@
 import { BambuClient, GetVersionCommand } from "bambu-node";
-import { lanPrinterReport, lastPushAllAt, notePushAll, pushAllMessage, pushAllMinIntervalMs } from "../printer-report.js";
+import { PUSHINFO_TIMEOUT_MS, lanPrinterReport, lastPushAllAt, notePushAll, pushAllMessage, pushAllMinIntervalMs } from "../printer-report.js";
 import { nextSequenceId } from "../sequence-id.js";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
 import { filamentProhibition } from "./filament-rules.js";
 import { DEPUTY_EXTRUDER_ID, DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, printerTypeModel, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
 
-const MAX_REPORT_AGE_MS = 15_000;
+/** A safety check must run within this long of asking the printer for its state (Studio's PUSHINFO_TIMEOUT). */
+const MAX_REPORT_AGE_MS = PUSHINFO_TIMEOUT_MS;
 const SERIAL_MODELS: Record<string, string> = {
   "093": "H2S", "094": "H2D", "31B": "H2C", "239": "H2D Pro", "20P": "X2D",
   "00M": "X1C", "00W": "X1", "03W": "X1E", "01S": "P1P", "01P": "P1S", "22E": "P2S", "039": "A1", "030": "A1 Mini",
@@ -385,8 +386,14 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
   if (status?.connected !== true) throw new Error("A connected printer is required for safety validation.");
   const observation = status.observation;
   const now = Date.now();
+  // Freshness, like Studio's MachineObject::is_info_ready (a full report, and a push within PUSHINFO_TIMEOUT) but per
+  // check: the full report the state is restored from (fullAt) is at most one full-push interval older than the
+  // request, a push was merged after the request (receivedAt), and the check runs within PUSHINFO_TIMEOUT (15 s).
   if (!observation || observation.source !== "mqtt" || !Number.isFinite(observation.requestedAt) || !Number.isFinite(observation.receivedAt) ||
-      observation.receivedAt < observation.requestedAt || observation.receivedAt > now || now - observation.requestedAt > MAX_REPORT_AGE_MS) {
+      !Number.isFinite(observation.fullAt) || observation.fullAt > observation.receivedAt ||
+      observation.requestedAt - observation.fullAt > pushAllMinIntervalMs() ||
+      observation.receivedAt < observation.requestedAt || observation.receivedAt > now ||
+      now - observation.receivedAt > PUSHINFO_TIMEOUT_MS || now - observation.requestedAt > MAX_REPORT_AGE_MS) {
     throw new Error("A fresh observed MQTT report is required; cached or stale status cannot authorize an operation.");
   }
   if (!object(status.raw)) throw new Error("Fresh raw printer report is missing.");

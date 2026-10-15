@@ -78,7 +78,7 @@ BambuImplementation.prototype.getSafetyStatus = async function () {
   const now=Date.now();
   return {connected:true,model:'p1s',status:'IDLE',serial:'TEST_SERIAL',
     raw:{model:'p1s',gcode_state:'IDLE',nozzle_diameter:'0.4',print_error:0,hms:[],...(published ? ${JSON.stringify(afterPublish ?? {})} : {})},
-    observation:{source:'mqtt',requestedAt:now,receivedAt:now,identitySource:'report'}};
+    observation:{source:'mqtt',requestedAt:now,receivedAt:now,fullAt:now,identitySource:'report'}};
 };
 `);
   const transport = new StdioClientTransport({

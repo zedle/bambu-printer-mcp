@@ -22,7 +22,7 @@ const safety = await import('../../dist/safety/printer-state.js');
 const fresh = (raw = {}, extra = {}) => ({
   connected: true, model: 'P1S', serial: '01PTEST', status:'IDLE',
   raw: { model_id:'C12', gcode_state:'IDLE', print_error:0, hms:[], nozzle_diameter:'0.4', nozzle_type:'hardened_steel', ...raw },
-  observation:{source:'mqtt',requestedAt:Date.now(),receivedAt:Date.now(),identitySource:'report'}, ...extra,
+  observation:{source:'mqtt',requestedAt:Date.now(),receivedAt:Date.now(),fullAt:Date.now(),identitySource:'report'}, ...extra,
 });
 const req = (extra = {}) => ({model:'P1S',nozzleDiameters:[0.4],materials:['PLA'],useAMS:false,...extra});
 const check = (status, requirements=req()) => safety.validatePrinterState(status, requirements);
