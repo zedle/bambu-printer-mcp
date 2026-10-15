@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readBoundedPrintFile, loadSafe3mfArchive } from './archive.js';
 import { MACHINE_LIMITS, normalizeMaterial, normalizeModel, validateStartupPurgeTemperature, validateTemperature } from './limits.js';
 import { extruderCount, physicalExtruderMap } from './models.js';
+import { parseSliceNozzlePlan, type SliceNozzlePlan } from './slice-info.js';
 
 export interface PrintFileInspection {
   model: string;
@@ -28,6 +29,8 @@ export interface PrintFileInspection {
   filamentTypes?: string[];
   /** Per filament, from the plate header: the filament preset name (filament_settings_id without " @<machine>"). */
   filamentNames?: string[];
+  /** The plate's nozzle plan from slice_info.config / filament_sequence.json (the nozzles used, each filament's). */
+  nozzlePlan?: SliceNozzlePlan;
 }
 type Metadata = Record<string, unknown>;
 const NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
@@ -155,6 +158,7 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
   if(/\.md5$/i.test(filePath)) return fail('a checksum file is not a printable artifact');
   const bytes=await readBoundedPrintFile(filePath);const sha256=createHash('sha256').update(bytes).digest('hex');
   let source:string;let project:Metadata={};let plate:Metadata={};let plateInternalPath:string|undefined;
+  let sliceInfo:string|undefined;let filamentSequence:string|undefined;
   if(/\.3mf$/i.test(filePath)) {
     const zip=await loadSafe3mfArchive(bytes);plateInternalPath=`Metadata/plate_${plateIndex+1}.gcode`;
     const entry=zip.file(plateInternalPath);
@@ -165,6 +169,8 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
       try {const data=JSON.parse(await config.async('string'));if(!data || Array.isArray(data) || typeof data!=='object') throw new Error('expected object');assign(data);}
       catch {return fail(`malformed ${name} metadata`);}
     }
+    sliceInfo=await zip.file('Metadata/slice_info.config')?.async('string');
+    filamentSequence=await zip.file('Metadata/filament_sequence.json')?.async('string');
   } else if (/\.gcode$/i.test(filePath)) {
     if(plateIndex!==0) return fail('raw G-code has only plate index 0');source=bytes.toString('utf8');
   } else return fail('unsupported printable artifact; use a sliced .3mf or textual .gcode file');
@@ -501,11 +507,20 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
   let physicalMap:number[]|undefined;
   try {physicalMap=nozzleDiameters.length===extruderCount(model)?physicalExtruderMap(model,extruderMap):undefined;}
   catch(error) {return fail(error instanceof Error?error.message:String(error));}
+  const nozzlePlan=parseSliceNozzlePlan(sliceInfo,filamentSequence,plateIndex,materials.length);
+  if(nozzlePlan) {
+    // Every planned nozzle must be on a sliced extruder with that extruder's diameter.
+    for(const nozzle of nozzlePlan.nozzles) {
+      const diameter=nozzleDiameters[nozzle.extruder-1];
+      if(diameter===undefined || Math.abs(diameter-nozzle.diameter)>1e-6) fail('slice_info nozzle metadata contradicts the sliced nozzle diameters');
+    }
+  }
   return {model,nozzleDiameters,materials,usedFilamentPositions:[...used].sort((a,b)=>a-b),plateInternalPath,sha256,maxNozzleTemperature,maxBedTemperature,maxChamberTemperature,bedType,selectsAms,nozzleTypes,nozzleFlows,
     ...(filamentMap && filamentMap.every(value => Number.isInteger(value) && value >= 1 && value <= nozzleDiameters.length) ? { filamentMap } : {}),
     ...(physicalMap ? { physicalExtruderMap: physicalMap } : {}),
     ...(perFilament('filament_ids') ? { filamentIds: perFilament('filament_ids') } : {}),
     ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {}),
     ...(perFilament('filament_type') ? { filamentTypes: perFilament('filament_type') } : {}),
-    ...(perFilament('filament_settings_id') ? { filamentNames: perFilament('filament_settings_id')!.map(name => name.replace(/\s*@.*$/, '')) } : {})};
+    ...(perFilament('filament_settings_id') ? { filamentNames: perFilament('filament_settings_id')!.map(name => name.replace(/\s*@.*$/, '')) } : {}),
+    ...(nozzlePlan ? { nozzlePlan } : {})};
 }

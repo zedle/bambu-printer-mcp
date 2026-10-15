@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readBoundedPrintFile, loadSafe3mfArchive } from './archive.js';
 import { MACHINE_LIMITS, normalizeMaterial, normalizeModel, validateStartupPurgeTemperature, validateTemperature } from './limits.js';
 import { extruderCount, physicalExtruderMap } from './models.js';
+import { parseSliceNozzlePlan } from './slice-info.js';
 const NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
 const fail = (message) => { throw new Error(`Print safety: ${message}`); };
 function list(value) {
@@ -180,6 +181,8 @@ export async function inspectPrintFile(filePath, options) {
     let project = {};
     let plate = {};
     let plateInternalPath;
+    let sliceInfo;
+    let filamentSequence;
     if (/\.3mf$/i.test(filePath)) {
         const zip = await loadSafe3mfArchive(bytes);
         plateInternalPath = `Metadata/plate_${plateIndex + 1}.gcode`;
@@ -201,6 +204,8 @@ export async function inspectPrintFile(filePath, options) {
                 return fail(`malformed ${name} metadata`);
             }
         }
+        sliceInfo = await zip.file('Metadata/slice_info.config')?.async('string');
+        filamentSequence = await zip.file('Metadata/filament_sequence.json')?.async('string');
     }
     else if (/\.gcode$/i.test(filePath)) {
         if (plateIndex !== 0)
@@ -690,11 +695,21 @@ export async function inspectPrintFile(filePath, options) {
     catch (error) {
         return fail(error instanceof Error ? error.message : String(error));
     }
+    const nozzlePlan = parseSliceNozzlePlan(sliceInfo, filamentSequence, plateIndex, materials.length);
+    if (nozzlePlan) {
+        // Every planned nozzle must be on a sliced extruder with that extruder's diameter.
+        for (const nozzle of nozzlePlan.nozzles) {
+            const diameter = nozzleDiameters[nozzle.extruder - 1];
+            if (diameter === undefined || Math.abs(diameter - nozzle.diameter) > 1e-6)
+                fail('slice_info nozzle metadata contradicts the sliced nozzle diameters');
+        }
+    }
     return { model, nozzleDiameters, materials, usedFilamentPositions: [...used].sort((a, b) => a - b), plateInternalPath, sha256, maxNozzleTemperature, maxBedTemperature, maxChamberTemperature, bedType, selectsAms, nozzleTypes, nozzleFlows,
         ...(filamentMap && filamentMap.every(value => Number.isInteger(value) && value >= 1 && value <= nozzleDiameters.length) ? { filamentMap } : {}),
         ...(physicalMap ? { physicalExtruderMap: physicalMap } : {}),
         ...(perFilament('filament_ids') ? { filamentIds: perFilament('filament_ids') } : {}),
         ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {}),
         ...(perFilament('filament_type') ? { filamentTypes: perFilament('filament_type') } : {}),
-        ...(perFilament('filament_settings_id') ? { filamentNames: perFilament('filament_settings_id').map(name => name.replace(/\s*@.*$/, '')) } : {}) };
+        ...(perFilament('filament_settings_id') ? { filamentNames: perFilament('filament_settings_id').map(name => name.replace(/\s*@.*$/, '')) } : {}),
+        ...(nozzlePlan ? { nozzlePlan } : {}) };
 }

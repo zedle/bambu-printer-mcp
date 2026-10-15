@@ -446,6 +446,31 @@ export class BambuNetworkBridge {
     return { code, reply, waitedMs: reply ? 0 : waitMs };
   }
 
+  /**
+   * Send a printer command over the signed path and return the first printer message `match` accepts within
+   * `waitMs` (undefined when none came), for queries whose answer is more than an ack (get_auto_nozzle_mapping).
+   */
+  async queryPrinter<T>(devId: string, messageJson: string, match: (message: unknown) => T | undefined, waitMs: number,
+    options: BambuNetworkBridgeOptions & { qos?: number } = {}): Promise<T | undefined> {
+    await this.ensurePrinterChannel(devId, options);
+    await this.drainEvents(options);
+    await this.sendPrinterMessage(devId, messageJson, options);
+    const deadline = Date.now() + waitMs;
+    while (true) {
+      let events: Array<{ name?: string; payload?: Record<string, unknown> }>;
+      try { events = await this.pollEvents(options); } catch { return undefined; }
+      for (const event of events) {
+        if (event.name !== "on_message" && event.name !== "on_local_message") continue;
+        if (event.payload?.dev_id !== undefined && event.payload.dev_id !== devId) continue;
+        const found = match(event.payload?.msg);
+        if (found !== undefined) return found;
+      }
+      const left = deadline - Date.now();
+      if (left <= 0) return undefined;
+      await new Promise(resolve => setTimeout(resolve, Math.min(250, left)));
+    }
+  }
+
   private async pollEvents(options: BambuNetworkBridgeOptions, limit = 1024): Promise<Array<{ name?: string; payload?: Record<string, unknown> }>> {
     const polled = await this.request("bridge.poll_events", { limit }, options) as { events?: unknown };
     return Array.isArray(polled?.events) ? polled.events as Array<{ name?: string; payload?: Record<string, unknown> }> : [];

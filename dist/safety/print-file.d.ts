@@ -1,3 +1,4 @@
+import { type SliceNozzlePlan } from './slice-info.js';
 export interface PrintFileInspection {
     model: string;
     nozzleDiameters: number[];
@@ -23,6 +24,8 @@ export interface PrintFileInspection {
     filamentTypes?: string[];
     /** Per filament, from the plate header: the filament preset name (filament_settings_id without " @<machine>"). */
     filamentNames?: string[];
+    /** The plate's nozzle plan from slice_info.config / filament_sequence.json (the nozzles used, each filament's). */
+    nozzlePlan?: SliceNozzlePlan;
 }
 /** Inspect the exact selected plate. This does not simulate firmware or arbitrary motion:
  * only declared object bounds are checked, never purge/homing/wipe travel coordinates.

@@ -26,6 +26,7 @@ import { assertBedSupported, studioBedType, studioNozzlesInfo, studioPrintOption
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
 import { nextSequenceId } from "./sequence-id.js";
+import { requestNozzleMapping } from "./nozzle-mapping.js";
 import { NOZZLE_FLOWS, NOZZLE_MATERIALS, extrudersFromReport, parseExtruderNozzlesArg, parseFilamentMapArg, parseFilamentSourcesArg, sliceNozzleDiameter, } from "./slicer/extruder-config.js";
 import { normalizeModel } from "./safety/limits.js";
 dotenv.config();
@@ -1317,6 +1318,22 @@ class BambuPrinterMCPServer {
                 return typeof slot?.tray_color === "string" ? slot.tray_color : undefined;
             };
             const cloudMappings = useAMS && mapping ? studioCloudMappings(mapping, inspection, trayColour) : undefined;
+            // A job on the H2C's rack extruder asks the printer which hotend each filament gets, as Studio does before
+            // sending (get_auto_nozzle_mapping); its table goes out as nozzle_mapping.
+            const mappingWarnings = [];
+            let nozzleMapping;
+            if (!native) {
+                const asked = await requestNozzleMapping(confirmedStatus?.raw ?? {}, inspection, mapping ?? [], {
+                    sequenceId: nextSequenceId(),
+                    calibration: printOptions.autoFlowCalibration,
+                    paValue: Number(args?.extruder_cali_manual_mode) === 1 ? 1 : 0,
+                    query: (message, match, waitMs) => this.bambuNetwork.queryPrinter(devId, JSON.stringify(message), match, waitMs, this.bridgeOptionsFromArgs(args, "print_3mf_bambu_network")),
+                });
+                nozzleMapping = asked?.checked;
+                if (asked?.warning)
+                    mappingWarnings.push(asked.warning);
+                assertActive();
+            }
             const remoteFileName = uniquePrintName(threeMFPath);
             const params = {
                 dev_id: devId,
@@ -1332,7 +1349,7 @@ class BambuPrinterMCPServer {
                 ftp_folder: String(args?.ftp_folder || ftpFolder(inspection.model)),
                 ftp_file: String(args?.ftp_file || ""),
                 ftp_file_md5: String(args?.ftp_file_md5 || ""),
-                nozzle_mapping: stringifyBridgeJson(args?.nozzle_mapping) || "",
+                nozzle_mapping: nozzleMapping ? JSON.stringify(nozzleMapping.mapping) : "",
                 ams_mapping: cloudMappings ? JSON.stringify(cloudMappings.v0) : amsMapping || "",
                 ams_mapping2: cloudMappings ? JSON.stringify(cloudMappings.v1) : "",
                 ams_mapping_info: cloudMappings ? JSON.stringify(cloudMappings.info) : "",
@@ -1430,7 +1447,7 @@ class BambuPrinterMCPServer {
                 // Never resend: the job may still start. Look at the printer instead.
                 this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
                 if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive) === "started") {
-                    return withHmsWarnings({ status: "success", dispatch: "started", message: `Bambu's network plugin did not answer, but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params) }, hmsWarnings);
+                    return withHmsWarnings({ status: "success", dispatch: "started", message: `Bambu's network plugin did not answer, but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params), ...(nozzleMapping ? { nozzleMapping: { mapping: nozzleMapping.mapping, hotends: nozzleMapping.assignments } } : {}) }, [...hmsWarnings, ...mappingWarnings]);
                 }
                 throw error;
             }
@@ -1446,7 +1463,7 @@ class BambuPrinterMCPServer {
                     // The cloud task exists but the printer's ack didn't arrive in time: it may still start.
                     this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
                     if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive) === "started") {
-                        return withHmsWarnings({ status: "success", dispatch: "started", message: `The plugin reported ${value} (${bridgePrintErrorText(value)}), but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, bridgeResult, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params) }, hmsWarnings);
+                        return withHmsWarnings({ status: "success", dispatch: "started", message: `The plugin reported ${value} (${bridgePrintErrorText(value)}), but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, bridgeResult, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params), ...(nozzleMapping ? { nozzleMapping: { mapping: nozzleMapping.mapping, hotends: nozzleMapping.assignments } } : {}) }, [...hmsWarnings, ...mappingWarnings]);
                     }
                     throw new Error(`FULU BambuNetwork bridge method ${bridgeMethod} returned ${value} (${bridgePrintErrorText(value)}). The job was posted and may still start. Do not send it again: check get_printer_status (gcode_state and the job name) first.`);
                 }
@@ -1473,7 +1490,8 @@ class BambuPrinterMCPServer {
                 useAMS,
                 amsMapping: mapping,
                 params: redactPrintParams(params),
-            }, hmsWarnings);
+                ...(nozzleMapping ? { nozzleMapping: { mapping: nozzleMapping.mapping, hotends: nozzleMapping.assignments } } : {}),
+            }, [...hmsWarnings, ...mappingWarnings]);
         }));
     }
     async handoff3mfViaBambuConnect(args, printer) {

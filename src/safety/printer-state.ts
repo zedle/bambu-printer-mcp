@@ -1,6 +1,7 @@
 import { BambuClient, GetVersionCommand, PushAllCommand } from "bambu-node";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
 import { filamentProhibition } from "./filament-rules.js";
+import type { SliceNozzlePlan } from "./slice-info.js";
 import { DEPUTY_EXTRUDER_ID, DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, printerTypeModel, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
 
 const MAX_REPORT_AGE_MS = 15_000;
@@ -128,6 +129,8 @@ export interface PrinterStateRequirements {
   filamentIds?: string[];
   /** Per filament: the preset name (filament_settings_id without its " @..." machine suffix). */
   filamentNames?: string[];
+  /** The sliced plate's nozzle plan (slice_info.config): every hotend the job uses, by extruder. */
+  nozzlePlan?: SliceNozzlePlan;
 }
 export interface ReportedNozzle { index: number; diameter: number; type?: string; flow?: string; stat?: number }
 interface ReportedFilament { position: number; material: string; trayIndex: number; nozzleMin?: number; nozzleMax?: number }
@@ -412,8 +415,6 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
     ? usedFilaments.filter(filament => requirements.filamentMap![filament] === position + 1) : usedFilaments;
   const checked = expectedDiameters.map((_, position) => position).filter(position => !dualJob || !requirements.filamentMap || filamentsOn(position).length > 0);
   const rack = NOZZLE_RACK_MODELS.has(model) ? reportedNozzles(raw, true) : [];
-  const usable = (nozzle: ReportedNozzle, diameter: number, flow: string) => (nozzle.stat === undefined || ((nozzle.stat >>> 1) & 3) === 0) &&
-    Math.abs(nozzle.diameter - diameter) <= 0.0001 && (requirements.nozzleFlows === undefined || flow === nozzle.flow);
   for (const position of checked) {
     const diameter = expectedDiameters[position];
     const physical = indices[position];
@@ -430,8 +431,37 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
       // when the toolhead and all six rack places are full.
       const state = finiteNumber(raw.device?.nozzle?.state);
       if (state !== undefined && ((state >>> 4) & 0xf) > 0) throw new Error("The printer is still reading its hotend rack; wait for it to finish and retry.");
-      selected = [mounted, ...rack].filter((nozzle): nozzle is ReportedNozzle => !!nozzle && usable(nozzle, diameter, expectedFlow));
-      if (!selected.length) throw new Error(`No mounted or rack hotend on the right nozzle matches the job (${diameter} mm${requirements.nozzleFlows !== undefined ? `, ${expectedFlow}` : ""}).`);
+      // The sliced plan names every right-side hotend the job uses (several when filaments get their own hotend, or
+      // a Hybrid mix of flows); without one, the extruder's single diameter and flow stand for it.
+      const planned = requirements.nozzlePlan?.nozzles.filter(nozzle => nozzle.extruder === position + 1) ?? [];
+      const checkFlow = planned.length > 0 || requirements.nozzleFlows !== undefined;
+      const needs = new Map<string, { diameter: number; flow: string; count: number }>();
+      for (const need of planned.length ? planned.map(nozzle => ({ diameter: nozzle.diameter, flow: token(nozzle.flow) })) : [{ diameter, flow: expectedFlow }]) {
+        const key = `${need.diameter}/${need.flow}`;
+        needs.set(key, { ...need, count: (needs.get(key)?.count ?? 0) + 1 });
+      }
+      const candidates = [mounted, ...rack].filter((nozzle): nozzle is ReportedNozzle => !!nozzle);
+      // Studio's advice (S_RACK_NOZZLE_SUGEEST_*): calibrate an uncalibrated rack, refresh unknown or unreliable
+      // hotend information, otherwise re-slice for the hotends the printer has.
+      const advice = finiteNumber(raw.device?.holder?.info) !== undefined && finiteNumber(raw.device?.holder?.info) !== 1
+        ? "Calibrate the hotend rack on the printer."
+        : candidates.some(nozzle => nozzle.stat !== undefined && ((nozzle.stat & 1) !== 0 || ((nozzle.stat >>> 1) & 3) === 2))
+          ? "Refresh the hotend information on the printer."
+          : "Re-slice for the hotends the printer has.";
+      const flowLabel = (flow: string) => flow.replace("tpuhighflow", "TPU High Flow").replace("e3dhighflow", "E3D High Flow").replace("highflow", "High Flow").replace("standard", "Standard");
+      selected = [];
+      for (const need of needs.values()) {
+        const matching = candidates.filter(nozzle => (nozzle.stat === undefined || ((nozzle.stat >>> 1) & 3) === 0) &&
+          Math.abs(nozzle.diameter - need.diameter) <= 0.0001 && (!checkFlow || need.flow === nozzle.flow));
+        const label = `${need.diameter} mm${checkFlow ? ` ${flowLabel(need.flow)}` : ""}`;
+        if (!matching.length) throw new Error(`No mounted or rack hotend on the right nozzle matches the job (${label}). ${advice}`);
+        // CheckWarningRackStatus: fewer matching hotends than the job plans is a warning (the printer reuses them).
+        if (need.count > matching.length) hmsWarnings.push(`the job plans ${need.count} right-side ${label} hotends, but the printer has ${matching.length}. ${advice}`);
+        else if (need.count > matching.filter(nozzle => nozzle.stat === undefined || (nozzle.stat & 1) === 0).length) {
+          hmsWarnings.push(`a right-side ${label} hotend the job may use has unreliable information (refresh the hotend information on the printer)`);
+        }
+        selected.push(...matching.filter(nozzle => !selected.includes(nozzle)));
+      }
       if (mounted && rack.filter(nozzle => nozzle.index <= 21).length >= 6) throw new Error("The toolhead and hotend rack are full. Remove at least one hotend before printing.");
     } else {
       if (!mounted || Math.abs(mounted.diameter - diameter) > 0.0001) throw new Error(`Printer nozzle ${physical} diameter does not match the job (${diameter} mm).`);

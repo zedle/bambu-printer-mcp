@@ -90,6 +90,13 @@ export declare class BambuNetworkBridge {
         reply?: CommandReply;
         waitedMs: number;
     }>;
+    /**
+     * Send a printer command over the signed path and return the first printer message `match` accepts within
+     * `waitMs` (undefined when none came), for queries whose answer is more than an ack (get_auto_nozzle_mapping).
+     */
+    queryPrinter<T>(devId: string, messageJson: string, match: (message: unknown) => T | undefined, waitMs: number, options?: BambuNetworkBridgeOptions & {
+        qos?: number;
+    }): Promise<T | undefined>;
     private pollEvents;
     private drainEvents;
     /** The printer's reply to `sequenceId` among the plugin's message events, polled until `waitMs` runs out. */

@@ -590,3 +590,16 @@ test('dual-nozzle inspection reports the project physical_extruder_map, defaulti
   assert.deepEqual((await inspect(t,'',{model:'h2d'},project(['0','1']))).physicalExtruderMap,[0,1]);
   for(const map of [['1','1'],['0'],['2','0']]) await assert.rejects(inspect(t,'',{model:'h2d'},project(map)),/physical_extruder_map|extruder/i);
 });
+test('a 3MF carries its plate nozzle plan from slice_info.config and filament_sequence.json',async t=>{
+  const sliceInfo=(diameter='0.4')=>`<config><plate><metadata key="index" value="1"/><metadata key="enable_filament_dynamic_map" value="false"/>`+
+    `<filament id="1" group_id="1" nozzle_diameter="0.40" volume_type="Standard"/><filament id="2" group_id="0" nozzle_diameter="0.40" volume_type="Standard"/>`+
+    `<nozzle id="0" extruder_id="1" nozzle_diameter="0.4" volume_type="Standard"/><nozzle id="1" extruder_id="2" nozzle_diameter="${diameter}" volume_type="Standard"/></plate></config>`;
+  const entries=(info)=>({'Metadata/plate_1.gcode':h2cTwoColourHeader()+h2cTwoColour,'Metadata/slice_info.config':info,'Metadata/filament_sequence.json':{plate_1:{sequence:[2,1]}}});
+  const r=await inspect(t,'',{model:'h2c'},entries(sliceInfo()));
+  assert.deepEqual(r.nozzlePlan,{nozzles:[{id:0,extruder:1,diameter:0.4,flow:'standard'},{id:1,extruder:2,diameter:0.4,flow:'standard'}],
+    filamentNozzles:[1,0],filamentChangeSequence:[1,0],dynamicNozzleMap:false});
+  // A plan that contradicts the sliced nozzles fails closed.
+  await assert.rejects(inspect(t,'',{model:'h2c'},entries(sliceInfo('0.6'))),/slice_info/);
+  // Without slice_info (raw G-code, older exports) there is no plan.
+  assert.equal((await inspect(t,h2cTwoColourHeader()+h2cTwoColour,{model:'h2c'})).nozzlePlan,undefined);
+});

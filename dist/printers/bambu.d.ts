@@ -111,6 +111,8 @@ interface BambuPrintOptionsInternal {
     amsSlots?: number[];
     md5?: string;
 }
+/** Publish a query and resolve with the first report `match` accepts within `waitMs`, or undefined. */
+export declare function queryLanPrinter<T>(printer: any, message: Record<string, unknown>, match: (message: unknown) => T | undefined, waitMs: number): Promise<T | undefined>;
 export declare class BambuImplementation {
     private readonly confirm?;
     private printerStore;

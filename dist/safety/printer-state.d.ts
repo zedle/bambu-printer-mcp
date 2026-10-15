@@ -1,4 +1,5 @@
 import { BambuClient } from "bambu-node";
+import type { SliceNozzlePlan } from "./slice-info.js";
 /** The model a serial prefix belongs to (Studio's sn_prefix). Identity evidence only together with a fresh report. */
 export declare function serialModel(serial: string): string | undefined;
 /** Only raw reports received after this request are evidence. Never read printer.data here. */
@@ -29,6 +30,8 @@ export interface PrinterStateRequirements {
     filamentIds?: string[];
     /** Per filament: the preset name (filament_settings_id without its " @..." machine suffix). */
     filamentNames?: string[];
+    /** The sliced plate's nozzle plan (slice_info.config): every hotend the job uses, by extruder. */
+    nozzlePlan?: SliceNozzlePlan;
 }
 export interface ReportedNozzle {
     index: number;

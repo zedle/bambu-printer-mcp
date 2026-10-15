@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFreshPrinterStatus, serialModel } from "../safety/printer-state.js";
 import { nextSequenceId } from "../sequence-id.js";
+import { requestNozzleMapping } from "../nozzle-mapping.js";
 import { assertCommandAccepted, commandReplyWaitMs, matchCommandReply, withCommandReply, withPrinterReplyField, type CommandReply } from "../command-reply.js";
 import { assertAmsDryingSupported, buildAmsDryingCommand, hexFlagBit, normalizeAmsDryingRequest } from "../ams-drying.js";
 import fs from "node:fs/promises";
@@ -315,6 +316,27 @@ async function bambuNodeMessage(command: BambuNodeCommand): Promise<Record<strin
   const section = message && Object.keys(message).find(key => message![key] && typeof message![key] === "object");
   if (!message || !section) throw new Error("bambu-node built no printer command.");
   return { ...message, [section]: { ...message[section], sequence_id: nextSequenceId() } };
+}
+
+/** Publish a query and resolve with the first report `match` accepts within `waitMs`, or undefined. */
+export function queryLanPrinter<T>(printer: any, message: Record<string, unknown>, match: (message: unknown) => T | undefined, waitMs: number): Promise<T | undefined> {
+  return new Promise((resolve, reject) => {
+    let timer: NodeJS.Timeout | undefined;
+    const finish = (value: T | undefined, error?: unknown) => {
+      clearTimeout(timer);
+      printer.off?.("rawMessage", onRaw);
+      if (error) reject(error); else resolve(value);
+    };
+    const onRaw = (topic: string, payload: Buffer) => {
+      if (typeof topic !== "string" || !topic.endsWith("/report")) return;
+      const found = match(payload.toString());
+      if (found !== undefined) finish(found);
+    };
+    if (typeof printer?.on !== "function") { resolve(undefined); return; }
+    printer.on("rawMessage", onRaw);
+    timer = setTimeout(() => finish(undefined), waitMs);
+    Promise.resolve(printer.publish(message)).catch(error => finish(undefined, error));
+  });
 }
 
 /** Publish a command without waiting for its reply (print starts, whose outcome the dispatch watcher judges). */
@@ -1090,6 +1112,16 @@ export class BambuImplementation {
     this.assertBedClearance(dispatchStatus, bedClearance);
     const printer = await this.getPrinter(host, serial, token);
     assertActive();
+    // A job on the H2C's rack extruder asks the printer which hotend each filament gets, as Studio does before
+    // sending (get_auto_nozzle_mapping); the table goes out as the project_file's nozzle_mapping.
+    const asked = legacyContainer ? undefined : await requestNozzleMapping(dispatchStatus?.raw ?? {}, inspection, baseMapping, {
+      sequenceId: nextSequenceId(),
+      calibration: studioPrintOptions(model, usedExtruderCount(model, inspection), options, usedFilamentTypes(inspection)).autoFlowCalibration,
+      paValue: 0,
+      query: (message, match, waitMs) => queryLanPrinter(printer, message, match, waitMs),
+    });
+    const mappingWarnings = asked?.warning ? [asked.warning] : [];
+    assertActive();
     if (legacyContainer) {
       const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath);
       try { await invokeWithoutAck(printer, new GCodeFileCommand({ fileName: remoteProjectPath })); } catch (error) { watcher.dispose(); throw error; }
@@ -1128,6 +1160,7 @@ export class BambuImplementation {
       extrudeCaliFlag: printOptions.autoFlowCalibration,
       nozzleOffsetCali: printOptions.autoOffsetCalibration,
       extrudeCaliManualMode: usesH2ProjectFile ? 0 : -1,
+      ...(asked?.checked ? { nozzleMapping: asked.checked.mapping } : {}),
     });
 
     const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath);
@@ -1148,7 +1181,8 @@ export class BambuImplementation {
       platePath: projectMetadata.plateInternalPath,
       md5,
       amsMapping,
-    }, hmsWarnings);
+      ...(asked?.checked ? { nozzleMapping: { mapping: asked.checked.mapping, hotends: asked.checked.assignments } } : {}),
+    }, [...hmsWarnings, ...mappingWarnings]);
   }
 
   async cancelJob(host: string, serial: string, token: string, dispatch?: () => Promise<any>): Promise<any> {

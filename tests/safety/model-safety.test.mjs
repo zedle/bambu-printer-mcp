@@ -105,6 +105,27 @@ test('the H2C right extruder accepts a matching rack hotend and blocks on a busy
   assert.throws(() => validatePrinterState(status(), job([0.6, 0.4], { filamentMap: [1], amsMapping: [254], useAMS: false })), /nozzle 1 diameter/);
 });
 
+test('the H2C rack is matched against every right-side hotend the sliced plan uses', () => {
+  const job = (nozzles, extra = {}) => ({ model: 'h2c', nozzleDiameters: [0.4, 0.4], nozzleFlows: ['standard', 'standard'], materials: ['PLA'],
+    usedFilamentPositions: [0], filamentMap: [2], useAMS: true, amsMapping: [0],
+    nozzlePlan: { nozzles, filamentNozzles: [nozzles[0]?.id], dynamicNozzleMap: false }, ...extra });
+  const ams = { ...mockStatus('H2C').raw.ams, tray_exist_bits: '1', ams: [{ id: '0', info: '1023', tray: [{ id: '0', tray_type: 'PLA' }] }] };
+  const status = (info) => mockStatus('H2C', { ams, ...(info ? { device: { ...mockStatus('H2C').raw.device, nozzle: { ...mockStatus('H2C').raw.device.nozzle, info } } } : {}) });
+  const right = (id, diameter = 0.4, flow = 'standard') => ({ id, extruder: 2, diameter, flow });
+  // Mock H2C right side: mounted 0.4 + rack 0.4 x3, 0.6, 0.2 (all Standard).
+  assert.deepEqual(validatePrinterState(status(), job([right(1), right(2), right(3)])).hmsWarnings, []);
+  // Five 0.4 hotends planned, four fitted: Studio warns (CheckWarningRackStatus) and the printer reuses one.
+  assert.match(validatePrinterState(status(), job([1, 2, 3, 4, 5].map(id => right(id)))).hmsWarnings.join(), /plans 5 right-side 0.4 mm Standard hotends, but the printer has 4/);
+  // A planned High Flow hotend the rack doesn't have is refused, with Studio's advice.
+  assert.throws(() => validatePrinterState(status(), job([right(1), right(2, 0.4, 'high_flow')])), /No mounted or rack hotend on the right nozzle matches the job \(0.4 mm High Flow\)\. Re-slice for the hotends the printer has/);
+  const uncalibrated = mockStatus('H2C', { ams, device: { ...mockStatus('H2C').raw.device, holder: { ...mockStatus('H2C').raw.device.holder, info: 0 } } });
+  assert.throws(() => validatePrinterState(uncalibrated, job([right(1, 0.8)])), /Calibrate the hotend rack/);
+  const unknown = mockStatus('H2C').raw.device.nozzle.info.map(nozzle => nozzle.id === 21 ? { ...nozzle, stat: 4 } : nozzle);
+  assert.throws(() => validatePrinterState(status(unknown), job([right(1, 0.8)])), /Refresh the hotend information/);
+  // An unknown hotend is not counted as a match.
+  assert.match(validatePrinterState(status(unknown), job([1, 2, 3, 4].map(id => right(id)))).hmsWarnings.join(), /plans 4 right-side 0.4 mm Standard hotends, but the printer has 3/);
+});
+
 test('AMS-HT units are addressed by unit id with presence from the top-level bits 16+', () => {
   // The AMS-HT units are bound to the right extruder (info 2004), so the filament is sliced for it (filament_map 2).
   const ams = (materials, extra = {}) => ({ model: 'h2d', nozzleDiameters: [], materials, useAMS: true, filamentMap: [2], ...extra });
