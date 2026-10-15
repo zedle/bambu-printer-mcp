@@ -156,3 +156,27 @@ test('a tray must be able to feed the nozzle its filament is sliced for', () => 
   // Single-nozzle printers have nothing to bind.
   assert.doesNotThrow(() => validatePrinterState(mockStatus('P2S'), { ...job([0], [1]), model: 'p2s' }));
 });
+
+test('print options follow Studio: bed strings, unsupported plates and calibration defaults per model', async () => {
+  const options = await import('../../dist/printers/print-options.js');
+  for (const [value, expected] of [['textured_plate', 'textured_plate'], ['Textured PEI Plate', 'textured_plate'], ['engineering_plate', 'eng_plate'], ['Engineering Plate', 'eng_plate'],
+    ['eng_plate', 'eng_plate'], ['hot_plate', 'hot_plate'], ['High Temp Plate', 'hot_plate'], ['Smooth PEI Plate', 'hot_plate'], ['cool_plate', 'cool_plate'], ['pc_plate', 'cool_plate'],
+    ['supertack_plate', 'supertack_plate'], ['Cool Plate SuperTack', 'supertack_plate'], ['Supertack Plate', 'supertack_plate']]) {
+    assert.equal(options.studioBedType(value), expected, value);
+  }
+  assert.equal(options.studioBedType('mystery'), undefined);
+  assert.throws(() => options.assertBedSupported('h2c', 'hot_plate'), /not_support_bed_type/);
+  assert.throws(() => options.assertBedSupported('a1mini', 'eng_plate'), /not_support_bed_type/);
+  assert.doesNotThrow(() => options.assertBedSupported('x1c', 'cool_plate'));
+  // Dual-nozzle job on both nozzles: auto everywhere, nozzle-offset calibration auto.
+  assert.deepEqual(options.studioPrintOptions('h2d', 2), { bedLeveling: false, autoBedLeveling: 2, flowCalibration: false, autoFlowCalibration: 2, autoOffsetCalibration: 2, vibrationCalibration: false, layerInspect: true });
+  assert.equal(options.studioPrintOptions('h2c', 1).autoOffsetCalibration, 0);
+  // X1C offers on/off only; the P1S has no flow calibration.
+  assert.deepEqual(options.studioPrintOptions('x1c', 1), { bedLeveling: true, autoBedLeveling: 1, flowCalibration: true, autoFlowCalibration: 1, autoOffsetCalibration: 0, vibrationCalibration: false, layerInspect: true });
+  assert.deepEqual(options.studioPrintOptions('p1s', 1, { flowCalibration: true }).autoFlowCalibration, 0);
+  assert.equal(options.studioPrintOptions('x1c', 1, { bedLeveling: 'auto' }).autoBedLeveling, 1);
+  assert.deepEqual([options.studioPrintOptions('p2s', 1, { bedLeveling: 'off' }).bedLeveling, options.studioPrintOptions('p2s', 1, { bedLeveling: 'off' }).autoBedLeveling], [false, 0]);
+  assert.throws(() => options.studioPrintOptions('p2s', 1, { bedLeveling: 'sometimes' }), /bed_leveling/);
+  assert.equal(options.usedExtruderCount('h2d', { usedFilamentPositions: [0, 1], filamentMap: [1, 2] }), 2);
+  assert.equal(options.usedExtruderCount('h2d', { usedFilamentPositions: [0, 1] }), 1);
+});

@@ -2510,3 +2510,33 @@ test("tool schema invariant: input schemas use Codex-compatible root objects", a
     }
   }
 });
+
+test("LAN project_file sends the sliced plate's Studio bed string and Studio's calibration defaults", async () => {
+  const threeMfPath = await writeSliced3mfFixture({ name: "h2s-engineering-plate", bedType: "Engineering Plate", plateFilamentIds: [3] });
+  const bambu = new BambuImplementation(async () => true);
+  stubFreshSafetyStatus(bambu, "h2s");
+  const payloads = [];
+  bambu.ftpUpload = async () => {};
+  bambu.getPrinter = async () => ({ publish: async (payload) => { payloads.push(payload); } });
+  try {
+    const print = options => bambu.print3mf("127.0.0.1", "0938TEST0000000", "TEST_TOKEN", {
+      projectName: "h2s-engineering-plate", bambuModel: "h2s", filePath: threeMfPath, plateIndex: 0, useAMS: true, amsSlots: [15], ...options,
+    });
+    await print({});
+    const sent = payloads.at(-1).print;
+    // Studio's bed_type_to_gcode_string of the sliced plate, not the tool's "engineering_plate".
+    assert.equal(sent.bed_type, "eng_plate");
+    // H2S: bed leveling and flow calibration default to auto (bool false, int 2); no nozzle-offset calibration;
+    // vibration off and first-layer inspection on, as Studio's set_print_config sends them.
+    assert.deepEqual(
+      { bed_leveling: sent.bed_leveling, auto_bed_leveling: sent.auto_bed_leveling, flow_cali: sent.flow_cali, extrude_cali_flag: sent.extrude_cali_flag,
+        nozzle_offset_cali: sent.nozzle_offset_cali, vibration_cali: sent.vibration_cali, layer_inspect: sent.layer_inspect, timelapse: sent.timelapse },
+      { bed_leveling: false, auto_bed_leveling: 2, flow_cali: false, extrude_cali_flag: 2, nozzle_offset_cali: 0, vibration_cali: false, layer_inspect: true, timelapse: false });
+    await print({ bedLeveling: true, flowCalibration: false });
+    assert.deepEqual([payloads.at(-1).print.bed_leveling, payloads.at(-1).print.auto_bed_leveling, payloads.at(-1).print.flow_cali, payloads.at(-1).print.extrude_cali_flag], [true, 1, false, 0]);
+    // An explicit bed type is a check against the sliced plate.
+    await assert.rejects(print({ bedType: "textured_plate" }), /bed type/);
+  } finally {
+    fs.rmSync(threeMfPath, { force: true });
+  }
+});

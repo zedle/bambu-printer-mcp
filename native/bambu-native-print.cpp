@@ -387,12 +387,14 @@ void runMqttProbe(NativeApi &api) {
     if (!ok) std::exit(21);
 }
 
+// Bambu Studio's PrintJob always sends bed_type_to_gcode_string(plate bed): textured_plate, cool_plate, eng_plate,
+// hot_plate, supertack_plate. Its dialog's pte/pc/pe/pei/suprtack names are overwritten before sending.
 std::string bedTypeForNative(const std::string &bedType) {
-    if (bedType == "textured_plate" || bedType == "pte") return "pte";
-    if (bedType == "cool_plate" || bedType == "pc") return "pc";
-    if (bedType == "engineering_plate" || bedType == "pe") return "pe";
-    if (bedType == "hot_plate" || bedType == "pei") return "pei";
-    if (bedType == "supertack_plate" || bedType == "suprtack") return "suprtack";
+    if (bedType == "textured_plate" || bedType == "pte") return "textured_plate";
+    if (bedType == "cool_plate" || bedType == "pc") return "cool_plate";
+    if (bedType == "eng_plate" || bedType == "engineering_plate" || bedType == "pe") return "eng_plate";
+    if (bedType == "hot_plate" || bedType == "pei") return "hot_plate";
+    if (bedType == "supertack_plate" || bedType == "suprtack") return "supertack_plate";
     return bedType;
 }
 

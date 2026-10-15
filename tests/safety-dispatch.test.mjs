@@ -429,6 +429,10 @@ test("verified public direct and bridge prints reach their intended transport", 
   assert.match(print.payload.params.dst_file, /^checked-[a-f0-9-]+-job\.gcode\.3mf$/);
   assert.equal(print.payload.params.task_use_ams, false);
   assert.equal(print.payload.params.ams_mapping, "[254]");
+  // Studio's bed string and P1S options: leveling on (1), no flow calibration, vibration off, first-layer inspection on.
+  const { task_bed_type, task_bed_leveling, auto_bed_leveling, task_flow_cali, auto_flow_cali, auto_offset_cali, task_vibration_cali, task_layer_inspect } = print.payload.params;
+  assert.deepEqual({ task_bed_type, task_bed_leveling, auto_bed_leveling, task_flow_cali, auto_flow_cali, auto_offset_cali, task_vibration_cali, task_layer_inspect },
+    { task_bed_type: "textured_plate", task_bed_leveling: true, auto_bed_leveling: 1, task_flow_cali: false, auto_flow_cali: 0, auto_offset_cali: 0, task_vibration_cali: false, task_layer_inspect: true });
 });
 
 async function startBridgeJob(t, options) {

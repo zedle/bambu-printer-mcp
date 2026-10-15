@@ -11,6 +11,7 @@ import { normalizeModel, validateTemperature } from "../safety/limits.js";
 import { validatePrinterState, manualHeatingRequirements } from "../safety/printer-state.js";
 import { externalSpoolMapping, extruderCount, isExternalTray } from "../safety/models.js";
 import { normalizeBridgeAmsTrayValue, studioTrayMapping } from "../ams-mapping.js";
+import { assertBedSupported, studioBedType, studioPrintOptions, usedExtruderCount } from "./print-options.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName, normalizedRemotePath, cancelPendingPrinterOperations } from "../safety/artifact.js";
 import { Client as FTPClient } from "basic-ftp";
 import { BambuPrinter } from "bambu-js";
@@ -720,7 +721,10 @@ export class BambuImplementation {
                         "Check get_printer_status before assuming it is printing.",
             };
         }
-        const b = (v) => (v ? 1 : 0);
+        // Studio's bed string from the sliced plate, and its calibration defaults with matching bool and int forms.
+        const sentBedType = studioBedType(inspection.bedType) ?? studioBedType(options.bedType);
+        assertBedSupported(model, sentBedType);
+        const printOptions = studioPrintOptions(model, usedExtruderCount(model, inspection), options);
         let projectFileCmd;
         if (usesH2ProjectFile) {
             const submissionId = String(Date.now() & 0x7fffffff);
@@ -732,18 +736,18 @@ export class BambuImplementation {
                     url: projectUrl,
                     file: remoteFileName,
                     md5,
-                    bed_type: options.bedType || "auto",
-                    timelapse: b(options.timelapse),
-                    bed_leveling: b(options.bedLeveling ?? true),
-                    auto_bed_leveling: 1,
-                    flow_cali: b(options.flowCalibration ?? false),
-                    vibration_cali: b(options.vibrationCalibration ?? true),
-                    layer_inspect: b(options.layerInspect ?? false),
+                    bed_type: sentBedType ?? "auto",
+                    timelapse: options.timelapse === true,
+                    bed_leveling: printOptions.bedLeveling,
+                    auto_bed_leveling: printOptions.autoBedLeveling,
+                    flow_cali: printOptions.flowCalibration,
+                    vibration_cali: printOptions.vibrationCalibration,
+                    layer_inspect: printOptions.layerInspect,
                     use_ams: options.useAMS !== false,
                     cfg: "0",
-                    extrude_cali_flag: 0,
+                    extrude_cali_flag: printOptions.autoFlowCalibration,
                     extrude_cali_manual_mode: 0,
-                    nozzle_offset_cali: 2,
+                    nozzle_offset_cali: printOptions.autoOffsetCalibration,
                     subtask_name: remoteFileName.replace(/\.3mf$/i, ""),
                     profile_id: "0",
                     project_id: submissionId,
@@ -762,11 +766,11 @@ export class BambuImplementation {
                     url: projectUrl,
                     subtask_name: remoteFileName.replace(/\.3mf$/i, ""),
                     md5,
-                    flow_cali: options.flowCalibration ?? true,
-                    layer_inspect: options.layerInspect ?? true,
-                    vibration_cali: options.vibrationCalibration ?? true,
-                    bed_leveling: options.bedLeveling ?? true,
-                    bed_type: options.bedType || "textured_plate",
+                    flow_cali: printOptions.flowCalibration,
+                    layer_inspect: printOptions.layerInspect,
+                    vibration_cali: printOptions.vibrationCalibration,
+                    bed_leveling: printOptions.bedLeveling,
+                    bed_type: sentBedType ?? "textured_plate",
                     timelapse: options.timelapse ?? false,
                     use_ams: options.useAMS !== false,
                     ams_mapping: amsMapping,

@@ -9,10 +9,12 @@ interface BambuPrintOptionsInternal {
     useAMS?: boolean;
     plateIndex?: number;
     bedType?: string;
-    bedLeveling?: boolean;
-    flowCalibration?: boolean;
-    vibrationCalibration?: boolean;
-    layerInspect?: boolean;
+    /** true/false or "on"/"off"/"auto"; omitted means Bambu Studio's default for the model (print-options.ts). */
+    bedLeveling?: unknown;
+    flowCalibration?: unknown;
+    nozzleOffsetCalibration?: unknown;
+    vibrationCalibration?: unknown;
+    layerInspect?: unknown;
     timelapse?: boolean;
     amsMapping?: number[];
     /**
