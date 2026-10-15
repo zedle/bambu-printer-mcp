@@ -498,8 +498,29 @@ test('BambuStudio 02.08 H2C two-colour filament-change forms pass with independe
     ['M620.14 X40.4635 Y226.381','M620.14 X40 Y226 T400'],['M9711 M0 E0 Z2.6 S11 C10 O0 T3000','M9711 M0 E0 Z2.6 S11 C10 O0 T3000 M104'],['M9711 M0 E0 Z2.6 S11 C10 O0 T3000','M9711 M0 G1 X0'],
     ['M9711 M0 E0 Z2.6 S11 C10 O0 T3000','M9711 M0 E0 Z2.6 R300']])
     await assert.rejects(inspect(t,h2cTwoColourHeader()+h2cTwoColour.replace(form,bad),{model:'h2c'}),/unsupported|parameter|temperature|limit|declared|duplicate/i,bad);
-  for(const model of ['P1S','H2D','X1C']) for(const command of ['M104 T1 S25 N0','M620.15 P180','M620.14 X40.4635 Y226.381','M9711 M0 E0 Z2.6 S11 C10 O0 T3000'])
+  for(const model of ['P1S','H2D','X1C']) for(const command of ['M104 T1 S25 N0','M620.15 P180','M620.14 X40.4635 Y226.381'])
     await assert.rejects(inspect(t,header(model,'PLA;PLA',model==='H2D'?'0.4;0.4':'0.4')+command+'\n',{model:model.toLowerCase()}),/unsupported|parameter|command/i,`${model} ${command}`);
+  for(const model of ['P1S','X1C','P2S','H2S']) await assert.rejects(inspect(t,header(model,'PLA','0.4')+'M9711 M0 E0 Z2.6 S11 C10 O0 T3000\n',{model:model.toLowerCase()}),/multiple commands/i,model);
+});
+test('timelapse capture M9711 passes on every model whose template emits it',async t=>{
+  // time_lapse_gcode on H2D, H2D Pro and X2D (X/Y form on H2D) and on the H2C (U/V form); it sets no heater.
+  for(const [model,command] of [['H2D','M9711 M1 E0 X100.5 Y200 Z2.6 S11 C10 O0 T3000'],['H2D Pro','M9711 M0 E1 X20 Y300 Z0.4 S11 C10 O0 T3000'],
+    ['X2D','M9711 M0 E0 U10 V20 Z3 S11 C10 O0 T3000'],['H2C','M9711 M0 E0 Z2.6 S11 C10 O0 T3000']]) {
+    const r=await inspect(t,header(model,'PLA','0.4;0.4')+'M104 S220\n'+command+'\nG1 X10 Y10 E1\n',{model:model.toLowerCase().replace(' ','')});
+    assert.equal(r.maxNozzleTemperature,220,model);
+    await assert.rejects(inspect(t,header(model,'PLA','0.4;0.4')+command+' R300\n',{model:model.toLowerCase().replace(' ','')}),/unsupported timelapse/,model);
+    await assert.rejects(inspect(t,header(model,'PLA','0.4;0.4')+command+' M104\n',{model:model.toLowerCase().replace(' ','')}),/parameter|unsupported/,model);
+  }
+});
+test('Bambu filament types PCTG, PE, PE-CF, EVA and PHA are known, with independent ceilings',async t=>{
+  for(const [material,ok,bad] of [['PCTG',270,310],['PE',220,270],['PE-CF',220,270],['EVA',220,260],['PHA',240,270]]) {
+    const r=await inspect(t,header('P1S',material)+`M104 S${ok}\n`);
+    assert.deepEqual(r.materials,[material==='PE-CF'?'PE':material]);
+    await assert.rejects(inspect(t,header('P1S',material)+`M104 S${bad}\n`),/limit/,material);
+  }
+  // PCTG is not PC, and PE is not PET.
+  const {normalizeMaterial}=await import('../../dist/safety/limits.js');
+  assert.equal(normalizeMaterial('PCTG'),'PCTG');assert.equal(normalizeMaterial('PC'),'PC');assert.equal(normalizeMaterial('PET-CF'),'PET');assert.equal(normalizeMaterial('Generic PE'),'PE');
 });
 test('H2C filament-variant project tables resolve through the selected variant',async t=>{
   const variants=['Direct Drive Standard','Direct Drive High Flow','Direct Drive E3D High Flow'];

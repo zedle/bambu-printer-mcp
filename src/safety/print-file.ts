@@ -333,12 +333,12 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
       if(!command) fail(`unsupported G-code command syntax '${line.slice(0,100)}'`);
       const [base,subcode]=command![2].split('.');
       const code=command![1].toUpperCase()+String(Number(base))+(subcode===undefined?'':'.'+subcode);const argumentsText=line.slice(command![0].length).trim();commandCount++;
-      // H2C timelapse capture (time_lapse_gcode): M9711 M<timelapse type> E<extruder> U V Z S C O T.
-      // Its M is a parameter, not a second command; it sets no heater target.
-      const timelapseCapture=code==='M9711' && model==='h2c';
+      // Timelapse capture (time_lapse_gcode on H2D, H2D Pro, H2C and X2D, GCode.cpp): M9711 M<timelapse type>
+      // E<extruder> [X Y | U V] Z S C O T. Its M is a parameter, not a second command; it sets no heater target.
+      const timelapseCapture=code==='M9711' && ['h2d','h2dpro','h2c','x2d'].includes(model);
       if(timelapseCapture) {
         const args=parameters(argumentsText);
-        if([...args.keys()].some(key=>!'MEUVZSCOT'.includes(key))) fail('unsupported H2C timelapse capture parameters');
+        if([...args.keys()].some(key=>!'MEXYUVZSCOT'.includes(key))) fail('unsupported timelapse capture parameters');
         continue;
       }
       if(!['M117','M118','M1002','M1006','M900','M970','M983.1','G383'].includes(code) && /[GM]\s*\d/i.test(argumentsText)) fail('multiple commands on one line are unsupported');
