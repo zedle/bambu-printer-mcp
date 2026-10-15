@@ -180,3 +180,39 @@ test('print options follow Studio: bed strings, unsupported plates and calibrati
   assert.equal(options.usedExtruderCount('h2d', { usedFilamentPositions: [0, 1], filamentMap: [1, 2] }), 2);
   assert.equal(options.usedExtruderCount('h2d', { usedFilamentPositions: [0, 1] }), 1);
 });
+
+test('control commands take the form Studio picks for each printer', async () => {
+  const control = await import('../../dist/printers/control-commands.js');
+  const protocol = name => control.controlProtocol(mockStatus(name).raw, name.toLowerCase());
+  const print = command => JSON.parse(command.messageJson).print;
+  // Bed: set_bed_temp only where fun bit 39 is set (H2S, X2D, P2S); the X1C and this H2D report get M140.
+  assert.deepEqual(print(control.temperatureCommand(protocol('H2S'), 'bed', 60)), { command: 'set_bed_temp', temp: 60, sequence_id: print(control.temperatureCommand(protocol('H2S'), 'bed', 60)).sequence_id });
+  for (const name of ['X1CMULTIAMS', 'H2D', 'A1', 'P1PNOAMS']) {
+    const command = control.temperatureCommand(protocol(name), 'bed', 60);
+    assert.deepEqual([print(command).command, print(command).param], ['gcode_line', 'M140 S60\n'], name);
+  }
+  // Nozzle: M104 S (no T) on one nozzle, set_nozzle_temp with the extruder on two.
+  assert.equal(print(control.temperatureCommand(protocol('P2S'), 'nozzle', 220)).param, 'M104 S220\n');
+  assert.deepEqual([print(control.temperatureCommand(protocol('H2C'), 'nozzle', 220, 1)).command, print(control.temperatureCommand(protocol('H2C'), 'nozzle', 220, 1)).extruder_index], ['set_nozzle_temp', 1]);
+  assert.equal(control.temperatureCommand(protocol('H2C'), 'nozzle', 220, 0).qos, 1);
+  assert.throws(() => control.temperatureCommand(protocol('H2D'), 'nozzle', 220), /left or right/);
+  assert.throws(() => control.temperatureCommand(protocol('A1'), 'nozzle', 220, 1), /one nozzle/);
+  assert.deepEqual([print(control.temperatureCommand(protocol('H2D'), 'chamber', 45)).command, print(control.temperatureCommand(protocol('H2D'), 'chamber', 45)).ctt_val], ['set_ctt', 45]);
+  // Fans: set_fan on new-protocol printers with an airduct, else M106 S0-255 in 10 % steps.
+  assert.deepEqual([print(control.fanCommand(protocol('X2D'), 'right_auxiliary', 54)).fan_index, print(control.fanCommand(protocol('X2D'), 'right_auxiliary', 54)).speed], [10, 50]);
+  assert.equal(print(control.fanCommand(protocol('X1CMULTIAMS'), 'part', 55)).param, 'M106 P1 S153 \n');
+  assert.equal(print(control.fanCommand(protocol('A1'), 'aux', 100)).param, 'M106 P2 S255 \n');
+  assert.throws(() => control.fanCommand(protocol('A1'), 'right_auxiliary', 50), /no right auxiliary/);
+  // RFID: ams_get_rfid with the new (AMS) protocol, else M620 R<ams*4+slot>.
+  assert.equal(print(control.rfidCommand(protocol('P1PNOAMS'), 1, 2)).command, 'ams_get_rfid');
+  assert.equal(print(control.rfidCommand(protocol('A1'), 1, 2)).param, 'M620 R6 \n');
+  assert.equal(print(control.rfidCommand(protocol('H2D'), 128, 0)).command, 'ams_get_rfid');
+  // Studio refuses an RFID read while filament is loaded to the toolhead the AMS feeds.
+  assert.throws(() => control.assertNoFilamentAtToolhead(mockStatus('H2D').raw, protocol('H2D'), 'h2d', 1), /loaded to the toolhead/); // AMS 1 -> right, info 79 has bit 1
+  assert.doesNotThrow(() => control.assertNoFilamentAtToolhead(mockStatus('H2D').raw, protocol('H2D'), 'h2d', 0)); // AMS 0 -> left, info 8
+  assert.throws(() => control.assertNoFilamentAtToolhead(mockStatus('P1PNOAMS').raw, protocol('A1'), 'p1p', 0), /loaded/); // hw_switch_state 1
+  assert.doesNotThrow(() => control.assertNoFilamentAtToolhead(mockStatus('A1').raw, protocol('A1'), 'a1', 0));
+  // Without a report the model decides.
+  assert.equal(print(control.temperatureCommand(control.controlProtocol(undefined, 'x2d'), 'bed', 0)).command, 'set_bed_temp');
+  assert.equal(print(control.temperatureCommand(control.controlProtocol(undefined, 'p1s'), 'bed', 0)).param, 'M140 S0\n');
+});

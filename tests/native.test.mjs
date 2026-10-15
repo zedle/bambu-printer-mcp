@@ -68,7 +68,7 @@ console.log('native_print result=0');
       record('status');
       const observedState = ${JSON.stringify(dispatchState)} && readFileSync(${JSON.stringify(eventsFile)}, 'utf8').includes('helper') ? ${JSON.stringify(dispatchState)} : ${JSON.stringify(state)};
       return { connected:true, serial, model:'x2d', status:observedState,
-        raw: {model:'x2d',gcode_state:observedState,print_error:${JSON.stringify(dispatchError)} && readFileSync(${JSON.stringify(eventsFile)}, 'utf8').includes('helper') ? ${JSON.stringify(dispatchError)} : 0,hms:[],nozzle_diameter:['0.4','0.4'],
+        raw: {model:'x2d',cfg:'1',fun:'40029FD1B30F9CB7',aux:'0',stat:'0',gcode_state:observedState,print_error:${JSON.stringify(dispatchError)} && readFileSync(${JSON.stringify(eventsFile)}, 'utf8').includes('helper') ? ${JSON.stringify(dispatchError)} : 0,hms:[],nozzle_diameter:['0.4','0.4'],
           ams: { ams:[{id:'0',tray:[{id:'0',tray_type:'PLA'}]}, {id:'128',tray:[{id:'0',tray_type:'PLA'}]}] } },
         observation:{source:'mqtt',requestedAt:Date.now()-1,receivedAt:Date.now(),identitySource:'report'} };
     };

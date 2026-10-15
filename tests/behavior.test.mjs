@@ -247,10 +247,13 @@ test("X2D native control accepts Studio device commands but rejects unrelated de
     () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "set_bed_temp", temp: 120 } })),
     /sequence_id/i
   );
-  assert.throws(
-    () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "gcode_line", param: "M104 S300" } })),
-    /limited to AMS/i
-  );
+  // Studio's G-code heater and fan forms pass within the machine ceilings; anything else is refused.
+  for (const param of ["M104 S300\n", "M140 S60\n", "M106 P1 S255 \n", "M620 R3 \n"]) {
+    assert.doesNotThrow(() => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "gcode_line", sequence_id: "g", param } })), param);
+  }
+  for (const param of ["M104 S400", "M140 S130", "M104 T1 S220", "M106 P10 S255", "M106 P1 S300", "G28", "M104 S200\nG28"]) {
+    assert.throws(() => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "gcode_line", param } })), /limited to AMS M620/i, param);
+  }
   assert.throws(
     () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "gcode_file", param: "/tmp/arbitrary.gcode" } })),
     /built-in user calibration/i

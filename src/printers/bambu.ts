@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFreshPrinterStatus } from "../safety/printer-state.js";
+import { readFreshPrinterStatus, serialModel } from "../safety/printer-state.js";
 import fs from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
@@ -9,9 +9,10 @@ import { readSafe3mfArchive } from "../safety/archive.js";
 import { inspectPrintFile, type PrintFileInspection } from "../safety/print-file.js";
 import { normalizeModel, validateTemperature } from "../safety/limits.js";
 import { validatePrinterState, manualHeatingRequirements, type PrinterStateRequirements } from "../safety/printer-state.js";
-import { externalSpoolMapping, extruderCount, isExternalTray } from "../safety/models.js";
+import { DEPUTY_EXTRUDER_ID, MAIN_EXTRUDER_ID, externalSpoolMapping, extruderCount, isExternalTray } from "../safety/models.js";
 import { normalizeBridgeAmsTrayValue, studioTrayMapping } from "../ams-mapping.js";
 import { assertBedSupported, studioBedType, studioPrintOptions, usedExtruderCount } from "./print-options.js";
+import { assertNoFilamentAtToolhead, controlProtocol, fanCommand, rfidCommand, temperatureCommand, type ControlCommand } from "./control-commands.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName, normalizedRemotePath, cancelPendingPrinterOperations } from "../safety/artifact.js";
 import { Client as FTPClient } from "basic-ftp";
 import { BambuPrinter } from "bambu-js";
@@ -19,9 +20,7 @@ import * as mqtt from "mqtt";
 import {
   BambuClient,
   GCodeFileCommand,
-  GCodeLineCommand,
   PushAllCommand,
-  UpdateFanCommand,
   UpdateLightCommand,
   UpdateStateCommand,
 } from "bambu-node";
@@ -1064,36 +1063,44 @@ export class BambuImplementation {
     serial: string,
     token: string,
     amsId: number,
-    slotId: number
+    slotId: number,
+    dispatch?: (command: ControlCommand) => Promise<any>
   ): Promise<any> {
     const normalizedAmsId = amsId;
     const normalizedSlotId = slotId;
 
-    if (!Number.isInteger(normalizedAmsId) || normalizedAmsId < 0 || normalizedAmsId > 3) {
-      throw new Error("ams_id must be an integer from 0 to 3.");
+    if (!Number.isInteger(normalizedAmsId) || ((normalizedAmsId < 0 || normalizedAmsId > 3) && (normalizedAmsId < 128 || normalizedAmsId > 135))) {
+      throw new Error("ams_id must be an integer from 0 to 3, or 128-135 for an AMS-HT.");
     }
-    if (!Number.isInteger(normalizedSlotId) || normalizedSlotId < 0 || normalizedSlotId > 3) {
-      throw new Error("slot_id must be an integer from 0 to 3.");
+    if (!Number.isInteger(normalizedSlotId) || normalizedSlotId < 0 || normalizedSlotId > 3 || (normalizedAmsId >= 128 && normalizedSlotId !== 0)) {
+      throw new Error("slot_id must be an integer from 0 to 3; an AMS-HT has only slot 0.");
     }
 
-    const printer = await this.getPrinter(host, serial, token);
-    await printer.publish({
-      print: {
-        command: "ams_get_rfid",
-        ams_id: normalizedAmsId,
-        slot_id: normalizedSlotId,
-        sequence_id: "0",
-      },
-    });
-    await sleep(COMMAND_SETTLE_MS);
+    // Studio picks the command from the printer's report and refuses while filament is loaded to the toolhead.
+    const status = await this.getSafetyStatus(host, serial, token);
+    const model = normalizeModel(status.model) ?? "";
+    const protocol = controlProtocol(status.raw, model);
+    assertNoFilamentAtToolhead(status.raw, protocol, model, normalizedAmsId);
+    const command = rfidCommand(protocol, normalizedAmsId, normalizedSlotId);
+    if (dispatch) await dispatch(command);
+    else {
+      const printer = await this.getPrinter(host, serial, token);
+      await printer.publish(JSON.parse(command.messageJson));
+      await sleep(COMMAND_SETTLE_MS);
+    }
     return {
       status: "success",
       message: `AMS RFID re-read command sent for AMS ${normalizedAmsId} slot ${normalizedSlotId}.`,
       ams_id: normalizedAmsId,
       slot_id: normalizedSlotId,
+      command: command.gcode?.trim() ?? JSON.parse(command.messageJson).print.command,
     };
   }
 
+  /**
+   * Heaters, with the command form Studio uses for the printer (control-commands.ts). On dual-nozzle printers the
+   * nozzle is chosen with extruder (0 right/main, 1 left/deputy); turning a nozzle off without one turns both off.
+   */
   async setTemperature(
     host: string,
     serial: string,
@@ -1103,35 +1110,39 @@ export class BambuImplementation {
     bambuModel?: string,
     material?: string,
     nozzleDiameter = 0.4,
-    dispatch?: (heater: "bed" | "nozzle", target: number, assertActive: () => void, beforeDispatch?: () => Promise<void>) => Promise<any>
+    dispatch?: (command: ControlCommand, assertActive: () => void, beforeDispatch?: () => Promise<void>) => Promise<any>,
+    extruder?: number
   ) {
     const normalizedComponent = component.toLowerCase();
     const heater = normalizedComponent === "bed" ? "bed" :
+      normalizedComponent === "chamber" ? "chamber" :
       ["extruder", "nozzle", "tool", "tool0"].includes(normalizedComponent) ? "nozzle" : undefined;
     if (!heater) {
       throw new Error(
-        `Unsupported temperature component: ${component}. Use one of: bed, nozzle, extruder.`
+        `Unsupported temperature component: ${component}. Use one of: bed, nozzle, extruder, chamber.`
       );
     }
     if (typeof temperature !== "number" || !Number.isFinite(temperature) || temperature < 0) {
       throw new Error("Temperature must be a finite, non-negative number in °C.");
     }
+    if (extruder !== undefined && extruder !== 0 && extruder !== 1) throw new Error("extruder must be left or right.");
     const model = normalizeModel(bambuModel);
     if (temperature > 0 && !model) throw new Error("bambu_model is required before heating.");
     if (temperature > 0 && heater === "nozzle" && !material?.trim()) {
       throw new Error("Declare material before nozzle heating, including non-RFID external spools.");
     }
-    const targetTemperature = temperature === 0 ? 0 : validateTemperature(heater, temperature, model!, material ? [material] : undefined);
-    const gcode = `${heater === "bed" ? "M140" : "M104"}${heater === "nozzle" && targetTemperature > 0 ? " T0" : ""} S${targetTemperature}`;
+    const targetTemperature = temperature === 0 ? 0 : Math.round(validateTemperature(heater, temperature, model!, material ? [material] : undefined));
     const send = async (assertActive: () => void) => {
       let beforeDispatch: (() => Promise<void>) | undefined;
+      let report: Record<string, any> | undefined;
       if (targetTemperature > 0) {
         const status = await this.getSafetyStatus(host, serial, token);
         const validateHeatingStatus = (current: any) => validatePrinterState(current, heater === "nozzle"
-          ? manualHeatingRequirements(current, model!, nozzleDiameter, material!)
+          ? manualHeatingRequirements(current, model!, nozzleDiameter, material!, extruder)
           : { model: model!, nozzleDiameters: [] });
         validateHeatingStatus(status);
-        await this.confirmHardwareAction(`Heat ${heater} on ${model!.toUpperCase()} (${serial}) to ${targetTemperature}°C?${material ? ` Declared material: ${material}. Confirm the physical spool label.` : ""}`);
+        report = status.raw;
+        await this.confirmHardwareAction(`Heat ${heater}${extruder === undefined ? "" : extruder === 1 ? " (left)" : " (right)"} on ${model!.toUpperCase()} (${serial}) to ${targetTemperature}°C?${material ? ` Declared material: ${material}. Confirm the physical spool label.` : ""}`);
         beforeDispatch = async () => {
           assertActive();
           const confirmedStatus = await this.getSafetyStatus(host, serial, token);
@@ -1140,11 +1151,20 @@ export class BambuImplementation {
         };
         await beforeDispatch();
       }
+      // Turning a heater off never waits for a report: the model's usual protocol decides.
+      // Without a model (heater off) the serial prefix names the protocol family; it authorizes nothing.
+      const protocol = controlProtocol(report, model ?? serialModel(serial) ?? "");
+      const commands = heater === "nozzle" && targetTemperature === 0 && protocol.extruders === 2 && extruder === undefined
+        ? [temperatureCommand(protocol, heater, 0, MAIN_EXTRUDER_ID), temperatureCommand(protocol, heater, 0, DEPUTY_EXTRUDER_ID)]
+        : [temperatureCommand(protocol, heater, targetTemperature, heater === "nozzle" ? extruder ?? (protocol.extruders === 2 ? undefined : MAIN_EXTRUDER_ID) : undefined)];
       const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
       assertActive();
-      if (dispatch) await dispatch(heater, targetTemperature, assertActive, beforeDispatch);
-      else await invokeWithoutAck(printer!, new GCodeLineCommand({ gcodes: [gcode] }));
-      return { status: "success", message: `Temperature command sent for ${normalizedComponent}.`, command: gcode };
+      for (const command of commands) {
+        if (dispatch) await dispatch(command, assertActive, beforeDispatch);
+        else { await printer!.publish(JSON.parse(command.messageJson)); await sleep(COMMAND_SETTLE_MS); }
+      }
+      const sent = commands.map(command => command.gcode?.trim() ?? JSON.stringify(JSON.parse(command.messageJson).print));
+      return { status: "success", message: `Temperature command sent for ${normalizedComponent}.`, command: sent.join("; ") };
     };
     if (targetTemperature === 0) {
       cancelPendingPrinterOperations(host, serial);
@@ -1158,37 +1178,29 @@ export class BambuImplementation {
     serial: string,
     token: string,
     fan: string | number,
-    speed: number
+    speed: number,
+    dispatch?: (command: ControlCommand) => Promise<any>
   ) {
-    const printer = await this.getPrinter(host, serial, token);
-    const normalizedFan = typeof fan === "number" ? fan : fan.trim().toLowerCase();
-    const fanId =
-      normalizedFan === 1 || normalizedFan === "1" || normalizedFan === "part" || normalizedFan === "part_cooling"
-        ? 1
-        : normalizedFan === 2 || normalizedFan === "2" || normalizedFan === "aux" || normalizedFan === "auxiliary"
-          ? 2
-          : normalizedFan === 3 || normalizedFan === "3" || normalizedFan === "chamber"
-            ? 3
-            : null;
-
-    if (fanId === null) {
-      throw new Error("Unsupported fan. Use one of: part, auxiliary, chamber, 1, 2, 3.");
-    }
-
-    const targetSpeed = Math.round(speed);
-    if (targetSpeed < 0 || targetSpeed > 100) {
+    if (!Number.isFinite(speed) || speed < 0 || speed > 100) {
       throw new Error("Fan speed must be between 0 and 100 percent.");
     }
-
-    await invokeWithoutAck(
-      printer,
-      new UpdateFanCommand({ fan: fanId as any, speed: targetSpeed as any })
-    );
+    // Studio: M106 P<fan> S<0-255> without the new protocol or an airduct, set_fan otherwise; 10 % steps.
+    const status = await this.getStatus(host, serial, token);
+    const model = normalizeModel(typeof status?.model === "string" ? status.model : "") ?? "";
+    const command = fanCommand(controlProtocol(status?.raw, model), fan, speed);
+    if (dispatch) await dispatch(command);
+    else {
+      const printer = await this.getPrinter(host, serial, token);
+      await printer.publish(JSON.parse(command.messageJson));
+      await sleep(COMMAND_SETTLE_MS);
+    }
     return {
       status: "success",
-      message: `Fan speed command sent for fan ${fanId}.`,
-      fan: fanId,
-      speed: targetSpeed,
+      message: `Fan speed command sent for fan ${command.fanIndex}.`,
+      fan: command.fanIndex,
+      speed: command.speed,
+      requested_speed: speed,
+      command: command.gcode?.trim() ?? "set_fan",
     };
   }
 

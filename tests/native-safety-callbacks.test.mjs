@@ -27,7 +27,7 @@ test("native heating rejects newly busy state at helper dispatch without reconfi
   const s = setup(t);
   let sent = false;
   await assert.rejects(s.printer.setTemperature(host, serial, token, "bed", 50, "x2d", undefined, 0.4,
-    async (_heater, _target, _active, beforeDispatch) => {
+    async (_command, _active, beforeDispatch) => {
       s.report.gcode_state = "RUNNING";
       await beforeDispatch?.();
       sent = true;
@@ -39,7 +39,7 @@ test("native heating rejects newly busy state at helper dispatch without reconfi
 test("native heating repeats live checks for retries while retaining one confirmation", async t => {
   const s = setup(t);
   await s.printer.setTemperature(host, serial, token, "bed", 50, "x2d", undefined, 0.4,
-    async (_heater, _target, _active, beforeDispatch) => {
+    async (_command, _active, beforeDispatch) => {
       await beforeDispatch?.();
       s.report.model = "p1s";
       await assert.rejects(async () => beforeDispatch?.(), /identity|model/i);
@@ -54,7 +54,7 @@ test("heating rechecks the currently loaded spool material at helper dispatch", 
   } });
   let sent = false;
   await assert.rejects(s.printer.setTemperature(host, serial, token, "nozzle", 220, "p1s", "PLA", 0.4,
-    async (_heater, _target, _active, beforeDispatch) => {
+    async (_command, _active, beforeDispatch) => {
       s.report.ams.tray_now = "1";
       await beforeDispatch?.();
       sent = true;
@@ -107,8 +107,9 @@ test("native heater-off needs neither fresh state nor confirmation", async t => 
   const s = setup(t);
   let sent = false;
   await s.printer.setTemperature(host, serial, token, "bed", 0, undefined, undefined, 0.4,
-    async (_heater, target, _active, beforeDispatch) => {
-      assert.equal(target, 0);
+    async (command, _active, beforeDispatch) => {
+      // Off needs no report: the serial prefix (20P, X2D) picks the X2D's set_bed_temp.
+      assert.deepEqual([JSON.parse(command.messageJson).print.command, JSON.parse(command.messageJson).print.temp], ["set_bed_temp", 0]);
       assert.equal(beforeDispatch, undefined);
       sent = true;
     });

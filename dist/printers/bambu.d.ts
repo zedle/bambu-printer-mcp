@@ -1,5 +1,6 @@
 import { inspectPrintFile } from "../safety/print-file.js";
 import { type PrinterStateRequirements } from "../safety/printer-state.js";
+import { type ControlCommand } from "./control-commands.js";
 export declare function assertDirectPrintSupported(model: string | undefined, serial?: string): void;
 interface BambuPrintOptionsInternal {
     projectName: string;
@@ -54,17 +55,23 @@ export declare class BambuImplementation {
     clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>) => Promise<any>): Promise<any>;
     setPrintSpeed(host: string, serial: string, token: string, speedMode: string | number): Promise<any>;
     setAirductMode(host: string, serial: string, token: string, mode: string): Promise<any>;
-    rereadAmsRfid(host: string, serial: string, token: string, amsId: number, slotId: number): Promise<any>;
-    setTemperature(host: string, serial: string, token: string, component: string, temperature: unknown, bambuModel?: string, material?: string, nozzleDiameter?: number, dispatch?: (heater: "bed" | "nozzle", target: number, assertActive: () => void, beforeDispatch?: () => Promise<void>) => Promise<any>): Promise<{
+    rereadAmsRfid(host: string, serial: string, token: string, amsId: number, slotId: number, dispatch?: (command: ControlCommand) => Promise<any>): Promise<any>;
+    /**
+     * Heaters, with the command form Studio uses for the printer (control-commands.ts). On dual-nozzle printers the
+     * nozzle is chosen with extruder (0 right/main, 1 left/deputy); turning a nozzle off without one turns both off.
+     */
+    setTemperature(host: string, serial: string, token: string, component: string, temperature: unknown, bambuModel?: string, material?: string, nozzleDiameter?: number, dispatch?: (command: ControlCommand, assertActive: () => void, beforeDispatch?: () => Promise<void>) => Promise<any>, extruder?: number): Promise<{
         status: string;
         message: string;
         command: string;
     }>;
-    setFanSpeed(host: string, serial: string, token: string, fan: string | number, speed: number): Promise<{
+    setFanSpeed(host: string, serial: string, token: string, fan: string | number, speed: number, dispatch?: (command: ControlCommand) => Promise<any>): Promise<{
         status: string;
         message: string;
         fan: number;
         speed: number;
+        requested_speed: number;
+        command: string;
     }>;
     setLight(host: string, serial: string, token: string, light: string, mode: string): Promise<{
         status: string;

@@ -1,4 +1,6 @@
 import { BambuClient } from "bambu-node";
+/** The model a serial prefix belongs to (Studio's sn_prefix). Identity evidence only together with a fresh report. */
+export declare function serialModel(serial: string): string | undefined;
 /** Only raw reports received after this request are evidence. Never read printer.data here. */
 export declare function readFreshPrinterStatus(printer: BambuClient, serial: string, timeoutMs?: number): Promise<any>;
 export interface PrinterStateRequirements {
@@ -48,6 +50,10 @@ export interface ValidatedPrinterState {
 }
 /** Verifies reported configuration, not a physical nozzle/spool inspection. */
 export declare function validatePrinterState(status: any, requirements: PrinterStateRequirements): ValidatedPrinterState;
-/** Manual M104 cannot remap filament slots. Validate the material already at the nozzle. */
-export declare function manualHeatingRequirements(status: any, model: string, nozzleDiameter: number, material: string): PrinterStateRequirements;
+/**
+ * Manual nozzle heating cannot remap filament slots: validate the material already at the nozzle. Dual-nozzle printers
+ * need the nozzle (extruder 0 right/main, 1 left/deputy); its loaded tray comes from device.extruder.info[].snow
+ * (AMS id << 8 | slot; 0xFFFF none), as Studio's ExtderSystemParser reads it.
+ */
+export declare function manualHeatingRequirements(status: any, model: string, nozzleDiameter: number, material: string, extruder?: number): PrinterStateRequirements;
 export {};

@@ -226,9 +226,22 @@ test('manual heating permits declared external or unloaded material and rejects 
   }
   assert.doesNotThrow(() => check(fresh(),safety.manualHeatingRequirements(fresh(),'p1s',0.4,'PLA')));
 });
-test('manual heating refuses ambiguous multi-nozzle active selection', () => {
-  const status=fresh({model_id:'O1D',device:{nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat:0},{id:1,diameter:0.4,type:'HH01',stat:0}]}}});
-  assert.throws(() => safety.manualHeatingRequirements(status,'h2d',0.4,'PLA'),/multi.nozzle|sliced|active/i);
+test('manual heating on a dual-nozzle printer needs the nozzle and checks the filament loaded there', () => {
+  const extruder=snows=>({extruder:{info:snows.map((snow,id)=>({id,snow,info:0}))}});
+  const nozzle={nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat:0},{id:1,diameter:0.4,type:'HH01',stat:0}]}};
+  const status=snows=>fresh({model_id:'O1D',device:{...nozzle,...extruder(snows)},ams:{ams:[{id:'1',info:'2003',tray:[{id:'3',tray_type:'PETG'}]}]},vir_slot:[{id:'254',tray_type:'PLA'},{id:'255',tray_type:''}]});
+  assert.throws(() => safety.manualHeatingRequirements(status([0xffff,0xffff]),'h2d',0.4,'PLA'),/dual-nozzle/i);
+  // Right nozzle (0) loaded from AMS 1 slot 3 (snow 0x0103 = tray 7): PETG.
+  const right=safety.manualHeatingRequirements(status([0x0103,0xffff]),'h2d',0.4,'PLA',0);
+  assert.deepEqual([right.useAMS,right.amsMapping,right.usedNozzleIndices],[true,[7],[0]]);
+  assert.throws(() => check(status([0x0103,0xffff]),right),/PETG in slot 7 contradicts/);
+  assert.doesNotThrow(() => check(status([0x0103,0xffff]),safety.manualHeatingRequirements(status([0x0103,0xffff]),'h2d',0.4,'PETG',0)));
+  // Left nozzle (1) fed from the external holder 254 (snow 0xFEFF): PLA.
+  assert.doesNotThrow(() => check(status([0xffff,0xfeff]),safety.manualHeatingRequirements(status([0xffff,0xfeff]),'h2d',0.4,'PLA',1)));
+  // Nothing loaded: the material's ceiling applies, no spool to compare.
+  assert.equal(safety.manualHeatingRequirements(status([0xffff,0xffff]),'h2d',0.4,'PLA',1).verifyMaterials,false);
+  assert.throws(() => safety.manualHeatingRequirements(fresh({model_id:'O1D',device:nozzle}),'h2d',0.4,'PLA',1),/filament loaded at that nozzle/);
+  assert.throws(() => safety.manualHeatingRequirements(fresh(),'p1s',0.4,'PLA',1),/one nozzle/);
 });
 
 test('explicit job nozzle type and flow requirements cannot pass unknown reported configuration', () => {

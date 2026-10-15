@@ -12,6 +12,11 @@ const SERIAL_MODELS: Record<string, string> = {
   "00M": "X1C", "00W": "X1", "03W": "X1E", "01S": "P1P", "01P": "P1S", "22E": "P2S", "039": "A1", "030": "A1 Mini",
 };
 
+/** The model a serial prefix belongs to (Studio's sn_prefix). Identity evidence only together with a fresh report. */
+export function serialModel(serial: string): string | undefined {
+  return normalizeModel(SERIAL_MODELS[serial.trim().toUpperCase().slice(0, 3)] ?? "");
+}
+
 function object(value: unknown): value is Record<string, any> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -470,13 +475,39 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
   return {model,reportedNozzles:nozzles,filaments,hmsWarnings};
 }
 
-/** Manual M104 cannot remap filament slots. Validate the material already at the nozzle. */
-export function manualHeatingRequirements(status: any, model: string, nozzleDiameter: number, material: string): PrinterStateRequirements {
+/**
+ * Manual nozzle heating cannot remap filament slots: validate the material already at the nozzle. Dual-nozzle printers
+ * need the nozzle (extruder 0 right/main, 1 left/deputy); its loaded tray comes from device.extruder.info[].snow
+ * (AMS id << 8 | slot; 0xFFFF none), as Studio's ExtderSystemParser reads it.
+ */
+export function manualHeatingRequirements(status: any, model: string, nozzleDiameter: number, material: string, extruder?: number): PrinterStateRequirements {
   const normalized = normalizeModel(model);
   if (!normalized) throw new Error("A known printer model is required for manual nozzle heating.");
   const raw = status?.raw;
   if (!object(raw)) throw new Error("A fresh printer report is required for manual nozzle heating.");
-  if (["h2d","h2dpro","h2c","x2d"].includes(normalized) || reportedNozzles(raw).some(nozzle => nozzle.index !== 0)) {
+  if (DUAL_EXTRUDER_MODELS.has(normalized)) {
+    if (extruder !== 0 && extruder !== 1) throw new Error("Choose the nozzle to heat on this dual-nozzle printer (extruder left or right).");
+    const entries = raw.device?.extruder?.info;
+    const entry = Array.isArray(entries) ? entries.filter((value: any) => Number(value?.id) === extruder) : [];
+    const snow = entry.length === 1 ? finiteNumber(entry[0].snow) : undefined;
+    if (snow === undefined || !Number.isInteger(snow) || snow < 0 || snow > 0xffff) {
+      throw new Error("Cannot identify the filament loaded at that nozzle; refresh the printer's extruder state.");
+    }
+    const requirements: PrinterStateRequirements = {
+      model: normalized, nozzleDiameters: [nozzleDiameter], usedNozzleIndices: [extruder],
+      materials: [material], usedFilamentPositions: [0], useAMS: false,
+    };
+    const ams = snow >> 8;
+    const slot = snow & 0xff;
+    // Nothing loaded: the declared material keeps its ceiling, but there is no spool to compare it with.
+    if (ams === 0xff && slot === 0xff) return { ...requirements, verifyMaterials: false };
+    if (isExternalTray(ams)) return { ...requirements, amsMapping: [ams] };
+    const tray = ams >= 128 && ams <= 135 ? ams : ams <= 3 && slot <= 3 ? ams * 4 + slot : undefined;
+    if (tray === undefined) throw new Error("The printer reports an unknown filament source at that nozzle; refresh its extruder state.");
+    return { ...requirements, useAMS: true, amsMapping: [tray] };
+  }
+  if (extruder !== undefined && extruder !== 0) throw new Error("This printer has one nozzle.");
+  if (reportedNozzles(raw).some(nozzle => nozzle.index !== 0)) {
     throw new Error("Manual heating cannot verify the active nozzle and loaded material on this multi-nozzle printer. Use a checked sliced print instead.");
   }
   const requirements: PrinterStateRequirements = {

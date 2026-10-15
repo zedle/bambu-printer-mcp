@@ -11,7 +11,7 @@ import { createServer as createHttpServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { STLManipulator, SLICER_TYPES, normalizeSlicerType, } from "./stl/stl-manipulator.js";
 import { BambuNetworkBridge } from "./bambu-network-bridge.js";
-import { assertBambuNativeAvailable, validateBambuNativeMetadata, validateBambuNativeControlMessage, buildBambuNativeFanCommand, buildBambuNativeTemperatureCommand, printWithBambuNative, sendCommandWithBambuNative, uploadWithBambuNative, } from "./bambu-native.js";
+import { assertBambuNativeAvailable, validateBambuNativeMetadata, validateBambuNativeControlMessage, printWithBambuNative, sendCommandWithBambuNative, uploadWithBambuNative, } from "./bambu-native.js";
 import { importFileViaBambuConnect } from "./bambu-connect.js";
 import { BlenderMcpBridge } from "./blender-mcp-bridge.js";
 import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue, studioTrayMapping } from "./ams-mapping.js";
@@ -2291,11 +2291,11 @@ class BambuPrinterMCPServer {
                     },
                     {
                         name: "reread_ams_rfid",
-                        description: "Trigger a Bambu AMS RFID re-read for one AMS slot. X2D on macOS uses the native official plug-in route. This can move AMS filament; use only when the printer is idle and unloaded.",
+                        description: "Trigger a Bambu AMS RFID re-read for one AMS slot, with the command Bambu Studio uses for the printer (ams_get_rfid or M620 R). Refused, as in Studio, while filament is loaded to the toolhead that AMS feeds. This can move AMS filament; use only when the printer is idle.",
                         inputSchema: {
                             type: "object",
                             properties: {
-                                ams_id: { type: "number", description: "AMS unit index from 0 to 3, or 128 for an X2D AMS-HT." },
+                                ams_id: { type: "number", description: "AMS unit index from 0 to 3, or the AMS-HT unit id (128-135)." },
                                 slot_id: { type: "number", description: "Slot index within that AMS, from 0 to 3" },
                                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
@@ -2306,11 +2306,12 @@ class BambuPrinterMCPServer {
                     },
                     {
                         name: "set_temperature",
-                        description: "Set a checked bed or nozzle temperature. Positive heating requires matching fresh printer telemetry; nozzle heating also requires declared material. Zero turns the heater off.",
+                        description: "Set a checked bed, nozzle or chamber temperature, with the command Bambu Studio uses for the printer (G-code or JSON). Positive heating requires matching fresh printer telemetry; nozzle heating also requires declared material, checked against the filament loaded at that nozzle. Zero turns the heater off (both nozzles on a dual-nozzle printer unless extruder is given).",
                         inputSchema: {
                             type: "object",
                             properties: {
-                                component: { type: "string", description: "Component to heat: bed, nozzle, or extruder" },
+                                component: { type: "string", description: "Component to heat: bed, nozzle (or extruder), or chamber (H2 series, X2D, X1E)" },
+                                extruder: { type: "string", enum: ["left", "right"], description: "Nozzle on a dual-nozzle printer (H2D, H2D Pro, H2C, X2D); required to heat one." },
                                 temperature: { type: "number", minimum: 0, description: "Finite target temperature in °C, checked against model/component and declared material limits" },
                                 bambu_model: { type: "string", enum: [...VALID_BAMBU_MODELS], description: "Printer model, required for positive heating unless configured in the environment" },
                                 material: { type: "string", description: "Loaded material, for example PLA or PETG. Required for positive nozzle heating, including non-RFID spools." },
@@ -2324,7 +2325,7 @@ class BambuPrinterMCPServer {
                     },
                     {
                         name: "set_fan_speed",
-                        description: "Set a Bambu printer fan speed percentage. X2D on macOS uses the installed Bambu networking plug-in without UI automation; other models use MQTT.",
+                        description: "Set a Bambu printer fan speed percentage in 10 % steps, with Bambu Studio's command for the printer (set_fan where the printer has an airduct and the new protocol, else M106).",
                         inputSchema: {
                             type: "object",
                             properties: {
@@ -2333,7 +2334,7 @@ class BambuPrinterMCPServer {
                                     description: "Fan to control: part, auxiliary, right_auxiliary, chamber, 1, 2, 3, or 10"
                                 },
                                 speed: { type: "number", description: "Fan speed percentage from 0 to 100" },
-                                confirm_during_print: { type: "boolean", description: "Required for X2D fan changes while a print is running." },
+                                confirm_during_print: { type: "boolean", description: "Required for signed fan changes while a print is running." },
                                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
                                 bambu_token: { type: "string", description: "Access token (default: value from env)" }
@@ -2658,9 +2659,12 @@ class BambuPrinterMCPServer {
                     return sendMacNativeCommand(options, execution);
                 const validated = validateBambuNativeControlMessage(options.messageJson);
                 const print = JSON.parse(validated.messageJson).print;
+                const gcodeHeat = print?.command === "gcode_line" && typeof print.param === "string" ? print.param.trim().match(/^M(?:104|140)\s+S(\d+)$/i) : null;
                 const requiresFreshState = print?.command === "resume" || print?.command === "clean_print_error" ||
                     (print?.command === "set_bed_temp" && Number(print.temp) > 0) ||
-                    (print?.command === "set_nozzle_temp" && Number(print.target_temp) > 0);
+                    (print?.command === "set_nozzle_temp" && Number(print.target_temp) > 0) ||
+                    (print?.command === "set_ctt" && Number(print.ctt_val) > 0) ||
+                    (!!gcodeHeat && Number(gcodeHeat[1]) > 0);
                 if (requiresFreshState && typeof execution.beforeDispatch !== "function") {
                     throw new Error(`${validated.command} requires a fresh printer-state check before dispatch.`);
                 }
@@ -2977,32 +2981,8 @@ class BambuPrinterMCPServer {
                         if (args?.ams_id === undefined || args?.slot_id === undefined) {
                             throw new Error("Missing required parameters: ams_id and slot_id");
                         }
-                        if (nativeControls) {
-                            const amsId = Number(args.ams_id);
-                            const slotId = Number(args.slot_id);
-                            if ((!Number.isInteger(amsId) || (amsId < 0 || amsId > 3)) && amsId !== 128) {
-                                throw new Error("X2D ams_id must be 0 to 3, or 128 for AMS-HT.");
-                            }
-                            if (!Number.isInteger(slotId) || slotId < 0 || slotId > 3 || (amsId === 128 && slotId !== 0)) {
-                                throw new Error("slot_id must be an integer from 0 to 3; AMS-HT supports only slot 0.");
-                            }
-                            result = await signedCommand({
-                                host,
-                                serial: bambuSerial,
-                                token: bambuToken,
-                                messageJson: JSON.stringify({
-                                    print: {
-                                        command: "ams_get_rfid",
-                                        sequence_id: String(Date.now()),
-                                        ams_id: amsId,
-                                        slot_id: slotId,
-                                    },
-                                }),
-                            });
-                        }
-                        else {
-                            result = await this.bambu.rereadAmsRfid(host, bambuSerial, bambuToken, Number(args.ams_id), Number(args.slot_id));
-                        }
+                        // Studio's protocol choice (ams_get_rfid or M620 R) and toolhead check come from a fresh report.
+                        result = await this.bambu.rereadAmsRfid(host, bambuSerial, bambuToken, Number(args.ams_id), Number(args.slot_id), nativeControls ? command => signedCommand({ host, serial: bambuSerial, token: bambuToken, messageJson: command.messageJson }) : undefined);
                         break;
                     case "set_temperature": {
                         if (!args?.component || args?.temperature === undefined) {
@@ -3011,13 +2991,17 @@ class BambuPrinterMCPServer {
                         if (typeof args.temperature !== "number" || !Number.isFinite(args.temperature) || args.temperature < 0) {
                             throw new Error("Temperature must be a finite, non-negative number in °C.");
                         }
+                        const extruder = args.extruder === undefined ? undefined
+                            : ["left", "deputy", "1"].includes(String(args.extruder).trim().toLowerCase()) ? 1
+                                : ["right", "main", "0"].includes(String(args.extruder).trim().toLowerCase()) ? 0
+                                    : (() => { throw new Error("extruder must be left or right."); })();
                         const heaterModel = args.temperature === 0
                             ? String(args.bambu_model || DEFAULT_BAMBU_MODEL).trim().toLowerCase()
                             : await this.resolveBambuModel(args.bambu_model);
                         result = await this.bambu.setTemperature(host, bambuSerial, bambuToken, String(args.component), args.temperature, heaterModel || undefined, args?.material !== undefined ? String(args.material) : undefined, Number(args?.nozzle_diameter ?? DEFAULT_NOZZLE_DIAMETER), (args.temperature === 0 ? nativeControls : (heaterModel === "x2d" && process.platform === "darwin") || bridgeControls)
-                            ? (heater, target, assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
-                                messageJson: buildBambuNativeTemperatureCommand(heater, target).messageJson }, { signal: extra.signal, assertActive, beforeDispatch })
-                            : undefined);
+                            ? (command, assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
+                                messageJson: command.messageJson, qos: command.qos }, { signal: extra.signal, assertActive, beforeDispatch })
+                            : undefined, extruder);
                         break;
                     }
                     case "set_fan_speed":
@@ -3028,25 +3012,10 @@ class BambuPrinterMCPServer {
                             const status = await this.bambu.getStatus(host, bambuSerial, bambuToken);
                             const printerState = String(status?.raw?.gcode_state ?? status?.raw?.print?.gcode_state ?? status?.gcode_state ?? status?.status ?? "").toUpperCase();
                             if (printerState === "RUNNING" && args?.confirm_during_print !== true) {
-                                throw new Error("The X2D is currently printing. Re-submit with confirm_during_print=true after explicit user confirmation.");
+                                throw new Error("The printer is currently printing. Re-submit with confirm_during_print=true after explicit user confirmation.");
                             }
-                            const fanCommand = buildBambuNativeFanCommand(String(args.fan), Number(args.speed));
-                            result = {
-                                ...await signedCommand({
-                                    host,
-                                    serial: bambuSerial,
-                                    token: bambuToken,
-                                    messageJson: fanCommand.messageJson,
-                                }),
-                                fan: fanCommand.fan,
-                                fan_index: fanCommand.fanIndex,
-                                requested_speed: fanCommand.requestedSpeed,
-                                speed: fanCommand.speed,
-                            };
                         }
-                        else {
-                            result = await this.bambu.setFanSpeed(host, bambuSerial, bambuToken, String(args.fan), Number(args.speed));
-                        }
+                        result = await this.bambu.setFanSpeed(host, bambuSerial, bambuToken, String(args.fan), Number(args.speed), nativeControls ? command => signedCommand({ host, serial: bambuSerial, token: bambuToken, messageJson: command.messageJson }) : undefined);
                         break;
                     case "set_light":
                         if (!args?.light || !args?.mode) {
