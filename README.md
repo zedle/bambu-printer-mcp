@@ -1159,6 +1159,8 @@ When `print_3mf` detects an unsliced 3MF and auto-slices it, these defaults are 
 
 These defaults reduce stale-profile problems; inspect downloaded models and their slice preview before printing. When calling `slice_stl` directly, you have full control over every flag.
 
+`print_3mf` and `print_3mf_bambu_network` also take `bed_type`, `nozzle_type` and the per-extruder options above (`nozzles`, `nozzles_from_printer`, `filament_map`, `filament_sources`) and pass them to the auto-slice, so a dual-nozzle job can be sliced and printed in one call. A 3MF that is already sliced refuses the per-extruder options.
+
 </details>
 
 <details>

@@ -95,9 +95,10 @@ slicer preview for the actual model and tower geometry.
 
 ### Dual-nozzle printers with different nozzles
 
-H2D, H2C and X2D (and the H2D Pro, whose profiles are handled the same way but which is not a `bambu_model` choice yet) can carry a different hotend on each side (the H2C
+H2D, H2D Pro, H2C and X2D can carry a different hotend on each side (the H2C
 has a fixed High Flow nozzle on the left and a rack of Standard hotends on the
-right). `slice_stl` and `slice_with_template` take that per extruder:
+right). `slice_stl` and `slice_with_template` take that per extruder, and so do
+`print_3mf` and `print_3mf_bambu_network` when they auto-slice an unsliced 3MF:
 
 ```json
 {

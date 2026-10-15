@@ -162,6 +162,42 @@ test("print_3mf auto-slices an H2D Pro job with Bambu Studio's H2D Pro machine p
   assert.deepEqual(server.events(), [{ action: "slice", file: project, preset: "Bambu Lab H2D Pro 0.4 nozzle", bedType: "textured_plate" }]);
 });
 
+test("print_3mf passes the per-extruder slicing options through when it slices the 3MF itself", async (t) => {
+  const server = await start(t, { env: { TEST_LOG_SLICE_DETAIL: "1" } });
+  const project = await server.makeProject("unsliced.3mf");
+  const result = await server.print(project, {
+    bambu_model: "h2d", nozzles: [{ flow: "High Flow", type: "tungsten_carbide" }, { flow: "Standard", type: "hardened_steel" }],
+    filament_map: [2, "left"], bed_type: "engineering_plate",
+  });
+  assert.equal(result.structuredContent.message, failure);
+  const [slice, ...rest] = server.events();
+  assert.deepEqual(rest, [], "a failed slice must never upload or contact the printer");
+  assert.equal(slice.preset, "Bambu Lab H2D 0.4 nozzle");
+  assert.equal(slice.bedType, "engineering_plate");
+  assert.deepEqual(slice.filamentMap, [2, 1]);
+  assert.equal(slice.extruderNozzles.length, 2);
+  assert.equal(slice.extruderNozzles[1].type, "hardened_steel");
+});
+
+test("print_3mf reads the mounted nozzles before auto-slicing only when nozzles_from_printer is set", async (t) => {
+  const server = await start(t, { env: { TEST_LOG_SLICE_DETAIL: "1" } });
+  const project = await server.makeProject("unsliced.3mf");
+  await server.print(project, { nozzles_from_printer: true, filament_sources: ["external"] });
+  const events = server.events();
+  assert.equal(events[0].action, "safety-status");
+  assert.equal(events[1].action, "slice");
+  assert.equal(events[1].filamentSources.length, 1, "filament_sources reaches the slicer");
+  assert.equal(events[1].reportedExtruders.nozzles[0].diameter, 0.4);
+});
+
+test("print_3mf refuses slicing-only options for a 3MF that is already sliced", async (t) => {
+  const server = await start(t, { sliceSucceeds: true });
+  const result = await server.print(server.slicedOutput, { filament_map: [1] });
+  assert.equal(result.isError, true);
+  assert.match(result.content?.[0]?.text || "", /filament_map only apply when the 3MF is sliced by this print/);
+  assert.deepEqual(server.events(), []);
+});
+
 test("human print confirmation waits ten minutes by default instead of the SDK's 60 seconds", async (t) => {
   const server = await start(t, { sliceSucceeds: true, elicitDelayMs: 500 });
   const result = await server.print(await server.makeProject("unsliced.3mf"));

@@ -70,6 +70,45 @@ function requestedPrintNozzles(args) {
     }
     return raw.map(Number);
 }
+/** Per-extruder slicing arguments, shared by the slice tools and the print tools that auto-slice. */
+const EXTRUDER_SLICE_SCHEMA_PROPERTIES = {
+    nozzles: {
+        type: "array",
+        minItems: 1,
+        maxItems: 2,
+        items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+                diameter: { type: "number", description: "Nozzle diameter in mm; must be the same on both extruders (Bambu Studio has one machine preset per diameter)." },
+                flow: { type: "string", enum: [...NOZZLE_FLOWS], description: "Nozzle flow type; must be one of this extruder's variants in the Bambu Studio profiles." },
+                type: { type: "string", enum: [...NOZZLE_MATERIALS], description: "Hotend material." }
+            }
+        },
+        description: "Per-extruder nozzles in Bambu Studio's extruder order: [left, right] on dual-nozzle printers (H2D, H2D Pro, H2C, X2D), one entry otherwise. Example for an H2C with a left tungsten carbide High Flow and a right hardened steel Standard: [{\"flow\":\"High Flow\",\"type\":\"tungsten_carbide\"},{\"flow\":\"Standard\",\"type\":\"hardened_steel\"}]. Fields left out come from nozzles_from_printer, then the machine preset. Combinations the profiles don't have are refused."
+    },
+    nozzles_from_printer: { type: "boolean", description: "Read the mounted nozzles (diameter, flow, material) and the AMS / external spool feeds from a fresh printer report before slicing. Explicit nozzles fields win. Default false." },
+    filament_map: {
+        type: "array",
+        items: { anyOf: [{ type: "integer", minimum: 1, maximum: 2 }, { type: "string", enum: ["left", "right"] }] },
+        description: "Dual-nozzle printers: the extruder each filament slot prints with, in slot order (1 = left, 2 = right), written as Bambu Studio's manual filament map. Example: [2, 1] prints filament 1 on the right nozzle and filament 2 on the left. Without it the slicer groups filaments itself, which may pick a nozzle the filament's AMS or spool can't feed."
+    },
+    filament_sources: {
+        type: "array",
+        items: { type: "string" },
+        description: "Where each filament slot is loaded from, in slot order: \"ams\", \"ams:<unit id>\" or \"external\". Needs nozzles_from_printer: a filament mapped to a nozzle its AMS or spool holder can't feed is refused, and filament_map is derived when every slot reaches exactly one nozzle (external: the loaded holder)."
+    },
+};
+/** Per-extruder slicing arguments only mean something when the print route slices the 3MF itself. */
+const SLICE_ONLY_PRINT_ARGS = ["nozzles", "filament_map", "filament_sources", "nozzles_from_printer"];
+function assertNoSliceOnlyPrintArgs(args, threeMFPath) {
+    const given = SLICE_ONLY_PRINT_ARGS.filter(key => args?.[key] !== undefined && args[key] !== null && args[key] !== false &&
+        !(Array.isArray(args[key]) && args[key].length === 0));
+    if (given.length) {
+        throw new Error(`${given.join(", ")} only apply when the 3MF is sliced by this print; ${path.basename(threeMFPath)} is already sliced. ` +
+            "Slice the model again with slice_stl (or pass an unsliced 3MF), or leave them out.");
+    }
+}
 function assertUniformCliNozzles(args) {
     const nozzles = requestedPrintNozzles(args);
     if (nozzles && new Set(nozzles).size > 1) {
@@ -1105,7 +1144,33 @@ class BambuPrinterMCPServer {
         }
         return config;
     }
-    async ensurePrintableThreeMFPath(args, printModel, printPreset, bedType) {
+    /**
+     * Machine preset and slicer options for a 3MF that a print route slices itself: bed and nozzle material plus the
+     * per-extruder arguments slice_stl takes (nozzles, filament_map, filament_sources, nozzles_from_printer). The
+     * printer is read only when nozzles_from_printer is true.
+     */
+    async printAutoSliceSetup(args, printModel, bedType, printer) {
+        assertUniformCliNozzles(args);
+        if (bedType === "supertack_plate") {
+            throw new Error('BambuStudio CLI SuperTack bed type is not verified; use a pre-sliced 3MF for SuperTack or choose textured_plate, cool_plate, engineering_plate, or hot_plate.');
+        }
+        const requested = requestedPrintNozzles(args);
+        const sliceExtruders = await this.resolveSliceExtruders({ ...args, nozzle_diameter: requested?.length ? String(requested[0]) : undefined }, printModel, printer.host, printer.serial, printer.token);
+        return {
+            printerPreset: BAMBU_MODEL_PRESETS[printModel]?.(sliceExtruders.nozzleDiameter),
+            nozzleDiameter: sliceExtruders.nozzleDiameter,
+            options: {
+                uptodate: true,
+                ensureOnBed: true,
+                minSave: true,
+                skipModifiedGcodes: true,
+                bedType: bedType ? resolveBambuStudioCliBedType(bedType) : undefined,
+                nozzleType: resolveNozzleType(args?.nozzle_type),
+                ...sliceExtruders.options,
+            },
+        };
+    }
+    async ensurePrintableThreeMFPath(args, printModel, bedType, printer) {
         const { slicerType, slicerPath, slicerProfile } = this.resolveSlicerConfigFromArgs(args, "print_3mf_bambu_network");
         let threeMFPath = String(args.three_mf_path);
         const JSZip = (await import('jszip')).default;
@@ -1113,22 +1178,12 @@ class BambuPrinterMCPServer {
         const zip = await JSZip.loadAsync(zipData);
         const hasGcode = Object.values(zip.files).some(entry => !entry.dir && /\.gcode$/i.test(entry.name));
         if (hasGcode) {
+            assertNoSliceOnlyPrintArgs(args, threeMFPath);
             return { threeMFPath, autoSliced: false };
         }
-        assertUniformCliNozzles(args);
-        if (bedType === "supertack_plate") {
-            throw new Error('BambuStudio CLI SuperTack bed type is not verified; use a pre-sliced 3MF for SuperTack or choose textured_plate, cool_plate, engineering_plate, or hot_plate.');
-        }
+        const setup = await this.printAutoSliceSetup(args, printModel, bedType, printer);
         console.error(`3MF has no gcode - auto-slicing with ${slicerType} for ${printModel}`);
-        const autoSliceOptions = {
-            uptodate: true,
-            ensureOnBed: true,
-            minSave: true,
-            skipModifiedGcodes: true,
-            bedType: bedType ? resolveBambuStudioCliBedType(bedType) : undefined,
-            nozzleType: resolveNozzleType(args?.nozzle_type),
-        };
-        threeMFPath = await this.stlManipulator.sliceSTL(threeMFPath, slicerType, slicerPath, slicerProfile || undefined, undefined, printPreset, autoSliceOptions);
+        threeMFPath = await this.stlManipulator.sliceSTL(threeMFPath, slicerType, slicerPath, slicerProfile || undefined, undefined, setup.printerPreset, setup.options);
         console.error("Auto-sliced to: " + threeMFPath);
         return { threeMFPath, autoSliced: true };
     }
@@ -1198,7 +1253,6 @@ class BambuPrinterMCPServer {
         const printBedType = resolveBedType(args?.bed_type);
         const printNozzles = requestedPrintNozzles(args);
         const printNozzle = String(printNozzles?.[0] ?? DEFAULT_NOZZLE_DIAMETER);
-        const printPreset = BAMBU_MODEL_PRESETS[printModel]?.(printNozzle);
         const plateIndex = args?.plate_index !== undefined ? Number(args.plate_index) : 0;
         if (!Number.isInteger(plateIndex) || plateIndex < 0) {
             throw new Error("plate_index must be a non-negative integer.");
@@ -1230,7 +1284,7 @@ class BambuPrinterMCPServer {
             if (args[field] !== undefined && args[field] !== "")
                 throw new Error(`${field} cannot override a verified print. Use the structured plate, nozzle, and AMS arguments.`);
         }
-        const { threeMFPath, autoSliced } = await this.ensurePrintableThreeMFPath(args, printModel, printPreset, printBedType);
+        const { threeMFPath, autoSliced } = await this.ensurePrintableThreeMFPath(args, printModel, printBedType, { host: devIp, serial: bambuSerial, token: password || bambuToken });
         const { useAMS, finalAmsMapping, finalAmsSlots } = await this.resolveAmsPrintSettings(threeMFPath, args, host, bambuSerial, bambuToken, printModel, printNozzle);
         if (native && args.use_ams !== false && !useAMS) {
             throw new Error("Native X2D printing requires ams_mapping, ams_slots, auto_match_ams, or explicit use_ams: false for an external spool.");
@@ -1424,19 +1478,17 @@ class BambuPrinterMCPServer {
             }, hmsWarnings);
         }));
     }
-    async handoff3mfViaBambuConnect(args) {
+    async handoff3mfViaBambuConnect(args, printer) {
         if (!args?.three_mf_path) {
             throw new Error("Missing required parameter: three_mf_path");
         }
         const printModel = await this.resolveBambuModel(args?.bambu_model);
         const printBedType = resolveBedType(args?.bed_type);
-        const printNozzle = String(args?.nozzle_diameter || DEFAULT_NOZZLE_DIAMETER);
-        const printPreset = BAMBU_MODEL_PRESETS[printModel]?.(printNozzle);
         const plateIndex = args?.plate_index !== undefined ? Number(args.plate_index) : 0;
         if (!Number.isInteger(plateIndex) || plateIndex < 0) {
             throw new Error("plate_index must be a non-negative integer.");
         }
-        const { threeMFPath, autoSliced } = await this.ensurePrintableThreeMFPath(args, printModel, printPreset, printBedType);
+        const { threeMFPath, autoSliced } = await this.ensurePrintableThreeMFPath(args, printModel, printBedType, printer);
         const threeMfFilename = path.basename(threeMFPath);
         const projectName = String(args?.project_name || threeMfFilename.replace(/\.3mf$/i, ""));
         const handoff = await importFileViaBambuConnect({
@@ -1976,32 +2028,7 @@ class BambuPrinterMCPServer {
                                     enum: [...VALID_NOZZLE_TYPES],
                                     description: "Bambu-compatible slicing: the hotend nozzle material installed on the printer (default: BAMBU_NOZZLE_TYPE, else the model preset's stock nozzle, usually stainless_steel). Printing compares it with the printer's reported nozzle."
                                 },
-                                nozzles: {
-                                    type: "array",
-                                    minItems: 1,
-                                    maxItems: 2,
-                                    items: {
-                                        type: "object",
-                                        additionalProperties: false,
-                                        properties: {
-                                            diameter: { type: "number", description: "Nozzle diameter in mm; must be the same on both extruders (Bambu Studio has one machine preset per diameter)." },
-                                            flow: { type: "string", enum: [...NOZZLE_FLOWS], description: "Nozzle flow type; must be one of this extruder's variants in the Bambu Studio profiles." },
-                                            type: { type: "string", enum: [...NOZZLE_MATERIALS], description: "Hotend material." }
-                                        }
-                                    },
-                                    description: "Per-extruder nozzles in Bambu Studio's extruder order: [left, right] on dual-nozzle printers (H2D, H2D Pro, H2C, X2D), one entry otherwise. Example for an H2C with a left tungsten carbide High Flow and a right hardened steel Standard: [{\"flow\":\"High Flow\",\"type\":\"tungsten_carbide\"},{\"flow\":\"Standard\",\"type\":\"hardened_steel\"}]. Fields left out come from nozzles_from_printer, then the machine preset. Combinations the profiles don't have are refused."
-                                },
-                                nozzles_from_printer: { type: "boolean", description: "Read the mounted nozzles (diameter, flow, material) and the AMS / external spool feeds from a fresh printer report before slicing. Explicit nozzles fields win. Default false." },
-                                filament_map: {
-                                    type: "array",
-                                    items: { anyOf: [{ type: "integer", minimum: 1, maximum: 2 }, { type: "string", enum: ["left", "right"] }] },
-                                    description: "Dual-nozzle printers: the extruder each filament slot prints with, in slot order (1 = left, 2 = right), written as Bambu Studio's manual filament map. Example: [2, 1] prints filament 1 on the right nozzle and filament 2 on the left. Without it the slicer groups filaments itself, which may pick a nozzle the filament's AMS or spool can't feed."
-                                },
-                                filament_sources: {
-                                    type: "array",
-                                    items: { type: "string" },
-                                    description: "Where each filament slot is loaded from, in slot order: \"ams\", \"ams:<unit id>\" or \"external\". Needs nozzles_from_printer: a filament mapped to a nozzle its AMS or spool holder can't feed is refused, and filament_map is derived when every slot reaches exactly one nozzle (external: the loaded holder)."
-                                },
+                                ...EXTRUDER_SLICE_SCHEMA_PROPERTIES,
                                 use_printer_filaments: { type: "boolean", description: "When true, and no explicit slicer profile or load_filaments override is provided, use the printer's current or first loaded AMS filament as the slicer filament profile." },
                                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
@@ -2057,32 +2084,7 @@ class BambuPrinterMCPServer {
                                     enum: [...VALID_NOZZLE_TYPES],
                                     description: "Bambu-compatible slicing: the hotend nozzle material installed on the printer (default: BAMBU_NOZZLE_TYPE, else the model preset's stock nozzle, usually stainless_steel). Printing compares it with the printer's reported nozzle."
                                 },
-                                nozzles: {
-                                    type: "array",
-                                    minItems: 1,
-                                    maxItems: 2,
-                                    items: {
-                                        type: "object",
-                                        additionalProperties: false,
-                                        properties: {
-                                            diameter: { type: "number", description: "Nozzle diameter in mm; must be the same on both extruders (Bambu Studio has one machine preset per diameter)." },
-                                            flow: { type: "string", enum: [...NOZZLE_FLOWS], description: "Nozzle flow type; must be one of this extruder's variants in the Bambu Studio profiles." },
-                                            type: { type: "string", enum: [...NOZZLE_MATERIALS], description: "Hotend material." }
-                                        }
-                                    },
-                                    description: "Per-extruder nozzles in Bambu Studio's extruder order: [left, right] on dual-nozzle printers (H2D, H2D Pro, H2C, X2D), one entry otherwise. Example for an H2C with a left tungsten carbide High Flow and a right hardened steel Standard: [{\"flow\":\"High Flow\",\"type\":\"tungsten_carbide\"},{\"flow\":\"Standard\",\"type\":\"hardened_steel\"}]. Fields left out come from nozzles_from_printer, then the machine preset. Combinations the profiles don't have are refused."
-                                },
-                                nozzles_from_printer: { type: "boolean", description: "Read the mounted nozzles (diameter, flow, material) and the AMS / external spool feeds from a fresh printer report before slicing. Explicit nozzles fields win. Default false." },
-                                filament_map: {
-                                    type: "array",
-                                    items: { anyOf: [{ type: "integer", minimum: 1, maximum: 2 }, { type: "string", enum: ["left", "right"] }] },
-                                    description: "Dual-nozzle printers: the extruder each filament slot prints with, in slot order (1 = left, 2 = right), written as Bambu Studio's manual filament map. Example: [2, 1] prints filament 1 on the right nozzle and filament 2 on the left. Without it the slicer groups filaments itself, which may pick a nozzle the filament's AMS or spool can't feed."
-                                },
-                                filament_sources: {
-                                    type: "array",
-                                    items: { type: "string" },
-                                    description: "Where each filament slot is loaded from, in slot order: \"ams\", \"ams:<unit id>\" or \"external\". Needs nozzles_from_printer: a filament mapped to a nozzle its AMS or spool holder can't feed is refused, and filament_map is derived when every slot reaches exactly one nozzle (external: the loaded holder)."
-                                },
+                                ...EXTRUDER_SLICE_SCHEMA_PROPERTIES,
                                 use_printer_filaments: { type: "boolean", description: "When true, and no explicit slicer profile or load_filaments override is provided, use the printer's current or first loaded AMS filament as the slicer filament profile. Template 3MF process settings can still be used at the same time." },
                                 uptodate: { type: "boolean", description: "Refresh 3MF preset configs to match the latest BambuStudio version. Use when slicing downloaded or older 3MF files to prevent stale-config failures." },
                                 repetitions: { type: "number", description: "Print N identical copies of the model. Each copy gets its own plate placement. Example: 3 prints three copies." },
@@ -2204,6 +2206,7 @@ class BambuPrinterMCPServer {
                                 slicer_profile: { type: "string", description: "Path to an optional slicer profile/config file for auto-slicing." },
                                 nozzle_diameter: { type: "string", description: "Nozzle diameter in mm for auto-slicing (default: 0.4)." },
                                 nozzle_diameters: { type: "array", minItems: 1, maxItems: 2, items: { type: "number", enum: [0.2, 0.4, 0.6, 0.8] }, description: "Complete per-nozzle diameters for pre-sliced jobs, e.g. [0.4, 0.6]. Omit to verify file metadata against every reported nozzle; cannot combine with nozzle_diameter." },
+                                ...EXTRUDER_SLICE_SCHEMA_PROPERTIES,
                                 use_ams: { type: "boolean", description: "Whether to use the AMS; defaults to auto-detect from the 3MF mapping." },
                                 ams_mapping: { type: "array", description: "AMS slot mapping array used by both local MCP printing and FULU PrintParams.", items: { type: "number" } },
                                 ams_slots: { type: "array", description: "Per-used-filament AMS slot list, matching the local LAN print path.", items: { type: "number" } },
@@ -2655,7 +2658,8 @@ class BambuPrinterMCPServer {
                                 template_name: { type: "string", description: "Optional named template from the local registry. Resolves to template_3mf_path automatically." },
                                 template_dir: { type: "string", description: "Optional template directory override when resolving template_name." },
                                 nozzle_diameter: { type: "string", description: "Nozzle diameter in mm for auto-slicing (default: 0.4)" },
-                                nozzle_diameters: { type: "array", minItems: 1, maxItems: 2, items: { type: "number", enum: [0.2, 0.4, 0.6, 0.8] }, description: "Complete per-nozzle diameters for a pre-sliced job, e.g. [0.4, 0.6]. Omit to verify its declared diameters against live telemetry; cannot combine with nozzle_diameter." }
+                                nozzle_diameters: { type: "array", minItems: 1, maxItems: 2, items: { type: "number", enum: [0.2, 0.4, 0.6, 0.8] }, description: "Complete per-nozzle diameters for a pre-sliced job, e.g. [0.4, 0.6]. Omit to verify its declared diameters against live telemetry; cannot combine with nozzle_diameter." },
+                                ...EXTRUDER_SLICE_SCHEMA_PROPERTIES,
                             },
                             required: ["three_mf_path", "bambu_model"]
                         }
@@ -3517,7 +3521,7 @@ class BambuPrinterMCPServer {
                             ? "bambu_native"
                             : routedToBridge ? "bambu_network" : connectionMode;
                         if (effectiveConnectionMode === "bambu_connect") {
-                            result = await this.handoff3mfViaBambuConnect(resolvedArgs);
+                            result = await this.handoff3mfViaBambuConnect(resolvedArgs, { host, serial: bambuSerial, token: bambuToken });
                             break;
                         }
                         if (effectiveConnectionMode === "bambu_network") {
@@ -3540,7 +3544,6 @@ class BambuPrinterMCPServer {
                         const printNozzle = String(printNozzles?.[0] ?? DEFAULT_NOZZLE_DIAMETER);
                         const activeSlicerProfile = await resolveTemplateFirstSlicerProfilePath(args, slicerProfile || undefined, resolveTemplatePathFromName(["json", "config", "3mf"]) || explicitTemplatePath || undefined, TEMP_DIR);
                         const explicitSlicerProfile = hasExplicitSlicerProfile(args);
-                        const printPreset = BAMBU_MODEL_PRESETS[printModel]?.(printNozzle);
                         const plateIndex = args?.plate_index !== undefined ? Number(args.plate_index) : 0;
                         if (!Number.isInteger(plateIndex) || plateIndex < 0) {
                             throw new Error("plate_index must be a non-negative integer.");
@@ -3551,23 +3554,15 @@ class BambuPrinterMCPServer {
                         const zipData = fs.readFileSync(threeMFPath);
                         const zip = await JSZip.loadAsync(zipData);
                         const hasGcode = Object.values(zip.files).some(entry => !entry.dir && /\.gcode$/i.test(entry.name));
+                        if (hasGcode)
+                            assertNoSliceOnlyPrintArgs(args, threeMFPath);
                         if (!hasGcode) {
-                            assertUniformCliNozzles(args);
-                            if (printBedType === "supertack_plate") {
-                                throw new Error('BambuStudio CLI SuperTack bed type is not verified; use a pre-sliced 3MF for SuperTack or choose textured_plate, cool_plate, engineering_plate, or hot_plate.');
-                            }
+                            const setup = await this.printAutoSliceSetup(args, printModel, printBedType, { host, serial: bambuSerial, token: bambuToken });
                             console.error(`3MF has no gcode — auto-slicing with ${slicerType} for ${printModel}`);
-                            const autoSliceOptions = {
-                                uptodate: true,
-                                ensureOnBed: true,
-                                minSave: true,
-                                skipModifiedGcodes: true,
-                                bedType: printBedType,
-                                nozzleType: resolveNozzleType(args?.nozzle_type),
-                            };
+                            const autoSliceOptions = setup.options;
                             if (!explicitSlicerProfile) {
                                 try {
-                                    const liveFilaments = await this.getResolvedPrinterFilamentInventory(host, bambuSerial, bambuToken, printModel, printNozzle);
+                                    const liveFilaments = await this.getResolvedPrinterFilamentInventory(host, bambuSerial, bambuToken, printModel, setup.nozzleDiameter);
                                     if (liveFilaments.recommended?.load_filaments) {
                                         autoSliceOptions.loadFilaments = liveFilaments.recommended.load_filaments;
                                     }
@@ -3577,7 +3572,7 @@ class BambuPrinterMCPServer {
                                 }
                             }
                             threeMFPath = await this.stlManipulator.sliceSTL(threeMFPath, slicerType, slicerPath, activeSlicerProfile, undefined, // progressCallback
-                            printPreset, autoSliceOptions);
+                            setup.printerPreset, autoSliceOptions);
                             console.error("Auto-sliced to: " + threeMFPath);
                         }
                         const parsed3MFData = await parse3MF(threeMFPath);
