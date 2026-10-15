@@ -11,6 +11,41 @@ export declare function printerRequiresSignedCommands(raw: Record<string, any> |
 export declare function unsignedLanPrintAllowed(): boolean;
 export declare const UNSIGNED_PRINT_REFUSED_MESSAGE: string;
 export declare function assertUnsignedPrintAccepted(status: any): void;
+export type LanProjectFileOptions = {
+    sequenceId: string;
+    platePath: string;
+    file: string;
+    url: string;
+    subtaskName: string;
+    md5: string;
+    bedType?: string;
+    timelapse: boolean;
+    bedLeveling: boolean;
+    flowCalibration: boolean;
+    vibrationCalibration: boolean;
+    layerInspect: boolean;
+    useAms: boolean;
+    amsMapping: number[];
+    amsMapping2: Array<{
+        ams_id: number;
+        slot_id: number;
+    }>;
+    nozzleMapping?: unknown;
+    autoBedLeveling: number;
+    extrudeCaliFlag: number;
+    nozzleOffsetCali: number;
+    extrudeCaliManualMode: number;
+};
+/**
+ * The LAN `project_file` command as Bambu's network plugin builds it in start_local_print (plugin 02.08.02.54):
+ * the task options are JSON booleans, the calibration modes ints, the four ids "0", a fresh sequence id, the
+ * project name as subtask_name, bed_type "auto" when unset, extrude_cali_manual_mode only when it isn't -1, nozzle_mapping only
+ * when set, and cfg the hex flag string ("0": no external-change assist, no internal timelapse storage).
+ * ams_mapping_info and nozzles_info are never sent on LAN.
+ */
+export declare function buildLanProjectFile(options: LanProjectFileOptions): {
+    print: Record<string, unknown>;
+};
 export declare function assertDirectPrintSupported(model: string | undefined, serial?: string): void;
 interface BambuPrintOptionsInternal {
     projectName: string;

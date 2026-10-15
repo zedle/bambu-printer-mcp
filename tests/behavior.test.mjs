@@ -1086,7 +1086,8 @@ test("P2S pre-sliced .gcode.3mf uses H2-style project_file from /cache instead o
   assert.equal(cmd.url, `ftp:///cache/${fileName}`);
   assert.equal(cmd.file, fileName);
   assert.equal(cmd.param, "Metadata/plate_1.gcode");
-  assert.notEqual(cmd.task_id, "0", "P2S needs non-zero submission ids");
+  // Bambu's plugin sends ids "0" on LAN (start_local_print, plugin 02.08.02.54).
+  for (const id of ["project_id", "profile_id", "task_id", "subtask_id"]) assert.equal(cmd[id], "0", id);
   assert.deepEqual(cmd.ams_mapping, [-1, 1, -1, -1]);
   assert.deepEqual(cmd.ams_mapping2, [
     { ams_id: 255, slot_id: 255 },

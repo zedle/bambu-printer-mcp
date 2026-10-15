@@ -101,3 +101,26 @@ for (const [model, serial] of [["p1s", "01PTEST"], ["a1", "039TEST"], ["a1mini",
     if (cmd.command === "project_file") assert.equal(cmd.use_ams, false);
   });
 }
+
+// The LAN project_file as Bambu's network plugin builds it (start_local_print, plugin 02.08.02.54), keeping the
+// url forms these printers accepted unsigned.
+for (const [model, serial, suffix, url] of [
+  ["h2c", "TESTH2C", ".gcode.3mf", remote => `ftp:///${remote}`],
+  ["p2s", "22ETEST", ".gcode.3mf", remote => `ftp:///${remote}`],
+  ["a1", "039TEST", ".gcode.3mf", remote => `file:///sdcard/${remote}`],
+  ["p1s", "01PTEST", ".3mf", remote => `file:///sdcard/${remote}`],
+]) {
+  test(`${model} project_file matches the plugin's types, ids and sequence id`, async (t) => {
+    const { remote, cmd } = await capture(t, model, serial, { suffix });
+    for (const key of ["timelapse", "bed_leveling", "flow_cali", "vibration_cali", "layer_inspect", "use_ams"]) assert.equal(typeof cmd[key], "boolean", key);
+    for (const key of ["auto_bed_leveling", "extrude_cali_flag", "nozzle_offset_cali"]) assert.ok(Number.isInteger(cmd[key]), key);
+    for (const key of ["project_id", "profile_id", "task_id", "subtask_id"]) assert.equal(cmd[key], "0", key);
+    assert.match(cmd.sequence_id, /^4\d{4}$/, "a fresh id from this server's own range, not \"0\" (the cloud's)");
+    assert.equal(cmd.url, url(remote));
+    assert.equal(cmd.file, path.posix.basename(remote));
+    assert.equal(cmd.subtask_name, path.posix.basename(remote).replace(/(?:\.gcode)?\.3mf$/, ""));
+    assert.equal(cmd.cfg, "0");
+    assert.ok(!("ams_mapping_info" in cmd) && !("nozzles_info" in cmd), "never sent on LAN");
+    if ("extrude_cali_manual_mode" in cmd) assert.notEqual(cmd.extrude_cali_manual_mode, -1);
+  });
+}

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFreshPrinterStatus } from "../safety/printer-state.js";
+import { nextSequenceId } from "../sequence-id.js";
 import { assertAmsDryingSupported, buildAmsDryingCommand, hexFlagBit, normalizeAmsDryingRequest } from "../ams-drying.js";
 import fs from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
@@ -86,6 +87,69 @@ export const UNSIGNED_PRINT_REFUSED_MESSAGE =
 
 export function assertUnsignedPrintAccepted(status: any): void {
   if (printerRequiresSignedCommands(status?.raw) && !unsignedLanPrintAllowed()) throw new Error(UNSIGNED_PRINT_REFUSED_MESSAGE);
+}
+
+export type LanProjectFileOptions = {
+  sequenceId: string;
+  platePath: string;
+  file: string;
+  url: string;
+  subtaskName: string;
+  md5: string;
+  bedType?: string;
+  timelapse: boolean;
+  bedLeveling: boolean;
+  flowCalibration: boolean;
+  vibrationCalibration: boolean;
+  layerInspect: boolean;
+  useAms: boolean;
+  amsMapping: number[];
+  amsMapping2: Array<{ ams_id: number; slot_id: number }>;
+  nozzleMapping?: unknown;
+  autoBedLeveling: number;
+  extrudeCaliFlag: number;
+  nozzleOffsetCali: number;
+  extrudeCaliManualMode: number;
+};
+
+/**
+ * The LAN `project_file` command as Bambu's network plugin builds it in start_local_print (plugin 02.08.02.54):
+ * the task options are JSON booleans, the calibration modes ints, the four ids "0", a fresh sequence id, the
+ * project name as subtask_name, bed_type "auto" when unset, extrude_cali_manual_mode only when it isn't -1, nozzle_mapping only
+ * when set, and cfg the hex flag string ("0": no external-change assist, no internal timelapse storage).
+ * ams_mapping_info and nozzles_info are never sent on LAN.
+ */
+export function buildLanProjectFile(options: LanProjectFileOptions): { print: Record<string, unknown> } {
+  return {
+    print: {
+      command: "project_file",
+      sequence_id: options.sequenceId,
+      param: options.platePath,
+      project_id: "0",
+      profile_id: "0",
+      task_id: "0",
+      subtask_id: "0",
+      subtask_name: options.subtaskName,
+      file: options.file,
+      url: options.url,
+      md5: options.md5,
+      timelapse: options.timelapse,
+      bed_type: options.bedType || "auto",
+      bed_leveling: options.bedLeveling,
+      flow_cali: options.flowCalibration,
+      vibration_cali: options.vibrationCalibration,
+      layer_inspect: options.layerInspect,
+      ams_mapping: options.amsMapping,
+      ams_mapping2: options.amsMapping2,
+      ...(options.nozzleMapping !== undefined ? { nozzle_mapping: options.nozzleMapping } : {}),
+      use_ams: options.useAms,
+      auto_bed_leveling: options.autoBedLeveling,
+      extrude_cali_flag: options.extrudeCaliFlag,
+      nozzle_offset_cali: options.nozzleOffsetCali,
+      ...(options.extrudeCaliManualMode !== -1 ? { extrude_cali_manual_mode: options.extrudeCaliManualMode } : {}),
+      cfg: "0",
+    },
+  };
 }
 
 /** How long to watch fresh reports after a print command (BAMBU_DISPATCH_CHECK_MS, 0 disables). */
@@ -706,6 +770,8 @@ export class BambuImplementation {
     // the container format from the extension.
     let remoteFileName = uniquePrintName(options.filePath);
     remoteFileName = remoteFileName.replace(/\.gcode\.3mf\.gcode\.3mf$/i, ".gcode.3mf");
+    // Like the network plugin's subtask_name: the project name without its extension.
+    const projectStem = remoteFileName.replace(/(?:\.gcode)?\.3mf$/i, "");
 
     // H2-series printers land files at the FTP root and reference them via ftp:///<name>.
     // Full-size A1 uses SD root/project_file (reported on firmware 01.08.01.00).
@@ -713,6 +779,9 @@ export class BambuImplementation {
     // P2S keeps the /cache/<name> upload but only accepts the H2-style
     // project_file command, referenced via ftp:///cache/<name> (verified on
     // P2S firmware 01.02.00.00; file:///sdcard/... fails with ERROR STATE).
+    // Bambu's plugin writes ftp://<file> (two slashes) at the FTP root, but it encrypts that url for printers that
+    // take signed commands; an unsigned ftp://<file> was rejected by an H2S as "unsupported print file path or
+    // name", so the hand-built command keeps the three-slash form that printers accepted.
     const isH2 =
       serial.startsWith("093") ||
       serial.startsWith("094") ||
@@ -884,63 +953,31 @@ export class BambuImplementation {
       };
     }
 
-    const b = (v: any) => (v ? 1 : 0);
-    let projectFileCmd: Record<string, any>;
-    if (usesH2ProjectFile) {
-      const submissionId = String(Date.now() & 0x7fffffff);
-      projectFileCmd = {
-        print: {
-          sequence_id: "0",
-          command: "project_file",
-          param: projectMetadata.plateInternalPath,
-          url: projectUrl,
-          file: remoteFileName,
-          md5,
-          bed_type: options.bedType || "auto",
-          timelapse: b(options.timelapse),
-          bed_leveling: b(options.bedLeveling ?? true),
-          auto_bed_leveling: 1,
-          flow_cali: b(options.flowCalibration ?? false),
-          vibration_cali: b(options.vibrationCalibration ?? true),
-          layer_inspect: b(options.layerInspect ?? false),
-          use_ams: options.useAMS !== false,
-          cfg: "0",
-          extrude_cali_flag: 0,
-          extrude_cali_manual_mode: 0,
-          nozzle_offset_cali: 2,
-          subtask_name: remoteFileName.replace(/\.3mf$/i, ""),
-          profile_id: "0",
-          project_id: submissionId,
-          subtask_id: submissionId,
-          task_id: submissionId,
-          ams_mapping: amsMapping,
-          ams_mapping2: amsMapping2,
-        },
-      };
-    } else {
-      projectFileCmd = {
-        print: {
-          command: "project_file",
-          param: projectMetadata.plateInternalPath,
-          url: projectUrl,
-          subtask_name: remoteFileName.replace(/\.3mf$/i, ""),
-          md5,
-          flow_cali: options.flowCalibration ?? true,
-          layer_inspect: options.layerInspect ?? true,
-          vibration_cali: options.vibrationCalibration ?? true,
-          bed_leveling: options.bedLeveling ?? true,
-          bed_type: options.bedType || "textured_plate",
-          timelapse: options.timelapse ?? false,
-          use_ams: options.useAMS !== false,
-          ams_mapping: amsMapping,
-          profile_id: "0",
-          project_id: "0",
-          sequence_id: "0",
-          subtask_id: "0",
-          task_id: "0",
-        },
-      };
-    }
+    const bedLeveling = options.bedLeveling ?? true;
+    const flowCalibration = options.flowCalibration ?? !usesH2ProjectFile;
+    const projectFileCmd = buildLanProjectFile({
+      sequenceId: nextSequenceId(),
+      platePath: projectMetadata.plateInternalPath,
+      file: remoteFileName,
+      url: projectUrl,
+      subtaskName: projectStem,
+      md5,
+      bedType: options.bedType,
+      timelapse: options.timelapse ?? false,
+      bedLeveling,
+      flowCalibration,
+      vibrationCalibration: options.vibrationCalibration ?? true,
+      layerInspect: options.layerInspect ?? !usesH2ProjectFile,
+      useAms: options.useAMS !== false,
+      amsMapping,
+      amsMapping2,
+      // H2/P2S keep their auto (2) / fixed values; the older printers have no auto modes, so on/off follow the
+      // booleans as Studio's PrintOption::getValueInt does.
+      autoBedLeveling: usesH2ProjectFile ? 1 : bedLeveling ? 1 : 0,
+      extrudeCaliFlag: usesH2ProjectFile ? 0 : flowCalibration ? 1 : 0,
+      nozzleOffsetCali: usesH2ProjectFile ? 2 : 0,
+      extrudeCaliManualMode: usesH2ProjectFile ? 0 : -1,
+    });
 
     const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive);
     try { await printer.publish(projectFileCmd); } catch (error) { watcher.dispose(); throw error; }
