@@ -295,7 +295,11 @@ export function validatePrinterState(status, requirements) {
     // Without a physical selection, a scalar file requirement must match every reported nozzle.
     const broadcast = !requirements.usedNozzleIndices && requirements.nozzleDiameters.length === 1 && nozzles.length > 1;
     const expectedDiameters = broadcast ? nozzles.map(() => requirements.nozzleDiameters[0]) : requirements.nozzleDiameters;
-    const indices = requirements.usedNozzleIndices ?? (broadcast ? nozzles.map(nozzle => nozzle.index) : requirements.nozzleDiameters.map((_, index) => index));
+    // Sliced files list extruders left to right; the H2C reports its right (main) nozzle as id 0 and its left
+    // (deputy) as id 1. Verified on an H2C: id 0 carries the hotend rack (ids 16+) and the AMS, id 1 the
+    // external spool (extruder snow 0xFE..), matching Bambu Studio's "Right nozzle R3 / Left nozzle Ext".
+    const physicalIndex = (position) => model === "h2c" && requirements.nozzleDiameters.length === 2 ? 1 - position : position;
+    const indices = requirements.usedNozzleIndices ?? (broadcast ? nozzles.map(nozzle => nozzle.index) : requirements.nozzleDiameters.map((_, index) => physicalIndex(index)));
     if (indices.length !== expectedDiameters.length || (!requirements.usedNozzleIndices && nozzles.length !== expectedDiameters.length)) {
         throw new Error("Nozzle selection is missing or ambiguous; specify each used nozzle and verify its reported diameter.");
     }

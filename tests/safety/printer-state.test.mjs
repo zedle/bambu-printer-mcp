@@ -232,6 +232,19 @@ for (const [prefix, model, reportedModel] of [['039', 'a1', 'A1'], ['030', 'a1mi
   });
 }
 
+test('H2C job nozzles (left, right) are matched to the printer report (id 1 left, id 0 right)', () => {
+  // Observed H2C report: id 0 is the right nozzle with the induction hotend rack (ids 16+), id 1 the fixed left one.
+  const serial='31BTEST';
+  const status=fresh({model_id:'O1C2',modules:[{name:'ota',sn:serial}],nozzle_diameter:undefined,device:{nozzle:{info:[
+    {id:0,diameter:0.4,type:'HS01',stat:0},{id:1,diameter:0.4,type:'HH05',stat:0},{id:16,diameter:0.6,type:'HS01',stat:0},{id:18,diameter:0.4,type:'HS01',stat:0}]}}},{serial});
+  const job=(nozzleTypes,nozzleFlows)=>req({model:'h2c',serial,nozzleDiameters:[0.4,0.4],nozzleTypes,nozzleFlows});
+  assert.doesNotThrow(()=>check(status,job(['tungsten_carbide','hardened_steel'],['high_flow','standard'])));
+  assert.throws(()=>check(status,job(['hardened_steel','tungsten_carbide'],['standard','high_flow'])),/type|flow/i);
+  assert.throws(()=>check(status,job(['hardened_steel','hardened_steel'],['standard','standard'])),/nozzle 1 type/i);
+  assert.throws(()=>check(status,job(['tungsten_carbide','hardened_steel'],['standard','standard'])),/nozzle 1 flow/i);
+  // Explicit physical selections keep the printer's own ids.
+  assert.doesNotThrow(()=>check(status,req({model:'h2c',serial,nozzleDiameters:[0.4],usedNozzleIndices:[1],nozzleTypes:['tungsten_carbide'],nozzleFlows:['high_flow']})));
+});
 test('official H2C and H2D Pro returned serials agree with declared identity and reject conflicts', () => {
   for(const [prefix,model,modelId,other] of [['31B','h2c','O1C2','O1E'],['239','h2dpro','O1E','O1C2']]) {
     const serial=prefix+'TEST';
