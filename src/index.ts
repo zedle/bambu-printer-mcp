@@ -51,6 +51,7 @@ import { assertBedSupported, studioBedType, studioNozzlesInfo, studioPrintOption
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
 import { nextSequenceId } from "./sequence-id.js";
+import { statusDetails } from "./status-summary.js";
 import { requestNozzleMapping, type CheckedNozzleMapping } from "./nozzle-mapping.js";
 import {
   HYBRID_FLOW, NOZZLE_FLOWS, NOZZLE_MATERIALS, extrudersFromReport, parseExtruderNozzlesArg, parseFilamentMapArg,
@@ -2367,10 +2368,14 @@ class BambuPrinterMCPServer {
         tools: [
           {
             name: "get_printer_status",
-            description: "Get the current status of the Bambu Lab printer",
+            description: "Get the current status of the Bambu Lab printer: state, temperatures, print progress, and details (stage, task, print_error and HMS codes, plate, nozzles incl. the hotend rack, AMS trays, external spools, lights). Pass include_raw for the printer's full report.",
             inputSchema: {
               type: "object",
               properties: {
+                include_raw: {
+                  type: "boolean",
+                  description: "Also return the printer's full merged report (raw) and the AMS object as reported (large: ~40k tokens on an H2C). Default false."
+                },
                 host: {
                   type: "string",
                   description: "Hostname or IP address of the printer (default: value from env)"
@@ -3457,9 +3462,17 @@ class BambuPrinterMCPServer {
             });
             break;
           }
-          case "get_printer_status":
-            result = await this.bambu.getStatus(host, bambuSerial, bambuToken);
+          case "get_printer_status": {
+            const status = await this.bambu.getStatus(host, bambuSerial, bambuToken);
+            // The full report is ~40k tokens on an H2C: agents get the summary unless they ask for it.
+            if (status && typeof status === "object" && status.raw && typeof status.raw === "object") {
+              const { raw, ams: _ams, ...rest } = status;
+              result = { ...rest, details: statusDetails(raw), ...(args?.include_raw === true ? { ams: status.ams, raw } : {}) };
+            } else {
+              result = status;
+            }
             break;
+          }
 
           case "get_printer_filaments": {
             const requestedModel = (String(args?.bambu_model ?? DEFAULT_BAMBU_MODEL ?? "")).trim().toLowerCase();
