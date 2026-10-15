@@ -29,8 +29,10 @@ test("cloud control signs in, waits for the server, subscribes once and sends ms
   assert.equal(await bridge.sendPrinterMessage("31BTEST", message), 0);
   assert.deepEqual(calls.map(call => call.method), ["net.is_user_login", "net.is_server_connected", "net.is_server_connected",
     "net.set_on_server_connected_fn", "net.set_on_printer_connected_fn", "net.set_on_subscribe_failure_fn", "net.set_on_message_fn",
-    "net.set_user_selected_machine", "net.start_subscribe", "net.add_subscribe", "bridge.poll_events", "net.send_message"]);
-  const payload = method => calls.find(call => call.method === method).payload;
+    "net.set_user_selected_machine", "net.start_subscribe", "net.add_subscribe", "bridge.poll_events",
+    "net.send_message", "net.send_message", "net.update_cert", "net.install_device_cert", "net.send_message"]);
+  const payload = method => calls.filter(call => call.method === method).at(-1).payload;
+  assert.deepEqual(payload("net.install_device_cert"), { dev_id: "31BTEST", lan_only: false });
   assert.deepEqual(payload("net.set_user_selected_machine"), { dev_id: "31BTEST" });
   assert.deepEqual(payload("net.start_subscribe"), { module: "app" });
   assert.deepEqual(payload("net.add_subscribe"), { devs: ["31BTEST"] });

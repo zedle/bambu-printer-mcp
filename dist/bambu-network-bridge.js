@@ -304,6 +304,18 @@ export class BambuNetworkBridge {
             }
             if (!printerConnected)
                 throw new Error(`Bambu's cloud did not connect to printer ${devId} within 15 seconds; nothing was sent.`);
+            // Firmware 01.08.05+ only takes signed `print`-section commands (pause, resume, stop, clean_print_error, ...).
+            // The plugin signs them once it holds the account's certificate (update_cert) and the printer's
+            // (install_device_cert, as Studio does on connect); before that send_message refuses them with -2.
+            // Studio's on-connect sequence (GUI_App.cpp): request a full push and the version first; the plugin uses the
+            // printer's replies when it installs the device certificate.
+            for (const hello of [{ pushing: { command: "pushall", sequence_id: "0", version: 1, push_target: 1 } }, { info: { command: "get_version", sequence_id: "0" } }]) {
+                assertBridgeOk(await this.callWithAgent("net.send_message", { dev_id: devId, msg: JSON.stringify(hello), qos: 0, flag: 0 }, options), "net.send_message");
+            }
+            assertBridgeOk(await this.callWithAgent("net.update_cert", {}, options), "net.update_cert");
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            assertBridgeOk(await this.callWithAgent("net.install_device_cert", { dev_id: devId, lan_only: false }, options), "net.install_device_cert");
+            await new Promise(resolve => setTimeout(resolve, 3000));
             this.subscribedDevices.add(devId);
         }
         let code = -2;
