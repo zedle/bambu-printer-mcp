@@ -29,6 +29,8 @@ import { existsSync, realpathSync } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { profileJsonFiles } from './profile-files.js';
+import { NOZZLE_MATERIALS, normalizeNozzleFlow } from './extruder-config.js';
+import type { ExtruderNozzle, FilamentSource, ReportedExtruders } from './extruder-config.js';
 
 export type ProfileKind = "machine" | "process" | "filament";
 
@@ -46,6 +48,13 @@ export interface FlattenedProfiles {
     cliConfigValidated: boolean;
     /** Some validated official model configs intentionally have no limits. */
     cliOverlayApplied: boolean;
+    /** Per-extruder settings written into the profiles (Bambu Studio order, left first). */
+    extruders?: {
+      nozzleVolumeType: string[];
+      /** Hotend material per extruder; undefined where its rows disagree or are absent. */
+      nozzleTypes: (string | undefined)[];
+      filamentMap?: number[];
+    };
   };
 }
 
@@ -65,14 +74,30 @@ export interface FlattenOptions {
   /** Vendor subdir under profilesRoot. Currently only "BBL" supported. */
   vendor?: string;
   /**
-   * Override for installed nozzle flow type. The printer reports this on
-   * boot from its physical nozzle scan; both nozzles always match (you
-   * can't mix Standard + High Flow, just like you can't mix 0.2 + 0.4).
+   * Override for installed nozzle flow type, applied to every extruder.
    * If omitted we use `default_nozzle_volume_type` from the profile tree
-   * (= "Standard" on stock BBL machines). Pass "High Flow" when HF
-   * nozzles are installed.
+   * (= "Standard" on stock BBL machines). Use `extruderNozzles` for
+   * printers whose nozzles differ (e.g. H2C: left High Flow, right Standard).
    */
   nozzleVolumeType?: "Standard" | "High Flow";
+  /**
+   * Hotend material for every `nozzle_type` row; per-extruder types from
+   * `extruderNozzles` or `reportedExtruders` win over it.
+   */
+  nozzleType?: string;
+  /**
+   * Per extruder, in Bambu Studio's order (extruder 1 = left on dual-nozzle
+   * printers): diameter (must match the machine preset), flow (must be one
+   * of that extruder's variants in the profile) and hotend material.
+   * Missing fields fall back to `reportedExtruders`, then the profile.
+   */
+  extruderNozzles?: ExtruderNozzle[];
+  /** Fresh printer report (firmware nozzle ids): nozzles and filament feeds. */
+  reportedExtruders?: ReportedExtruders;
+  /** Manual filament -> extruder map: Bambu Studio extruder number (1-based) per filament slot. */
+  filamentMap?: number[];
+  /** Where each filament slot is loaded from; checked against the report's feeds. */
+  filamentSources?: FilamentSource[];
   /** BambuStudio display name, e.g. "Textured PEI Plate" or "Cool Plate". */
   bedType?: string;
   /** Actual input configs, including user overrides on top of BBL parents. */
@@ -273,10 +298,9 @@ function applyIncludes(
  * (or the value reported by the printer's nozzle scan on boot) into the
  * former at runtime. We do the same.
  *
- * Shape: array of strings, one entry per physical nozzle. Hardware
- * invariant from Bambu: BOTH nozzles must match (same diameter, same
- * flow type) -- you cannot install 0.2 + 0.4, and you cannot install
- * Standard + High Flow. So the array always contains identical entries.
+ * Shape: array of strings, one entry per extruder, left first. Entries may
+ * differ on dual-nozzle printers (H2C: ["High Flow", "Standard"]);
+ * validateNozzleVolumeTypes checks each against that extruder's variants.
  *
  * Verified against a GUI-sliced H2D project_settings.config:
  *   ["High Flow", "High Flow"]   (dual-nozzle, HF installed)
@@ -288,6 +312,7 @@ function applyIncludes(
  *   2. Existing `nozzle_volume_type` already in the flattened profile.
  *   3. `default_nozzle_volume_type` from the profile tree.
  *   4. ["Standard"] x extruder count.
+ * Per-extruder `extruderNozzles` / `reportedExtruders` are applied on top.
  */
 function deriveNozzleVolumeType(
   flat: Record<string, unknown>,
@@ -299,14 +324,10 @@ function deriveNozzleVolumeType(
     return;
   }
 
-  if (Array.isArray(flat["nozzle_volume_type"])) {
-    enforceMatchingNozzles(flat["nozzle_volume_type"] as unknown[]);
-    return;
-  }
+  if (Array.isArray(flat["nozzle_volume_type"])) return;
 
   const def = flat["default_nozzle_volume_type"];
   if (Array.isArray(def) && def.every((v) => typeof v === "string")) {
-    enforceMatchingNozzles(def);
     flat["nozzle_volume_type"] = [...def];
     return;
   }
@@ -315,24 +336,268 @@ function deriveNozzleVolumeType(
   flat["nozzle_volume_type"] = Array(extruderCount).fill("Standard");
 }
 
+const extruderLabel = (index: number, count: number) =>
+  count === 2 ? `${index === 0 ? "left" : "right"} nozzle (extruder ${index + 1})` : `extruder ${index + 1}`;
+
+/** Each extruder's nozzle variants, e.g. ["Direct Drive Standard", "Direct Drive High Flow"]. */
+function extruderVariants(flat: Record<string, unknown>, count: number): string[][] | undefined {
+  const lists = flat["extruder_variant_list"];
+  if (!Array.isArray(lists) || lists.length !== count || lists.some(list => typeof list !== "string")) return undefined;
+  return (lists as string[]).map(list => list.split(",").map(v => v.trim()).filter(Boolean));
+}
+
+function extruderTypeAt(flat: Record<string, unknown>, index: number): string {
+  const types = flat["extruder_type"];
+  return Array.isArray(types) && typeof types[index] === "string" ? types[index] : "Direct Drive";
+}
+
 /**
- * Hardware invariant: all nozzles on a Bambu printer have identical flow
- * type (and diameter). If a profile somehow declares mixed types it's
- * either bad input or a future mistake -- fail loud so we don't ship
- * gcode that could damage the printer.
+ * Every `nozzle_volume_type` entry must be a nozzle variant its extruder has
+ * in the machine profile (`extruder_variant_list` with `extruder_type`), so a
+ * combination the profiles don't define fails before the CLI. A profile
+ * without per-extruder variants can only take matching entries. `strict`
+ * (per-extruder options given) also checks matching entries.
  */
-function enforceMatchingNozzles(arr: unknown[]): void {
-  if (arr.length <= 1) return;
-  const first = arr[0];
-  for (let i = 1; i < arr.length; i++) {
-    if (arr[i] !== first) {
+function validateNozzleVolumeTypes(flat: Record<string, unknown>, strict: boolean): void {
+  const arr = flat["nozzle_volume_type"];
+  if (!Array.isArray(arr)) return;
+  // Without per-extruder options, matching entries keep the profile's long-standing behaviour.
+  if (!strict && new Set(arr).size <= 1) return;
+  const count = inferExtruderCount(flat);
+  const variants = extruderVariants(flat, count);
+  const preset = String(flat["name"] ?? "the machine preset");
+  if (!variants || arr.length !== count) {
+    if (strict && arr.length !== count) {
+      throw new Error(`"${preset}" has ${count} extruder(s) but ${arr.length} nozzle_volume_type entries.`);
+    }
+    if (new Set(arr).size > 1) {
       throw new Error(
-        `nozzle_volume_type entries must all match (Bambu hardware invariant). ` +
-          `Got: ${JSON.stringify(arr)}. ` +
-          `Both nozzles on H2-series printers always have identical flow type.`
+        `nozzle_volume_type entries must all match: "${preset}" lists no per-extruder nozzle variants, ` +
+          `so mixed flow types (${JSON.stringify(arr)}) cannot be checked against the profile.`
       );
     }
+    return;
   }
+  arr.forEach((flow, i) => {
+    const variant = `${extruderTypeAt(flat, i)} ${String(flow)}`;
+    if (!variants[i].includes(variant)) {
+      const offered = variants[i].map(v => v.replace(`${extruderTypeAt(flat, i)} `, "")).join(", ");
+      throw new Error(
+        `The ${extruderLabel(i, count)} of "${preset}" has no "${String(flow)}" nozzle in the Bambu Studio profiles; ` +
+          `it offers: ${offered}.`
+      );
+    }
+  });
+}
+
+/** Logical (Bambu Studio) extruder i -> firmware nozzle id. */
+function physicalExtruderMap(flat: Record<string, unknown>, count: number): number[] {
+  const raw = flat["physical_extruder_map"];
+  if (Array.isArray(raw) && raw.length === count) {
+    const ids = raw.map(Number);
+    if (ids.every(id => Number.isInteger(id) && id >= 0 && id < count) && new Set(ids).size === count) return ids;
+    throw new Error(`Malformed physical_extruder_map ${JSON.stringify(raw)} in "${String(flat["name"])}".`);
+  }
+  return Array.from({ length: count }, (_, i) => i);
+}
+
+/**
+ * Apply per-extruder nozzles and a manual filament map to the flattened
+ * profiles, refusing combinations the profiles or the printer's feeds don't
+ * allow. Returns what was written, for diagnostics.
+ */
+function applyExtruderSetup(
+  machineFlat: Record<string, unknown>,
+  processFlat: Record<string, unknown>,
+  filamentFlats: Record<string, unknown>[],
+  filamentLeaves: string[],
+  opts: FlattenOptions
+): FlattenedProfiles["meta"]["extruders"] {
+  const count = inferExtruderCount(machineFlat);
+  const preset = String(machineFlat["name"] ?? "the machine preset");
+  const physical = physicalExtruderMap(machineFlat, count);
+  const reported = opts.reportedExtruders;
+  const explicit = opts.extruderNozzles;
+  if (explicit && explicit.length !== count) {
+    throw new Error(
+      `"${preset}" has ${count} extruder(s); nozzles lists ${explicit.length}. ` +
+        (count === 2 ? "Give [left, right]." : "Give one entry.")
+    );
+  }
+  if (reported && reported.nozzles.length !== count) {
+    throw new Error(`The printer reports ${reported.nozzles.length} mounted nozzle(s), but "${preset}" has ${count} extruder(s).`);
+  }
+
+  // Merge: explicit field > printer report > uniform nozzleType > profile.
+  const nozzles = Array.from({ length: count }, (_, i) => {
+    const fromReport = reported?.nozzles.find(n => n.physical === physical[i]);
+    if (reported && !fromReport) throw new Error(`The printer report has no nozzle ${physical[i]} for the ${extruderLabel(i, count)}.`);
+    const flow = explicit?.[i]?.flow ?? fromReport?.flow;
+    if (reported && !flow) {
+      throw new Error(`The printer did not report a known flow type for the ${extruderLabel(i, count)}; give it in nozzles.`);
+    }
+    return {
+      diameter: explicit?.[i]?.diameter ?? fromReport?.diameter,
+      flow,
+      type: explicit?.[i]?.type ?? fromReport?.type ?? opts.nozzleType,
+    };
+  });
+
+  const diameters = machineFlat["nozzle_diameter"];
+  nozzles.forEach((nozzle, i) => {
+    if (nozzle.diameter === undefined) return;
+    const profile = Array.isArray(diameters) ? Number(diameters[i]) : NaN;
+    if (!Number.isFinite(profile) || Math.abs(profile - nozzle.diameter) > 0.0001) {
+      throw new Error(
+        `The ${extruderLabel(i, count)} has a ${nozzle.diameter} mm nozzle, but "${preset}" is for ${Array.isArray(diameters) ? String(diameters[i]) : "an unknown"} mm. ` +
+          `Bambu Studio has no machine preset that mixes nozzle diameters; slice for the diameter both nozzles share.`
+      );
+    }
+  });
+
+  if (nozzles.some(n => n.flow)) {
+    const current = Array.isArray(machineFlat["nozzle_volume_type"]) ? machineFlat["nozzle_volume_type"] as unknown[] : [];
+    machineFlat["nozzle_volume_type"] = nozzles.map((n, i) => n.flow ? normalizeNozzleFlow(n.flow) : String(current[i] ?? "Standard"));
+  }
+  validateNozzleVolumeTypes(machineFlat, true);
+
+  // nozzle_type has one row per hotend variant; printer_extruder_id (1-based) owns each row.
+  if (nozzles.some(n => n.type)) {
+    for (const n of nozzles) {
+      if (n.type && !(NOZZLE_MATERIALS as readonly string[]).includes(n.type)) {
+        throw new Error(`Unknown nozzle type "${n.type}". Valid types: ${NOZZLE_MATERIALS.join(", ")}.`);
+      }
+    }
+    const rows = machineFlat["nozzle_type"];
+    const owners = machineFlat["printer_extruder_id"];
+    if (Array.isArray(rows) && Array.isArray(owners) && owners.length === rows.length) {
+      machineFlat["nozzle_type"] = rows.map((row, r) => {
+        const extruder = Number(owners[r]) - 1;
+        if (!Number.isInteger(extruder) || extruder < 0 || extruder >= count) {
+          throw new Error(`Malformed printer_extruder_id ${JSON.stringify(owners)} in "${preset}".`);
+        }
+        return nozzles[extruder].type ?? row;
+      });
+    } else if (count === 1) {
+      const type = nozzles[0].type!;
+      machineFlat["nozzle_type"] = Array.isArray(rows) && rows.length > 0 ? rows.map(() => type) : [type];
+    } else if (Array.isArray(rows) && rows.length === count) {
+      machineFlat["nozzle_type"] = rows.map((row, i) => nozzles[i].type ?? row);
+    } else {
+      throw new Error(`"${preset}" has no printer_extruder_id rows to place per-extruder nozzle types.`);
+    }
+  }
+
+  const filamentMap = resolveFilamentMap(machineFlat, filamentFlats, filamentLeaves, physical, opts);
+  if (filamentMap && count > 1) {
+    processFlat["filament_map_mode"] = "Manual";
+    processFlat["filament_map"] = filamentMap.map(String);
+  }
+
+  const rows = Array.isArray(machineFlat["nozzle_type"]) ? machineFlat["nozzle_type"] as unknown[] : [];
+  const owners = Array.isArray(machineFlat["printer_extruder_id"]) ? machineFlat["printer_extruder_id"] as unknown[] : [];
+  return {
+    nozzleVolumeType: (machineFlat["nozzle_volume_type"] as unknown[]).map(String),
+    nozzleTypes: Array.from({ length: count }, (_, i) => {
+      const own = owners.length === rows.length ? rows.filter((_, r) => Number(owners[r]) === i + 1) : count === 1 ? rows : [rows[i]];
+      return own.length > 0 && own.every(t => t === own[0]) && typeof own[0] === "string" ? own[0] : undefined;
+    }),
+    ...(filamentMap && count > 1 ? { filamentMap } : {}),
+  };
+}
+
+/** The filament -> extruder map, checked against feeds, filament variants and unprintable types. */
+function resolveFilamentMap(
+  machineFlat: Record<string, unknown>,
+  filamentFlats: Record<string, unknown>[],
+  filamentLeaves: string[],
+  physical: number[],
+  opts: FlattenOptions
+): number[] | undefined {
+  const count = physical.length;
+  const slots = filamentFlats.length;
+  const { filamentMap, filamentSources: sources, reportedExtruders: reported } = opts;
+  if (filamentMap && filamentMap.length !== slots) {
+    throw new Error(`filament_map lists ${filamentMap.length} extruder(s) for ${slots} filament slot(s); give one per slot.`);
+  }
+  if (sources && sources.length !== slots) {
+    throw new Error(`filament_sources lists ${sources.length} source(s) for ${slots} filament slot(s); give one per slot.`);
+  }
+  filamentMap?.forEach((extruder, slot) => {
+    if (!Number.isInteger(extruder) || extruder < 1 || extruder > count) {
+      throw new Error(
+        `filament_map[${slot}] = ${extruder}: "${String(machineFlat["name"])}" has ` +
+          (count === 2 ? "extruders 1 (left) and 2 (right)." : `${count} extruder(s).`)
+      );
+    }
+  });
+  if (count === 1) return filamentMap;
+
+  // Which extruders can each slot's source reach? undefined = the report doesn't say.
+  const toLogical = (ids: number[]) => ids.map(id => physical.indexOf(id) + 1).filter(n => n > 0);
+  const reach = sources?.map((source, slot): { all: number[]; preferred: number[] } | undefined => {
+    if (!reported) {
+      throw new Error("filament_sources needs the printer's report (nozzles_from_printer) to know which nozzle each AMS and spool holder feeds.");
+    }
+    if (source.kind === "external") {
+      if (reported.external.length === 0) throw new Error(`Filament ${slot + 1} is set to the external spool, but the printer reports no external spool holder.`);
+      const all = toLogical(reported.external.map(h => h.physical));
+      const loaded = toLogical(reported.external.filter(h => h.loaded).map(h => h.physical));
+      return { all, preferred: loaded.length ? loaded : all };
+    }
+    const units = source.unit === undefined ? reported.ams : reported.ams.filter(u => u.unit === source.unit);
+    if (units.length === 0) {
+      throw new Error(source.unit === undefined
+        ? `Filament ${slot + 1} is set to the AMS, but the printer reports no AMS.`
+        : `Filament ${slot + 1} is set to AMS unit ${source.unit}, which is not in the printer report.`);
+    }
+    if (units.some(u => !u.physical)) return undefined;
+    const all = [...new Set(toLogical(units.flatMap(u => u.physical!)))].sort();
+    return { all, preferred: all };
+  });
+
+  let map = filamentMap;
+  if (!map && reach) {
+    if (reach.some(r => !r || r.preferred.length !== 1)) {
+      throw new Error(
+        "Cannot tell which nozzle every filament should print with from the printer's feeds; give filament_map " +
+          "(1 = left, 2 = right per filament slot)."
+      );
+    }
+    map = reach.map(r => r!.preferred[0]);
+  }
+  if (!map) return undefined;
+
+  map.forEach((extruder, slot) => {
+    const r = reach?.[slot];
+    const source = sources?.[slot];
+    if (r && source && !r.all.includes(extruder)) {
+      const where = source.kind === "external" ? "the external spool holder"
+        : source.unit === undefined ? "the AMS" : `AMS unit ${source.unit}`;
+      throw new Error(
+        `Filament ${slot + 1} comes from ${where}, which feeds only the ${r.all.map(e => extruderLabel(e - 1, count)).join(" and ")} on this printer; ` +
+          `it cannot print on the ${extruderLabel(extruder - 1, count)}.`
+      );
+    }
+    const filament = filamentFlats[slot];
+    const type = Array.isArray(filament["filament_type"]) ? String(filament["filament_type"][0] ?? "") : String(filament["filament_type"] ?? "");
+    const unprintable = machineFlat["unprintable_filament_types"];
+    const banned = Array.isArray(unprintable) && typeof unprintable[extruder - 1] === "string"
+      ? (unprintable[extruder - 1] as string).split(",").map(t => t.trim()).filter(Boolean) : [];
+    if (type && banned.includes(type)) {
+      throw new Error(`Filament ${slot + 1} (${type}) cannot print on the ${extruderLabel(extruder - 1, count)}: the machine profile lists ${type} as unprintable there.`);
+    }
+    const variants = filament["filament_extruder_variant"];
+    const nozzleVolume = machineFlat["nozzle_volume_type"];
+    const variant = Array.isArray(nozzleVolume) ? `${extruderTypeAt(machineFlat, extruder - 1)} ${String(nozzleVolume[extruder - 1])}` : undefined;
+    if (variant && Array.isArray(variants) && variants.length > 0 && !variants.includes(variant)) {
+      throw new Error(
+        `Filament profile "${filamentLeaves[slot]}" has no settings for the ${extruderLabel(extruder - 1, count)}'s ${variant} nozzle ` +
+          `(it has: ${variants.join(", ")}).`
+      );
+    }
+  });
+  return map;
 }
 
 /** Best-effort extruder count for fallback nozzle_volume_type sizing. */
@@ -687,6 +952,8 @@ export async function flattenForCli(opts: FlattenOptions): Promise<FlattenedProf
 
   // CLI-specific post-processing on machine profile only.
   deriveNozzleVolumeType(machineFlat, opts.nozzleVolumeType);
+  const extruderSetup = hasExtruderSetup(opts);
+  if (!extruderSetup) validateNozzleVolumeTypes(machineFlat, false);
   applyMachineModelBedMetadata(machineFlat, machineIndex);
   // A standalone custom machine can accompany process/filament profiles that
   // need BBL resolution; do not impose bundled model config on that machine.
@@ -710,6 +977,9 @@ export async function flattenForCli(opts: FlattenOptions): Promise<FlattenedProf
   }
   filamentFlats.forEach((f, i) => ensureFilamentColour(f, opts.filamentColours?.[i]));
   applyBedType(processFlat, opts.bedType);
+  const extruders = extruderSetup
+    ? applyExtruderSetup(machineFlat, processFlat, filamentFlats, opts.filamentLeaves, opts)
+    : undefined;
   if (processFlat["wipe_tower_x"] === undefined && processFlat["wipe_tower_y"] === undefined) {
     Object.assign(processFlat, opts.projectTowerPosition);
   }
@@ -746,8 +1016,14 @@ export async function flattenForCli(opts: FlattenOptions): Promise<FlattenedProf
       filamentLeafNames: opts.filamentLeaves,
       cliConfigValidated,
       cliOverlayApplied,
+      ...(extruders ? { extruders } : {}),
     },
   };
+}
+
+/** Whether per-extruder nozzle or filament-map settings were requested. */
+export function hasExtruderSetup(opts: Pick<FlattenOptions, "extruderNozzles" | "reportedExtruders" | "filamentMap" | "filamentSources">): boolean {
+  return Boolean(opts.extruderNozzles || opts.reportedExtruders || opts.filamentMap || opts.filamentSources);
 }
 
 async function writeTemp(

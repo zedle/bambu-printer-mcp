@@ -127,7 +127,8 @@ function nozzleTypeAndFlow(value) {
     const type = token(value);
     return { type: ["stainlesssteel", "hardenedsteel", "tungstencarbide", "brass"].includes(type) ? type : undefined };
 }
-function reportedNozzles(raw) {
+/** Mounted (non-rack) nozzles from a raw report, by firmware id. */
+export function reportedNozzles(raw) {
     const info = raw.device?.nozzle?.info;
     const output = [];
     if (Array.isArray(info)) {

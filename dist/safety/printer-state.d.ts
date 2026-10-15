@@ -18,7 +18,7 @@ export interface PrinterStateRequirements {
     nozzleTypes?: string[];
     nozzleFlows?: string[];
 }
-interface ReportedNozzle {
+export interface ReportedNozzle {
     index: number;
     diameter: number;
     type?: string;
@@ -37,6 +37,8 @@ export interface ValidatedPrinterState {
     filaments: ReportedFilament[];
     hmsWarnings: string[];
 }
+/** Mounted (non-rack) nozzles from a raw report, by firmware id. */
+export declare function reportedNozzles(raw: Record<string, any>): ReportedNozzle[];
 /** Verifies reported configuration, not a physical nozzle/spool inspection. */
 export declare function validatePrinterState(status: any, requirements: PrinterStateRequirements): ValidatedPrinterState;
 /** Manual M104 cannot remap filament slots. Validate the material already at the nozzle. */

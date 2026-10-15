@@ -524,7 +524,7 @@ test("machine-model bed metadata is copied onto flattened machine profile", asyn
   assert.equal(machine.not_support_bed_type, "Cool Plate");
 });
 
-test("mismatched nozzle_volume_type entries throw (hardware invariant)", async () => {
+test("mismatched nozzle_volume_type entries throw when the profile lists no per-extruder variants", async () => {
   const { root, bbl } = await makeSyntheticTree();
 
   await writeProfile(bbl, "machine", {
@@ -532,7 +532,7 @@ test("mismatched nozzle_volume_type entries throw (hardware invariant)", async (
     inherits: null,
     instantiation: "true",
     nozzle_diameter: ["0.4", "0.4"],
-    nozzle_volume_type: ["Standard", "High Flow"], // illegal: must match
+    nozzle_volume_type: ["Standard", "High Flow"], // no extruder_variant_list to check the mix against
   });
   await writeProfile(bbl, "process", { name: "p", inherits: null });
   await writeProfile(bbl, "filament", { name: "f", inherits: null });
@@ -545,7 +545,7 @@ test("mismatched nozzle_volume_type entries throw (hardware invariant)", async (
       profilesRoot: root,
       tempDir: os.tmpdir(),
     }),
-    /must all match.*hardware invariant/i
+    /must all match.*no per-extruder nozzle variants/i
   );
 });
 
@@ -635,7 +635,7 @@ test("end-to-end: H2D matches GUI-sliced ground-truth shape for nozzle_volume_ty
     "nozzle_volume_type length must match GUI output"
   );
 
-  // Both entries identical (hardware invariant).
+  // Both entries identical (the stock default).
   assert.equal(
     new Set(flat.nozzle_volume_type).size,
     1,

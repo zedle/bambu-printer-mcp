@@ -114,7 +114,7 @@ export interface PrinterStateRequirements {
   nozzleTypes?: string[];
   nozzleFlows?: string[];
 }
-interface ReportedNozzle { index: number; diameter: number; type?: string; flow?: string }
+export interface ReportedNozzle { index: number; diameter: number; type?: string; flow?: string }
 interface ReportedFilament { position: number; material: string; trayIndex: number; nozzleMin?: number; nozzleMax?: number }
 export interface ValidatedPrinterState { model: string; reportedNozzles: ReportedNozzle[]; filaments: ReportedFilament[]; hmsWarnings: string[] }
 
@@ -135,7 +135,8 @@ function nozzleTypeAndFlow(value: unknown): {type?: string; flow?: string} {
   const type = token(value);
   return {type: ["stainlesssteel","hardenedsteel","tungstencarbide","brass"].includes(type) ? type : undefined};
 }
-function reportedNozzles(raw: Record<string,any>): ReportedNozzle[] {
+/** Mounted (non-rack) nozzles from a raw report, by firmware id. */
+export function reportedNozzles(raw: Record<string,any>): ReportedNozzle[] {
   const info = raw.device?.nozzle?.info;
   const output: ReportedNozzle[] = [];
   if (Array.isArray(info)) {

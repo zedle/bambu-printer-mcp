@@ -46,6 +46,11 @@ import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
+import {
+  NOZZLE_FLOWS, NOZZLE_MATERIALS, extrudersFromReport, parseExtruderNozzlesArg, parseFilamentMapArg,
+  parseFilamentSourcesArg, sliceNozzleDiameter,
+} from "./slicer/extruder-config.js";
+import { normalizeModel } from "./safety/limits.js";
 
 dotenv.config();
 
@@ -1242,6 +1247,46 @@ class BambuPrinterMCPServer {
   }
 
   /**
+   * Per-extruder slicing arguments (nozzles, filament_map, filament_sources,
+   * nozzles_from_printer) and the single machine-preset diameter they imply.
+   * The printer is read only when nozzles_from_printer is true.
+   */
+  private async resolveSliceExtruders(
+    args: Record<string, unknown> | undefined,
+    sliceModel: string,
+    host: string,
+    bambuSerial: string,
+    bambuToken: string
+  ): Promise<{ nozzleDiameter: string; options: Partial<BambuSliceOptions> }> {
+    const extruderNozzles = parseExtruderNozzlesArg(args?.nozzles);
+    const filamentMap = parseFilamentMapArg(args?.filament_map);
+    const filamentSources = parseFilamentSourcesArg(args?.filament_sources);
+    const fromPrinter = args?.nozzles_from_printer;
+    if (fromPrinter !== undefined && typeof fromPrinter !== "boolean") throw new Error("nozzles_from_printer must be true or false.");
+    let reportedExtruders: BambuSliceOptions["reportedExtruders"];
+    if (fromPrinter) {
+      if (!bambuSerial || !bambuToken) {
+        throw new Error("nozzles_from_printer needs the printer's serial and access code (bambu_serial / bambu_token or their env defaults).");
+      }
+      const status = await this.bambu.getSafetyStatus(host, bambuSerial, bambuToken);
+      const reportedModel = normalizeModel(status?.model);
+      if (!reportedModel || reportedModel !== normalizeModel(sliceModel)) {
+        throw new Error(`The printer reports model "${String(status?.model)}", not ${sliceModel}; refusing to slice with its nozzles.`);
+      }
+      reportedExtruders = extrudersFromReport(status.raw);
+    }
+    const explicitDiameter = args?.nozzle_diameter === undefined || args.nozzle_diameter === null || args.nozzle_diameter === ""
+      ? undefined : String(args.nozzle_diameter);
+    const nozzleDiameter = sliceNozzleDiameter(explicitDiameter, extruderNozzles, reportedExtruders) ?? String(DEFAULT_NOZZLE_DIAMETER);
+    const options: Partial<BambuSliceOptions> = {};
+    if (extruderNozzles) options.extruderNozzles = extruderNozzles;
+    if (reportedExtruders) options.reportedExtruders = reportedExtruders;
+    if (filamentMap) options.filamentMap = filamentMap;
+    if (filamentSources) options.filamentSources = filamentSources;
+    return { nozzleDiameter, options };
+  }
+
+  /**
    * Resolve the Bambu printer model from args, env, or by asking the user via elicitation.
    * This is critical for safety: the wrong model can cause physical damage to the printer.
    */
@@ -2387,7 +2432,7 @@ class BambuPrinterMCPServer {
                 },
                 slicer_path: { type: "string", description: "Path to the slicer executable (default: value from env). Per-call overrides require MCP_ALLOW_EXECUTABLE_ARG=1." },
                 slicer_profile: { type: "string", description: "Explicit slicer profile/config file. Overrides the named template only when provided in the tool call." },
-                nozzle_diameter: { type: "string", description: "Nozzle diameter in mm (default: 0.4)" },
+                nozzle_diameter: { type: "string", description: "Nozzle diameter in mm (default: the diameter of nozzles / the printer report, else 0.4)" },
                 bed_type: {
                   type: "string",
                   enum: ["textured_plate", "cool_plate", "engineering_plate", "hot_plate", "supertack_plate"],
@@ -2397,6 +2442,32 @@ class BambuPrinterMCPServer {
                   type: "string",
                   enum: [...VALID_NOZZLE_TYPES],
                   description: "Bambu-compatible slicing: the hotend nozzle material installed on the printer (default: BAMBU_NOZZLE_TYPE, else the model preset's stock nozzle, usually stainless_steel). Printing compares it with the printer's reported nozzle."
+                },
+                nozzles: {
+                  type: "array",
+                  minItems: 1,
+                  maxItems: 2,
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      diameter: { type: "number", description: "Nozzle diameter in mm; must be the same on both extruders (Bambu Studio has one machine preset per diameter)." },
+                      flow: { type: "string", enum: [...NOZZLE_FLOWS], description: "Nozzle flow type; must be one of this extruder's variants in the Bambu Studio profiles." },
+                      type: { type: "string", enum: [...NOZZLE_MATERIALS], description: "Hotend material." }
+                    }
+                  },
+                  description: "Per-extruder nozzles in Bambu Studio's extruder order: [left, right] on dual-nozzle printers (H2D, H2C, X2D), one entry otherwise. Example for an H2C with a left tungsten carbide High Flow and a right hardened steel Standard: [{\"flow\":\"High Flow\",\"type\":\"tungsten_carbide\"},{\"flow\":\"Standard\",\"type\":\"hardened_steel\"}]. Fields left out come from nozzles_from_printer, then the machine preset. Combinations the profiles don't have are refused."
+                },
+                nozzles_from_printer: { type: "boolean", description: "Read the mounted nozzles (diameter, flow, material) and the AMS / external spool feeds from a fresh printer report before slicing. Explicit nozzles fields win. Default false." },
+                filament_map: {
+                  type: "array",
+                  items: { anyOf: [{ type: "integer", minimum: 1, maximum: 2 }, { type: "string", enum: ["left", "right"] }] },
+                  description: "Dual-nozzle printers: the extruder each filament slot prints with, in slot order (1 = left, 2 = right), written as Bambu Studio's manual filament map. Example: [2, 1] prints filament 1 on the right nozzle and filament 2 on the left. Without it the slicer groups filaments itself, which may pick a nozzle the filament's AMS or spool can't feed."
+                },
+                filament_sources: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Where each filament slot is loaded from, in slot order: \"ams\", \"ams:<unit id>\" or \"external\". Needs nozzles_from_printer: a filament mapped to a nozzle its AMS or spool holder can't feed is refused, and filament_map is derived when every slot reaches exactly one nozzle (external: the loaded holder)."
                 },
                 use_printer_filaments: { type: "boolean", description: "When true, and no explicit slicer profile or load_filaments override is provided, use the printer's current or first loaded AMS filament as the slicer filament profile." },
                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
@@ -2442,7 +2513,7 @@ class BambuPrinterMCPServer {
                 template_3mf_path: { type: "string", description: "Optional template 3MF whose embedded Bambu slicer settings should be reused when slicing a new STL or 3MF." },
                 template_name: { type: "string", description: "Optional named template from the local registry. Resolves to template_3mf_path automatically." },
                 template_dir: { type: "string", description: "Optional template directory override when resolving template_name." },
-                nozzle_diameter: { type: "string", description: "Nozzle diameter in mm (default: 0.4)" },
+                nozzle_diameter: { type: "string", description: "Nozzle diameter in mm (default: the diameter of nozzles / the printer report, else 0.4)" },
                 bed_type: {
                   type: "string",
                   enum: ["textured_plate", "cool_plate", "engineering_plate", "hot_plate", "supertack_plate"],
@@ -2452,6 +2523,32 @@ class BambuPrinterMCPServer {
                   type: "string",
                   enum: [...VALID_NOZZLE_TYPES],
                   description: "Bambu-compatible slicing: the hotend nozzle material installed on the printer (default: BAMBU_NOZZLE_TYPE, else the model preset's stock nozzle, usually stainless_steel). Printing compares it with the printer's reported nozzle."
+                },
+                nozzles: {
+                  type: "array",
+                  minItems: 1,
+                  maxItems: 2,
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      diameter: { type: "number", description: "Nozzle diameter in mm; must be the same on both extruders (Bambu Studio has one machine preset per diameter)." },
+                      flow: { type: "string", enum: [...NOZZLE_FLOWS], description: "Nozzle flow type; must be one of this extruder's variants in the Bambu Studio profiles." },
+                      type: { type: "string", enum: [...NOZZLE_MATERIALS], description: "Hotend material." }
+                    }
+                  },
+                  description: "Per-extruder nozzles in Bambu Studio's extruder order: [left, right] on dual-nozzle printers (H2D, H2C, X2D), one entry otherwise. Example for an H2C with a left tungsten carbide High Flow and a right hardened steel Standard: [{\"flow\":\"High Flow\",\"type\":\"tungsten_carbide\"},{\"flow\":\"Standard\",\"type\":\"hardened_steel\"}]. Fields left out come from nozzles_from_printer, then the machine preset. Combinations the profiles don't have are refused."
+                },
+                nozzles_from_printer: { type: "boolean", description: "Read the mounted nozzles (diameter, flow, material) and the AMS / external spool feeds from a fresh printer report before slicing. Explicit nozzles fields win. Default false." },
+                filament_map: {
+                  type: "array",
+                  items: { anyOf: [{ type: "integer", minimum: 1, maximum: 2 }, { type: "string", enum: ["left", "right"] }] },
+                  description: "Dual-nozzle printers: the extruder each filament slot prints with, in slot order (1 = left, 2 = right), written as Bambu Studio's manual filament map. Example: [2, 1] prints filament 1 on the right nozzle and filament 2 on the left. Without it the slicer groups filaments itself, which may pick a nozzle the filament's AMS or spool can't feed."
+                },
+                filament_sources: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Where each filament slot is loaded from, in slot order: \"ams\", \"ams:<unit id>\" or \"external\". Needs nozzles_from_printer: a filament mapped to a nozzle its AMS or spool holder can't feed is refused, and filament_map is derived when every slot reaches exactly one nozzle (external: the loaded holder)."
                 },
                 use_printer_filaments: { type: "boolean", description: "When true, and no explicit slicer profile or load_filaments override is provided, use the printer's current or first loaded AMS filament as the slicer filament profile. Template 3MF process settings can still be used at the same time." },
                 uptodate: { type: "boolean", description: "Refresh 3MF preset configs to match the latest BambuStudio version. Use when slicing downloaded or older 3MF files to prevent stale-config failures." },
@@ -3838,7 +3935,9 @@ class BambuPrinterMCPServer {
               "slice_with_template"
             );
             const sliceModel = await this.resolveBambuModel(args?.bambu_model as string | undefined);
-            const nozzleDiam = String(args?.nozzle_diameter || DEFAULT_NOZZLE_DIAMETER);
+            const sliceExtruders = await this.resolveSliceExtruders(
+              args as Record<string, unknown> | undefined, sliceModel, host, bambuSerial, bambuToken);
+            const nozzleDiam = sliceExtruders.nozzleDiameter;
             const activeSlicerProfile = await resolveTemplateFirstSlicerProfilePath(
               args,
               slicerProfile || undefined,
@@ -3872,6 +3971,7 @@ class BambuPrinterMCPServer {
             if (args?.filament_colours !== undefined) sliceBambuOptions.filamentColours = parseFilamentColours(String(args.filament_colours));
             sliceBambuOptions.bedType = resolveBambuStudioCliBedType(args?.bed_type as string | undefined);
             sliceBambuOptions.nozzleType = resolveNozzleType(args?.nozzle_type);
+            Object.assign(sliceBambuOptions, sliceExtruders.options);
             if (args?.enable_timelapse !== undefined) sliceBambuOptions.enableTimelapse = Boolean(args.enable_timelapse);
             if (args?.allow_mix_temp !== undefined) sliceBambuOptions.allowMixTemp = Boolean(args.allow_mix_temp);
             if (args?.scale !== undefined) sliceBambuOptions.scale = Number(args.scale);
@@ -3925,7 +4025,9 @@ class BambuPrinterMCPServer {
               "slice_stl"
             );
             const sliceModel = await this.resolveBambuModel(args?.bambu_model as string | undefined);
-            const nozzleDiam = String(args?.nozzle_diameter || DEFAULT_NOZZLE_DIAMETER);
+            const sliceExtruders = await this.resolveSliceExtruders(
+              args as Record<string, unknown> | undefined, sliceModel, host, bambuSerial, bambuToken);
+            const nozzleDiam = sliceExtruders.nozzleDiameter;
             const activeSlicerProfile = await resolveSlicerProfilePath(
               slicerProfile || undefined,
               resolveTemplatePathFromName(["json", "config", "3mf"]) || explicitTemplatePath || undefined,
@@ -3959,6 +4061,7 @@ class BambuPrinterMCPServer {
             if (args?.filament_colours !== undefined) sliceBambuOptions.filamentColours = parseFilamentColours(String(args.filament_colours));
             sliceBambuOptions.bedType = resolveBambuStudioCliBedType(args?.bed_type as string | undefined);
             sliceBambuOptions.nozzleType = resolveNozzleType(args?.nozzle_type);
+            Object.assign(sliceBambuOptions, sliceExtruders.options);
             if (args?.enable_timelapse !== undefined) sliceBambuOptions.enableTimelapse = Boolean(args.enable_timelapse);
             if (args?.allow_mix_temp !== undefined) sliceBambuOptions.allowMixTemp = Boolean(args.allow_mix_temp);
             if (args?.scale !== undefined) sliceBambuOptions.scale = Number(args.scale);
