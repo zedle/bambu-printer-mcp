@@ -745,3 +745,27 @@ test('multi-nozzle machines get a prime tower every nozzle can reach', async t =
   const noTower = await flattenForCli({ ...opts, sourceProfiles: { process: { name: 'No tower', inherits: 'SAFETY process', enable_prime_tower: '0' } } });
   assert.deepEqual(await tower(noTower), [undefined, undefined]);
 });
+
+const twoPartKeychain = new URL('../fixtures/models/two-part-keychain.3mf', import.meta.url).pathname;
+
+test('a 3MF without a project filament list gets one slot per filament its parts use', async t => {
+  const f = await fixture(t);
+  // Parts assigned to filaments 1 and 2 in model_settings.config; no project_settings.config.
+  await f.slice({ filamentColours: ['#161616', '#76D9F4'] }, undefined, twoPartKeychain);
+  const loaded = await f.loaded();
+  assert.equal(loaded.length, 2);
+  const colours = await Promise.all(loaded.map(async file => JSON.parse(await fs.readFile(file, 'utf8')).filament_colour));
+  assert.deepEqual(colours, [['#161616'], ['#76D9F4']]);
+});
+
+test('a 3MF part assignment beyond the supplied profiles is refused before slicing', async t => {
+  const f = await fixture(t);
+  const zip = await JSZip.loadAsync(await fs.readFile(twoPartKeychain));
+  zip.file('Metadata/model_settings.config', (await zip.file('Metadata/model_settings.config').async('string')).replace('value="2"', 'value="3"'));
+  const input = path.join(f.root, 'three.3mf');
+  await fs.writeFile(input, await zip.generateAsync({ type: 'nodebuffer' }));
+  await assert.rejects(f.slice({ loadFilaments: `${f.filament};${f.filament}` }, undefined, input), /filaments 1 to 3/);
+  await assert.rejects(fs.access(f.capture), { code: 'ENOENT' });
+  await f.slice({}, undefined, input);
+  assert.equal((await f.loaded()).length, 3);
+});

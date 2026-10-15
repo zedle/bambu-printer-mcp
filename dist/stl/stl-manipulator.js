@@ -11,6 +11,7 @@ import * as crypto from 'crypto';
 import { execFile } from 'child_process';
 import { flattenForCli, detectProfilesRoot, resolveBblMachineProfile, hasExtruderSetup } from '../slicer/profile-flatten.js';
 import { profileJsonFiles } from '../slicer/profile-files.js';
+import { highestModelFilamentSlot } from '../slicer/model-filaments.js';
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
 const BAMBU_PROFILE_ROOTS = [
@@ -489,9 +490,16 @@ export class STLManipulator extends EventEmitter {
         const JSZip = (await import('jszip')).default;
         const zip = await JSZip.loadAsync(await fs.promises.readFile(inputPath));
         const file = zip.file('Metadata/project_settings.config');
-        // Geometry-only 3MFs have no embedded filament slots.
-        if (!file)
-            return bundle;
+        if (!file) {
+            // No project filament list: the model's own assignments (parts, objects, layer ranges, paint) say how many
+            // slots it uses, as Bambu Studio counts them when it opens such a file. One profile fills every slot.
+            const used = await highestModelFilamentSlot(zip);
+            if (used <= bundle.filamentPaths.length)
+                return bundle;
+            if (bundle.filamentPaths.length === 1)
+                return { ...bundle, filamentPaths: Array(used).fill(bundle.filamentPaths[0]) };
+            throw new Error(`The model assigns filaments 1 to ${used}, but ${bundle.filamentPaths.length} profiles were supplied. Provide one profile for all slots or one per slot.`);
+        }
         const config = JSON.parse(await file.async('string'));
         if (!config || typeof config !== 'object' || Array.isArray(config)) {
             throw new Error('Cannot determine project filament slots: invalid project_settings.config.');
