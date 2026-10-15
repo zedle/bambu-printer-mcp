@@ -9,7 +9,7 @@ import { readSafe3mfArchive } from "../safety/archive.js";
 import { inspectPrintFile, type PrintFileInspection } from "../safety/print-file.js";
 import { normalizeModel, validateTemperature } from "../safety/limits.js";
 import { validatePrinterState, manualHeatingRequirements, type PrinterStateRequirements } from "../safety/printer-state.js";
-import { DEPUTY_EXTRUDER_ID, MAIN_EXTRUDER_ID, externalSpoolMapping, extruderCount, isExternalTray } from "../safety/models.js";
+import { DEPUTY_EXTRUDER_ID, MAIN_EXTRUDER_ID, externalSpoolMapping, extruderCount, isExternalTray, printerTypeModel } from "../safety/models.js";
 import { normalizeBridgeAmsTrayValue, studioTrayMapping } from "../ams-mapping.js";
 import { assertBedSupported, studioBedType, studioPrintOptions, usedExtruderCount, usedFilamentTypes } from "./print-options.js";
 import { assertNoFilamentAtToolhead, controlProtocol, fanCommand, rfidCommand, temperatureCommand, type ControlCommand } from "./control-commands.js";
@@ -66,21 +66,6 @@ function dispatchCheckMs(): number {
   return Number.isInteger(value) && value >= 0 && value <= 60_000 ? value : 15_000;
 }
 
-const MODEL_ID_TO_NAME: Record<string, string> = {
-  O1C: "H2C",
-  O1C2: "H2C",
-  O1D: "H2D",
-  O1E: "H2D Pro",
-  O1S: "H2S",
-  N6: "X2D",
-  N2S: "A1",
-  A1M: "A1 Mini",
-  C11: "P1P",
-  C12: "P1S",
-  "BL-P001": "X1C",
-  "BL-P002": "X1",
-  C13: "X1E",
-};
 
 const H2_MODEL_NAMES = new Set(["h2", "h2c", "h2d", "h2dpro", "h2d pro", "h2s", "x2d"]);
 
@@ -148,9 +133,8 @@ function sleep(ms: number): Promise<void> {
 }
 
 function resolveModelName(data: Record<string, any>): string {
-  const modelId = `${data?.model_id ?? ""}`.toUpperCase();
   return (
-    MODEL_ID_TO_NAME[modelId] ||
+    printerTypeModel(`${data?.model_id ?? ""}`) ||
     data?.model ||
     data?.device?.devModel ||
     data?.device?.dev_model ||
@@ -623,17 +607,32 @@ export class BambuImplementation {
           ? ctcTemperature & 0xffff
           : data.chamber_temper || data.frame_temper || 0;
 
+      // New-protocol printers pack temperatures as current (low 16 bits) and target (high 16 bits) per extruder and for
+      // the bed (BambuStudio ExtderSystemParser::ParseV2_0, DevBed::ParseV2_0); the legacy fields may be absent there.
+      const packed = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xffffffff
+        ? { actual: value & 0xffff, target: value >>> 16 } : undefined;
+      const extruderInfo: any[] = Array.isArray(data.device?.extruder?.info) ? data.device.extruder.info : [];
+      const extruders = extruderInfo.flatMap((entry: any) => {
+        const temperature = packed(entry?.temp);
+        const id = Number(entry?.id);
+        if (!temperature || !Number.isInteger(id)) return [];
+        return [{ id, ...(extruderInfo.length === 2 ? { side: id === 0 ? "right" : "left" } : {}), ...temperature }];
+      });
+      const packedBed = packed(data.device?.bed?.info?.temp);
+      const mainExtruder = extruders.find(entry => entry.id === 0);
+
       return {
         status: data.gcode_state || "UNKNOWN",
         connected: true,
         temperatures: {
           nozzle: {
-            actual: data.nozzle_temper || 0,
-            target: data.nozzle_target_temper || 0,
+            actual: data.nozzle_temper ?? mainExtruder?.actual ?? 0,
+            target: data.nozzle_target_temper ?? mainExtruder?.target ?? 0,
           },
+          ...(extruders.length === 2 ? { nozzles: extruders } : {}),
           bed: {
-            actual: data.bed_temper || 0,
-            target: data.bed_target_temper || 0,
+            actual: data.bed_temper ?? packedBed?.actual ?? 0,
+            target: data.bed_target_temper ?? packedBed?.target ?? 0,
           },
           chamber: chamberTemperature,
         },

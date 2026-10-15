@@ -1,12 +1,8 @@
 import { GetVersionCommand, PushAllCommand } from "bambu-node";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
 import { filamentProhibition } from "./filament-rules.js";
-import { DEPUTY_EXTRUDER_ID, DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
+import { DEPUTY_EXTRUDER_ID, DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, printerTypeModel, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
 const MAX_REPORT_AGE_MS = 15000;
-const MODEL_IDS = {
-    O1C: "H2C", O1C2: "H2C", O1D: "H2D", O1E: "H2D Pro", O1S: "H2S", N6: "X2D",
-    N2S: "A1", A1M: "A1 Mini", C11: "P1P", C12: "P1S", C13: "X1E", "BL-P001": "X1C", "BL-P002": "X1",
-};
 const SERIAL_MODELS = {
     "093": "H2S", "094": "H2D", "31B": "H2C", "239": "H2D Pro", "20P": "X2D",
     "00M": "X1C", "00W": "X1", "03W": "X1E", "01S": "P1P", "01P": "P1S", "22E": "P2S", "039": "A1", "030": "A1 Mini",
@@ -19,12 +15,14 @@ function object(value) {
     return !!value && typeof value === "object" && !Array.isArray(value);
 }
 function observedIdentity(raw, configuredSerial) {
+    // Current firmware reports a cloud model id (e.g. US2856e2270b4bb2) in model_id, which names no printer; only a
+    // Studio printer_type code or a model name there is identity evidence.
     const recognizedModelFromModelId = typeof raw.model_id === "string" && raw.model_id.trim()
-        ? normalizeModel(MODEL_IDS[raw.model_id.trim().toUpperCase()] ?? raw.model_id)
+        ? normalizeModel(printerTypeModel(raw.model_id) ?? raw.model_id)
         : undefined;
     const declarations = [raw.model, raw.printer_type, raw.device?.devModel, raw.device?.dev_model]
         .filter(value => typeof value === "string" && value.trim());
-    const models = declarations.map(value => normalizeModel(MODEL_IDS[value.trim().toUpperCase()] ?? value));
+    const models = declarations.map(value => normalizeModel(printerTypeModel(value) ?? value));
     if (models.some(model => !model))
         throw new Error("Printer reported an unknown model identity; cannot verify this printer.");
     if (recognizedModelFromModelId)

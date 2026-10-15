@@ -78,3 +78,18 @@ export function externalSpoolMapping(model, job) {
     }
     return mapping;
 }
+/** Studio printer_type codes (resources/printers/<code>.json) and the serial prefixes they use. */
+export const PRINTER_TYPES = {
+    O1C: "H2C", O1C2: "H2C", O1D: "H2D", O1E: "H2D Pro", O1S: "H2S", N6: "X2D", N7: "P2S",
+    N2S: "A1", N1: "A1 Mini", A1M: "A1 Mini", C11: "P1P", C12: "P1S", C13: "X1E",
+    "BL-P001": "X1C", "BL-P002": "X1", "3DPRINTER-X1-CARBON": "X1C", "3DPRINTER-X1": "X1",
+};
+/** Studio's printer_type code with an optional hardware revision suffix (e.g. O1D-V2, N7-V2). */
+export function printerTypeModel(value) {
+    const code = value.trim().toUpperCase();
+    return PRINTER_TYPES[code] ?? PRINTER_TYPES[code.replace(/-V\d+$/, "")];
+}
+/** Studio's DevPrinterConfigUtil::get_ftp_folder: "sdcard/" on P1P, P1S, A1, A1 mini (and A2L), empty elsewhere. */
+export function ftpFolder(model) {
+    return ["p1p", "p1s", "a1", "a1mini"].includes(model) ? "sdcard/" : "";
+}

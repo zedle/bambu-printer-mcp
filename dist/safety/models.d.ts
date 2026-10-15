@@ -42,3 +42,9 @@ export declare function externalSpoolMapping(model: string, job: {
     filamentMap?: number[];
     physicalExtruderMap?: number[];
 }): number[];
+/** Studio printer_type codes (resources/printers/<code>.json) and the serial prefixes they use. */
+export declare const PRINTER_TYPES: Readonly<Record<string, string>>;
+/** Studio's printer_type code with an optional hardware revision suffix (e.g. O1D-V2, N7-V2). */
+export declare function printerTypeModel(value: string): string | undefined;
+/** Studio's DevPrinterConfigUtil::get_ftp_folder: "sdcard/" on P1P, P1S, A1, A1 mini (and A2L), empty elsewhere. */
+export declare function ftpFolder(model: string): string;

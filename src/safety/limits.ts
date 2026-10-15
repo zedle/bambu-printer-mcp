@@ -13,17 +13,18 @@
  * P2S: https://blog.bambulab.com/the-icon-redefined-meet-the-p2s-a-completely-reengineered-version-of-the-ultra-productive-p1-series/
  * X2D: https://csm.bblcdn.com/hub/7c58718aaa2e40edab56efb87419a96a.pdf
  * X1-family bed caps use 110 C: 120 C requires verified 110 V supply, unavailable here.
+ * Build heights follow Bambu Studio's machine profiles (printable_height 250 on the P1 and X1 series).
  * A zero chamber cap means no supported active chamber heater, not ambient temperature.
  */
 export const MACHINE_LIMITS: Readonly<Record<string, {nozzle: number; bed: number; chamber: number; volume: readonly number[]}>> = {
-  p1p: {nozzle:300,bed:100,chamber:0,volume:[256,256,256]},
-  p1s: {nozzle:300,bed:100,chamber:0,volume:[256,256,256]},
+  p1p: {nozzle:300,bed:100,chamber:0,volume:[256,256,250]},
+  p1s: {nozzle:300,bed:100,chamber:0,volume:[256,256,250]},
   p2s: {nozzle:300,bed:110,chamber:0,volume:[256,256,256]},
   a1: {nozzle:300,bed:100,chamber:0,volume:[256,256,256]},
   a1mini: {nozzle:300,bed:80,chamber:0,volume:[180,180,180]},
-  x1: {nozzle:300,bed:110,chamber:0,volume:[256,256,256]},
-  x1c: {nozzle:300,bed:110,chamber:0,volume:[256,256,256]},
-  x1e: {nozzle:320,bed:110,chamber:60,volume:[256,256,256]},
+  x1: {nozzle:300,bed:110,chamber:0,volume:[256,256,250]},
+  x1c: {nozzle:300,bed:110,chamber:0,volume:[256,256,250]},
+  x1e: {nozzle:320,bed:110,chamber:60,volume:[256,256,250]},
   h2d: {nozzle:350,bed:120,chamber:65,volume:[350,320,325]},
   h2dpro: {nozzle:350,bed:120,chamber:65,volume:[350,320,325]},
   h2c: {nozzle:350,bed:120,chamber:65,volume:[330,320,325]},
