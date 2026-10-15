@@ -402,7 +402,7 @@ for (const [name, changes, error] of [
   });
 }
 
-async function interceptedMcp(t, { blockBridgeInitialization = false, realBridgeRequest = false, model = "p1s", nozzleDiameters = [0.4], ams, bridgeResponse = { ok: true, value: 0 }, env = {}, afterPrint } = {}) {
+async function interceptedMcp(t, { blockBridgeInitialization = false, realBridgeRequest = false, model = "p1s", nozzleDiameters = [0.4], ams, bridgeResponse = { ok: true, value: 0 }, env = {}, afterPrint, printUncertain = false } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bambu-bridge-safety-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const eventsPath = path.join(dir, "events.jsonl");
@@ -412,7 +412,7 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
   await fs.writeFile(preload, `
     import fs from 'node:fs';
     import { BambuImplementation } from ${JSON.stringify(pathToFileURL(path.join(root, "dist/printers/bambu.js")).href)};
-    import { BambuNetworkBridge } from ${JSON.stringify(pathToFileURL(path.join(root, "dist/bambu-network-bridge.js")).href)};
+    import { BambuNetworkBridge, BridgeDispatchUncertainError } from ${JSON.stringify(pathToFileURL(path.join(root, "dist/bambu-network-bridge.js")).href)};
     import { STLManipulator } from ${JSON.stringify(pathToFileURL(path.join(root, "dist/stl/stl-manipulator.js")).href)};
     const log = event => fs.appendFileSync(${JSON.stringify(eventsPath)}, JSON.stringify(event) + '\\n');
     // What the printer reports once a print request went out (B3 confirmation tests).
@@ -448,6 +448,7 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
       log({ action:'bridge', method, payload });
       if (method.startsWith('net.start_')) {
         printSent = true;
+        ${printUncertain ? "throw new BridgeDispatchUncertainError(method, 'it did not answer within 1200 s (a cancel was requested)');" : ""}
       }
       return ${JSON.stringify(bridgeResponse)};
     };`}
@@ -513,6 +514,28 @@ test("a bridge print the printer reports FAILED for is an error, not a success",
   const result = await server.client.callTool({ name: "print_3mf_bambu_network", arguments: { three_mf_path: await fixture(t), bambu_model: "p1s", bed_type: "textured_plate", use_ams: false, connection_type: "cloud" } });
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /print error 0500400E/);
+});
+
+for (const [name, options] of [
+  ["a bridge print that times out after dispatch", { printUncertain: true }],
+  ["a cloud task the printer didn't acknowledge (-3130)", { bridgeResponse: { ok: true, value: -3130 } }],
+]) test(`${name} is never resent and is reported as possibly started`, async (t) => {
+  const server = await interceptedMcp(t, { ...options, env: { BAMBU_DISPATCH_CHECK_MS: "0" } });
+  const result = await server.client.callTool({ name: "print_3mf_bambu_network", arguments: { three_mf_path: await fixture(t), bambu_model: "p1s", bed_type: "textured_plate", use_ams: false, connection_type: "cloud" } });
+  assert.equal(result.isError, true);
+  assert.match(result.structuredContent.message, /may still (?:upload and )?start.*Do not send it again/s);
+  assert.match(result.structuredContent.suggestion, /^Do not retry/);
+  assert.equal((await readEvents(server.eventsPath)).filter(event => event.method === "net.start_print").length, 1, "sent exactly once");
+});
+
+test("a bridge print that timed out but the printer runs is reported as started, not resent", async (t) => {
+  const server = await interceptedMcp(t, { printUncertain: true, afterPrint: { gcode_state: "PREPARE" }, env: { BAMBU_DISPATCH_CHECK_MS: "3500" } });
+  const result = await server.client.callTool({ name: "print_3mf_bambu_network", arguments: { three_mf_path: await fixture(t), bambu_model: "p1s", bed_type: "textured_plate", use_ams: false, connection_type: "cloud" } });
+  assert.notEqual(result.isError, true, result.content?.[0]?.text);
+  const body = JSON.parse(result.content[0].text);
+  assert.equal(body.dispatch, "started");
+  assert.match(body.message, /did not answer.*not sent again/);
+  assert.equal((await readEvents(server.eventsPath)).filter(event => event.method === "net.start_print").length, 1);
 });
 
 test("raw BambuNetwork start_print cannot bypass the inspected print handler", async (t) => {
@@ -737,6 +760,27 @@ function bridgeWithCapturedFrames(t, beforeStartup = async () => {}) {
   t.after(() => bridge.stop());
   return { bridge, frames };
 }
+
+test("a bridge print request that gets no answer after its frame went out is uncertain, and asks the host to cancel", async (t) => {
+  const bridge = new BambuNetworkBridge();
+  const frames = [];
+  bridge.ensureStarted = async () => {
+    bridge.child = { exitCode: 0, stdin: { write(frame, callback) { frames.push(JSON.parse(frame.subarray(16).toString("utf8")).method); callback?.(); return true; } } };
+  };
+  t.after(() => bridge.stop());
+  const error = await bridge.request("net.start_print", { client_job_id: 42, params: {} }, { timeoutMs: 50 }).catch(e => e);
+  assert.equal(error.name, "BridgeDispatchUncertainError");
+  assert.match(error.message, /may still upload and start.*Do not send it again/s);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(frames, ["net.start_print", "bridge.job_cancel"]);
+  // Ordinary calls keep their plain timeout.
+  await assert.rejects(bridge.request("net.is_user_login", {}, { timeoutMs: 20 }), /^Error: Timed out waiting/);
+  // A print still in flight when the bridge exits is uncertain too.
+  const pending = bridge.request("net.start_local_print", { client_job_id: 43 }, { timeoutMs: 5000 });
+  while (frames.length < 4) await new Promise(resolve => setTimeout(resolve, 5));
+  bridge.rejectAllPending(new Error("FULU BambuNetwork bridge exited (code=1, signal=null)."));
+  await assert.rejects(pending, error => error.name === "BridgeDispatchUncertainError" && /bridge exited/.test(error.message));
+});
 
 test("bridge request checks fresh state after process startup and before writing a frame", async (t) => {
   let completeStartup;

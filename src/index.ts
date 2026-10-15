@@ -24,7 +24,7 @@ import {
   type BambuSliceOptions,
   type SlicerType,
 } from "./stl/stl-manipulator.js";
-import { BambuNetworkBridge, type BambuNetworkBridgeOptions } from "./bambu-network-bridge.js";
+import { BambuNetworkBridge, BridgeDispatchUncertainError, type BambuNetworkBridgeOptions } from "./bambu-network-bridge.js";
 import {
   assertBambuNativeAvailable,
   validateBambuNativeMetadata,
@@ -981,6 +981,8 @@ const BRIDGE_PRINT_ERRORS: Record<number, string> = {
   [-4020]: "FTP upload to the printer failed", [-4030]: "publishing the print command to the printer failed",
   [-5010]: "FTP upload to the printer failed", [-6010]: "connection to the printer failed", [-6020]: "connection to the server failed",
 };
+/** Codes after which the job exists and may still start: never resend on them. */
+const BRIDGE_PRINT_MAYBE_STARTED = new Set([-3130]);
 
 function bridgePrintErrorText(code: number): string {
   return BRIDGE_PRINT_ERRORS[code] ?? "";
@@ -1717,22 +1719,33 @@ class BambuPrinterMCPServer {
       }
       assertActive();
       let dispatchStatus: any = confirmedStatus;
-      const bridgeResult = await this.bambuNetwork.callWithAgent(
-        bridgeMethod,
-        { client_job_id: clientJobId, params },
-        {
-          ...this.bridgeOptionsFromArgs(args, "print_3mf_bambu_network"),
-          beforeDispatch: async method => {
-            if (method !== bridgeMethod) return;
-            assertActive();
-            dispatchStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
-            validatePrinterState(dispatchStatus, requirements);
-            this.bambu.assertBedClearance(dispatchStatus, bedClearance);
-          },
-          assertDispatchAllowed: method => { if (method === bridgeMethod) assertActive(); },
-          onDispatched: method => { if (method === bridgeMethod) retainForDispatchedUpload(); },
+      let bridgeResult: unknown;
+      try {
+        bridgeResult = await this.bambuNetwork.callWithAgent(
+          bridgeMethod,
+          { client_job_id: clientJobId, params },
+          {
+            ...this.bridgeOptionsFromArgs(args, "print_3mf_bambu_network"),
+            beforeDispatch: async method => {
+              if (method !== bridgeMethod) return;
+              assertActive();
+              dispatchStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
+              validatePrinterState(dispatchStatus, requirements);
+              this.bambu.assertBedClearance(dispatchStatus, bedClearance);
+            },
+            assertDispatchAllowed: method => { if (method === bridgeMethod) assertActive(); },
+            onDispatched: method => { if (method === bridgeMethod) retainForDispatchedUpload(); },
+          }
+        );
+      } catch (error) {
+        if (!(error instanceof BridgeDispatchUncertainError)) throw error;
+        // Never resend: the job may still start. Look at the printer instead.
+        this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
+        if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive) === "started") {
+          return { status: "success", dispatch: "started", message: `Bambu's network plugin did not answer, but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params) };
         }
-      );
+        throw error;
+      }
 
       if (typeof bridgeResult === "object" && bridgeResult !== null && (bridgeResult as { ok?: unknown }).ok === false) {
         throw new Error(`FULU BambuNetwork bridge method ${bridgeMethod} failed: ${String((bridgeResult as { error?: unknown }).error || "unknown bridge error")}`);
@@ -1744,6 +1757,14 @@ class BambuPrinterMCPServer {
         (bridgeResult as { value: number }).value !== 0
       ) {
         const value = (bridgeResult as { value: number }).value;
+        if (BRIDGE_PRINT_MAYBE_STARTED.has(value)) {
+          // The cloud task exists but the printer's ack didn't arrive in time: it may still start.
+          this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
+          if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive) === "started") {
+            return { status: "success", dispatch: "started", message: `The plugin reported ${value} (${bridgePrintErrorText(value)}), but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, bridgeResult, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params) };
+          }
+          throw new Error(`FULU BambuNetwork bridge method ${bridgeMethod} returned ${value} (${bridgePrintErrorText(value)}). The job was posted and may still start. Do not send it again: check get_printer_status (gcode_state and the job name) first.`);
+        }
         throw new Error(`FULU BambuNetwork bridge method ${bridgeMethod} returned ${value}${bridgePrintErrorText(value) ? ` (${bridgePrintErrorText(value)})` : ""}; the printer was not asked to print.`);
       }
 
@@ -4400,10 +4421,14 @@ class BambuPrinterMCPServer {
         const message = error instanceof Error ? error.message : String(error);
         // Refusals and printer rejections repeat unchanged; say what to fix instead of "try again".
         const refused = /nothing was (?:sent|uploaded)|no command was sent|does not match the job|is ambiguous|is missing or ambiguous|rejected the print command|are refused|is refused|refused because|refused until|refused before/i.test(message);
+        // A print that may have reached the printer must never be retried blindly.
+        const uncertain = /do not send it again|do not automatically resend|may already have reached the printer/i.test(message);
         const structured: StructuredToolError = {
           status: "error",
           retryable: false,
-          suggestion: refused
+          suggestion: uncertain
+            ? `Do not retry: the printer may already have the job. Check get_printer_status (gcode_state, subtask_name) first. Error: ${message}`
+            : refused
             ? `Retrying unchanged repeats this refusal. Fix the reported cause (file, arguments, printer settings, or printer state) first. Error: ${message}`
             : `Check parameters and try again. Error: ${message}`,
           message,

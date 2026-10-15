@@ -1,3 +1,13 @@
+export declare const BRIDGE_PRINT_METHODS: Set<string>;
+/**
+ * A print request reached the bridge, but no answer came back (timeout, bridge exit). The plugin may still upload
+ * and start the job, so it must never be sent again automatically.
+ */
+export declare class BridgeDispatchUncertainError extends Error {
+    readonly method: string;
+    readonly reason: string;
+    constructor(method: string, reason: string);
+}
 type JsonObject = Record<string, unknown>;
 export type BambuNetworkBridgeOptions = {
     bridgeCommand?: string;

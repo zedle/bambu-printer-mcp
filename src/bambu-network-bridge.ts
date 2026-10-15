@@ -10,6 +10,26 @@ const FRAME_TYPE_JSON_RESPONSE = 2;
 const FRAME_TYPE_BINARY_DATA = 3;
 const FRAME_TYPE_LOG = 4;
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+/**
+ * Print methods upload the job (to Bambu's cloud for start_print) before they return, and Studio puts no time limit
+ * on them. Give them far longer than ordinary calls; past it the job may still start, so the caller is told so.
+ */
+const PRINT_REQUEST_TIMEOUT_MS = 20 * 60_000;
+export const BRIDGE_PRINT_METHODS = new Set([
+  "net.start_print", "net.start_local_print", "net.start_local_print_with_record", "net.start_sdcard_print", "net.start_send_gcode_to_sdcard",
+]);
+
+/**
+ * A print request reached the bridge, but no answer came back (timeout, bridge exit). The plugin may still upload
+ * and start the job, so it must never be sent again automatically.
+ */
+export class BridgeDispatchUncertainError extends Error {
+  constructor(readonly method: string, readonly reason: string) {
+    super(`The print request (${method}) reached Bambu's network plugin, but ${reason}. The job may still upload and start. ` +
+      "Do not send it again: check get_printer_status (gcode_state and the job name) first.");
+    this.name = "BridgeDispatchUncertainError";
+  }
+}
 
 type JsonObject = Record<string, unknown>;
 
@@ -18,7 +38,18 @@ type PendingRequest = {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  /** The frame was written to the bridge, so the request may be running. */
+  dispatched?: boolean;
 };
+
+/** Reject a request; a print request that may already be running is reported as uncertain. */
+function rejectPending(pending: PendingRequest, error: Error): void {
+  if (pending.dispatched && BRIDGE_PRINT_METHODS.has(pending.method) && !(error instanceof BridgeDispatchUncertainError)) {
+    pending.reject(new BridgeDispatchUncertainError(pending.method, error.message.replace(/\.$/, "")));
+  } else {
+    pending.reject(error);
+  }
+}
 
 export type BambuNetworkBridgeOptions = {
   bridgeCommand?: string;
@@ -269,13 +300,25 @@ export class BambuNetworkBridge {
     frame.writeUInt32LE(requestPayload.length, 12);
     requestPayload.copy(frame, FRAME_HEADER_SIZE);
 
+    const printMethod = BRIDGE_PRINT_METHODS.has(method);
+    const timeoutMs = options.timeoutMs ?? (printMethod ? PRINT_REQUEST_TIMEOUT_MS : DEFAULT_REQUEST_TIMEOUT_MS);
     return await new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
+        const pending = this.pending.get(id);
         this.pending.delete(id);
-        reject(new Error(`Timed out waiting for FULU BambuNetwork bridge method ${method}.`));
-      }, options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS);
+        if (!pending) return;
+        if (pending.dispatched && printMethod) {
+          // Ask the host to stop the job before it goes further (the plugin polls was_cancelled); it may be too late.
+          const jobId = Number((payload as { client_job_id?: unknown }).client_job_id);
+          if (Number.isFinite(jobId)) void this.request("bridge.job_cancel", { job_id: jobId, cancel: true }, { timeoutMs: 5000 }).catch(() => {});
+          rejectPending(pending, new Error(`it did not answer within ${Math.round(timeoutMs / 1000)} s (a cancel was requested)`));
+        } else {
+          reject(new Error(`Timed out waiting for FULU BambuNetwork bridge method ${method}.`));
+        }
+      }, timeoutMs);
 
-      this.pending.set(id, { method, resolve, reject, timer });
+      const entry: PendingRequest = { method, resolve, reject, timer };
+      this.pending.set(id, entry);
 
       try {
         options.assertDispatchAllowed?.(method);
@@ -289,6 +332,7 @@ export class BambuNetworkBridge {
             }
           }
         });
+        entry.dispatched = true;
         options.onDispatched?.(method);
       } catch (error) {
         clearTimeout(timer);
@@ -513,7 +557,7 @@ export class BambuNetworkBridge {
 
     for (const [id, pending] of this.pending.entries()) {
       clearTimeout(pending.timer);
-      pending.reject(new Error(`FULU BambuNetwork bridge stopped before ${pending.method} completed.`));
+      rejectPending(pending, new Error(`FULU BambuNetwork bridge stopped before ${pending.method} completed.`));
       this.pending.delete(id);
     }
 
@@ -659,7 +703,7 @@ export class BambuNetworkBridge {
   private rejectAllPending(error: Error): void {
     for (const [id, pending] of this.pending.entries()) {
       clearTimeout(pending.timer);
-      pending.reject(error);
+      rejectPending(pending, error);
       this.pending.delete(id);
     }
   }
