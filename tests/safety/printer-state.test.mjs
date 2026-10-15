@@ -91,6 +91,16 @@ test('requires explicit clean print error and valid HMS severity, but permits in
   // A blocking entry names its code, so a lingering command-verification rejection is recognizable.
   assert.throws(() => check(fresh({hms:[{attr:0x05000500,code:0x00010007}]})), /HMS 0500-0500-0001-0007/);
 });
+test('known maintenance reminders do not block, but faults beside them and unknown codes in their family do', () => {
+  // H2C report: threaded rods and X/YZ/extruder-lift rails need lubrication (0501-0400-0003-0002/0004).
+  const reminders=[{attr:0x05010400,code:0x00030002},{attr:0x05010400,code:0x00030004}];
+  assert.doesNotThrow(() => check(fresh({hms:reminders})));
+  for(const code of [0x00030003,0x00030005,0x00030006,0x00030007,0x00030010]) assert.doesNotThrow(() => check(fresh({hms:[{attr:0x05010400,code}]})));
+  assert.throws(() => check(fresh({hms:[...reminders,{attr:0x05000500,code:0x00010007}]})), /HMS 0500-0500-0001-0007/);
+  for(const [attr,code] of [[0x05010400,0x00030008],[0x05010400,0x00010044],[0x05010401,0x00030002],[0x05000400,0x00030002]])
+    assert.throws(() => check(fresh({hms:[{attr,code}]})), /HMS/i);
+  assert.throws(() => check(fresh({print_error:1,hms:reminders})), /error/i);
+});
 const ams = {ams:[{id:'0',tray:[{id:'0',tray_type:'PLA',nozzle_temp_min:'190',nozzle_temp_max:'240'},{id:'1',tray_type:'PETG',nozzle_temp_min:'220',nozzle_temp_max:'270'}]}]};
 test('AMS requirements use positional mappings and selected slot material, including external 254', () => {
   assert.doesNotThrow(() => check(fresh({ams}),req({materials:['PLA','PETG'],useAMS:true,amsMapping:[0,1],usedFilamentPositions:[1]})));

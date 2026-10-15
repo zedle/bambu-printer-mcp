@@ -184,6 +184,14 @@ function reportedNozzles(raw) {
     }
     return output;
 }
+// Periodic maintenance reminders (BambuStudio resources/hms, e.g. hms_en_31B.json): 0501-0400-0003-<n>.
+// 0002 threaded rods need lubrication; 0003 linear rods need cleaning and lubrication; 0004 clean and lubricate
+// the X rail, YZ rods (and H2C extruder lift rail); 0005 H2C induction hotend latch and hotend change rods;
+// 0006 H2C induction hotend latch may be worn; 0007 clean or replace the air filter; 0010 laser module is dusty.
+// They report service intervals, not a printer fault, so they never block. Other codes stay fail-closed.
+const MAINTENANCE_REMINDER_ATTR = 0x05010400;
+const MAINTENANCE_REMINDER_CODES = new Set([0x00030002, 0x00030003, 0x00030004, 0x00030005, 0x00030006, 0x00030007, 0x00030010]);
+const isMaintenanceReminder = (attr, code) => attr === MAINTENANCE_REMINDER_ATTR && MAINTENANCE_REMINDER_CODES.has(code);
 function validateErrors(raw, requireIdle) {
     const state = typeof raw.gcode_state === "string" ? raw.gcode_state.toUpperCase() : "UNKNOWN";
     if (requireIdle && !["IDLE", "FINISH"].includes(state))
@@ -197,6 +205,8 @@ function validateErrors(raw, requireIdle) {
     for (const entry of raw.hms) {
         const code = finiteNumber(entry?.code);
         const attr = finiteNumber(entry?.attr);
+        if (code !== undefined && attr !== undefined && isMaintenanceReminder(attr, code))
+            continue;
         // BambuStudio DevHMS.cpp: code >> 16; DevHMS.h: 1=fatal,2=serious,3=common,4=info.
         // Unknown severities fail closed; attr identifies the module and is not a severity bitmask.
         if (code === undefined || attr === undefined || !Number.isInteger(code) || !Number.isInteger(attr) || code < 0 || code > 0xffffffff || attr < 0 || attr > 0xffffffff || Math.floor(code / 65536) !== 4) {
