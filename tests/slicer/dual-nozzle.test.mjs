@@ -153,6 +153,7 @@ test("mixed nozzles: per-extruder flow, per-row material and a manual filament m
   assert.deepEqual(proc.filament_map, ["2", "1"]);
   assert.deepEqual(result.meta.extruders, {
     nozzleVolumeType: ["High Flow", "Standard"], nozzleTypes: ["tungsten_carbide", "hardened_steel"], filamentMap: [2, 1],
+    cliArgs: ["--filament-map-mode", "Manual", "--filament-map", "2,1"],
   });
 });
 
@@ -463,7 +464,8 @@ test("real Bambu Studio CLI slices a two-colour H2C job on mixed nozzles", { tim
   assert.deepEqual(settings.nozzle_volume_type, ["High Flow", "Standard"]);
   assert.deepEqual(settings.nozzle_type, ["tungsten_carbide", "tungsten_carbide", "tungsten_carbide", "hardened_steel", "hardened_steel"]);
   assert.deepEqual(settings.filament_map, ["2", "1"]);
-  assert.equal(settings.filament_map_mode, "Manual");
+  // The H2C's rack makes the CLI take a manual map in Nozzle Manual mode (from the command line).
+  assert.equal(settings.filament_map_mode, "Nozzle Manual");
   assert.equal(settings.curr_bed_type, "Engineering Plate");
   const info = await zip.file("Metadata/slice_info.config").async("string");
   assert.match(info, /key="filament_maps" value="2 1"/);
@@ -568,4 +570,64 @@ test("sliceSTL passes a Hybrid setup's nozzle options to the CLI", async (t) => 
   assert.equal(option("--extruder-nozzle-count"), "1,4");
   assert.equal(option("--extruder-nozzle-volume-type"), "High Flow,Standard,Standard,High Flow,High Flow");
   assert.equal(args.at(-1), stl, "the input stays last");
+});
+
+/* --- Manual filament maps and the printer's hotends on the command line ---- */
+
+test("a manual filament map goes to the CLI, which ignores it in a profile file", async () => {
+  const t = await dualTree();
+  const plain = await t.flatten({ extruderNozzles: H2C_NOZZLES, filamentMap: [2, 2] });
+  assert.deepEqual(plain.meta.extruders.cliArgs, ["--filament-map-mode", "Manual", "--filament-map", "2,2"]);
+  assert.equal(plain.meta.extruders.hotends, undefined, "no rack, no hotend counts");
+  // A rack printer takes the map in Nozzle Manual mode: each filament's flow and its own hotend while there are enough.
+  const rack = await dualTree(RACK);
+  const manual = await rack.flatten({ extruderNozzles: H2C_NOZZLES, filamentMap: [2, 2] });
+  assert.deepEqual(manual.meta.extruders.cliArgs, ["--extruder-nozzle-count", "1,6", "--extruder-nozzle-volume-type",
+    "High Flow,Standard,Standard,Standard,Standard,Standard,Standard", "--filament-map-mode", "Nozzle Manual", "--filament-map", "2,2",
+    "--filament-nozzle-map", "1,2", "--filament-volume-map", "0,0"]);
+  const left = await rack.flatten({ extruderNozzles: H2C_NOZZLES, filamentMap: [1, 2] });
+  assert.deepEqual(left.meta.extruders.cliArgs.slice(-6), ["--filament-map", "1,2", "--filament-nozzle-map", "0,1", "--filament-volume-map", "1,0"]);
+  // A Hybrid extruder's filaments print Standard; one Standard hotend is shared.
+  const hybrid = await rack.flatten({ extruderNozzles: [{ flow: "High Flow" }, { flow: "Hybrid", hotends: { Standard: 1, "High Flow": 2 } }], filamentMap: [2, 2] });
+  assert.deepEqual(hybrid.meta.extruders.cliArgs.slice(-4), ["--filament-nozzle-map", "1,1", "--filament-volume-map", "0,0"]);
+});
+
+test("nozzles_from_printer on a rack printer passes the printer's hotend counts", async () => {
+  const t = await dualTree(RACK);
+  // h2cReport: right mounted 0.4 Standard, rack 0.2 and 0.6 Standard; left 0.4 High Flow.
+  const result = await t.flatten({ reportedExtruders: extrudersFromReport(h2cReport()) });
+  assert.deepEqual(result.meta.extruders.hotends, [{ "High Flow": 1 }, { Standard: 1 }]);
+  assert.deepEqual(result.meta.extruders.cliArgs, ["--extruder-nozzle-count", "1,1", "--extruder-nozzle-volume-type", "High Flow,Standard"]);
+});
+
+test("real Bambu Studio CLI honours a manual map its own grouping would not pick", { timeout: 600_000 }, async (t) => {
+  const cli = installedCli();
+  if (!cli) return t.skip("Bambu Studio CLI not installed");
+  const profilesRoot = detectProfilesRoot(cli);
+  const filament = path.join(profilesRoot, "BBL", "filament", "Generic PLA @BBL H2C 0.4 nozzle.json");
+  if (!existsSync(path.join(profilesRoot, "BBL", "machine", "Bambu Lab H2C 0.4 nozzle.json")) || !existsSync(filament)) {
+    return t.skip("Installed Bambu Studio has no H2C profiles");
+  }
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "dual-nozzle-cli-map-"));
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  const saved = Object.fromEntries(["BAMBU_PROFILES_ROOT", "BAMBU_SLICER_PROFILE_DIRS"].map(k => [k, process.env[k]]));
+  t.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
+  process.env.BAMBU_PROFILES_ROOT = profilesRoot;
+  process.env.BAMBU_SLICER_PROFILE_DIRS = "";
+  const input = path.join(directory, "two-cubes.3mf");
+  await twoColourProject(input);
+  t.mock.method(console, "error", () => {});
+  t.mock.method(console, "warn", () => {});
+  // Both filaments on the right (AMS) nozzle, each on its own rack hotend.
+  const output = await new STLManipulator(path.join(directory, "out")).sliceSTL(input, "bambustudio", cli, undefined, undefined,
+    "Bambu Lab H2C 0.4 nozzle", {
+      loadFilaments: `${filament};${filament}`, filamentColours: ["#161616", "#76D9F4"], bedType: "engineering_plate",
+      extruderNozzles: H2C_NOZZLES, filamentMap: [2, 2], ensureOnBed: true, arrange: false, minSave: true,
+    });
+  const zip = await JSZip.loadAsync(await fs.readFile(output));
+  const info = await zip.file("Metadata/slice_info.config").async("string");
+  assert.match(info, /key="filament_maps" value="2 2"/);
+  const inspection = await inspectPrintFile(output, { model: "h2c", nozzleDiameters: [0.4, 0.4], bedType: "engineering_plate" });
+  assert.deepEqual(inspection.filamentMap, [2, 2]);
+  assert.deepEqual(inspection.nozzlePlan.nozzles.map(nozzle => nozzle.extruder), [2, 2]);
 });

@@ -521,8 +521,7 @@ function applyExtruderSetup(
   const volumeTypes = (machineFlat["nozzle_volume_type"] as unknown[]).map(String);
   // Every extruder's hotends by flow, for the CLI (extruder_nozzle_count / extruder_nozzle_volume_type): known
   // stats, else the extruder's flow times its capacity (the profile's own extruder_nozzle_stats).
-  const knownHotends = multiNozzle && (volumeTypes.includes(HYBRID_FLOW) || !!explicit?.some(n => n.hotends));
-  const allHotends = knownHotends ? volumeTypes.map((flow, i) => {
+  const allHotendsFor = (needed: boolean) => needed ? volumeTypes.map((flow, i) => {
     const stats = hotends[i];
     if (stats && Object.values(stats).some(n => n > 0)) return stats;
     if (flow === HYBRID_FLOW) throw new Error(`The ${extruderLabel(i, count)} of "${preset}" is Hybrid but no hotends are known for it.`);
@@ -564,14 +563,52 @@ function applyExtruderSetup(
     processFlat["filament_map_mode"] = "Manual";
     processFlat["filament_map"] = filamentMap.map(String);
   }
+  // The hotends go to the CLI on a rack printer whenever they are known (the printer's, or given), and with a manual
+  // filament map, which the CLI's Nozzle Manual mode needs them for.
+  const manualMap = !!filamentMap && count > 1;
+  const allHotends = allHotendsFor(multiNozzle && (hotends.some(Boolean) || manualMap));
   const cliArgs: string[] = [];
   if (volumeTypes.includes(HYBRID_FLOW)) cliArgs.push("--nozzle-volume-type", volumeTypes.join(","));
-  if (allHotends) {
-    // Sub-nozzles in Studio's map order (NozzleVolumeType enum), extruder by extruder.
-    const ordered = allHotends.map(stats => Object.entries(stats).filter(([, n]) => n > 0)
-      .sort(([a], [b]) => NOZZLE_VOLUME_ENUM[a] - NOZZLE_VOLUME_ENUM[b]));
+  // Sub-nozzles in Studio's map order (NozzleVolumeType enum), extruder by extruder.
+  const ordered = allHotends?.map(stats => Object.entries(stats).filter(([, n]) => n > 0)
+    .sort(([a], [b]) => NOZZLE_VOLUME_ENUM[a] - NOZZLE_VOLUME_ENUM[b]));
+  if (ordered) {
     cliArgs.push("--extruder-nozzle-count", ordered.map(entries => entries.reduce((sum, [, n]) => sum + n, 0)).join(","));
     cliArgs.push("--extruder-nozzle-volume-type", ordered.flatMap(entries => entries.flatMap(([flow, n]) => Array(n).fill(flow))).join(","));
+  }
+  if (manualMap) {
+    // The CLI slices each plate in the plate's own filament map mode (Auto For Flush for a new plate); a manual map
+    // in the process file only lands in the project settings. It takes effect from the command line.
+    if (!ordered) {
+      cliArgs.push("--filament-map-mode", "Manual", "--filament-map", filamentMap!.join(","));
+    } else {
+      // Rack printers: Studio's CLI refuses plain Manual ("Group error in manual mode") and takes Nozzle Manual, which
+      // names each filament's flow (filament_volume_map) and hotend (filament_nozzle_map, a global sub-nozzle index).
+      // Each filament gets its own hotend of its flow while there are enough, as the slicer's own grouping does.
+      const firstIndex = ordered.map((_, e) => ordered.slice(0, e).reduce((sum, entries) => sum + entries.reduce((n, [, c]) => n + c, 0), 0));
+      const slots = new Map<string, number[]>();
+      ordered.forEach((entries, e) => {
+        let index = firstIndex[e];
+        for (const [flow, n] of entries) for (let k = 0; k < n; k++) slots.set(`${e}/${flow}`, [...(slots.get(`${e}/${flow}`) ?? []), index++]);
+      });
+      const used = new Map<string, number>();
+      const volumes: number[] = [];
+      const hotendIndex = filamentMap!.map(extruder => {
+        const e = extruder - 1;
+        // A Hybrid extruder's filaments print Standard where it has Standard hotends (Studio's Manual-mode default).
+        const flows = extruderFlows[e];
+        const flow = volumeTypes[e] === HYBRID_FLOW ? (flows.includes("Standard") ? "Standard" : flows[0]) : volumeTypes[e];
+        const key = `${e}/${flow}`;
+        const candidates = slots.get(key) ?? [];
+        if (!candidates.length) throw new Error(`The ${extruderLabel(e, count)} of "${preset}" has no ${flow} hotend for a filament mapped to it.`);
+        const n = used.get(key) ?? 0;
+        used.set(key, n + 1);
+        volumes.push(NOZZLE_VOLUME_ENUM[flow]);
+        return candidates[n % candidates.length];
+      });
+      cliArgs.push("--filament-map-mode", "Nozzle Manual", "--filament-map", filamentMap!.join(","),
+        "--filament-nozzle-map", hotendIndex.join(","), "--filament-volume-map", volumes.join(","));
+    }
   }
 
   const rows = Array.isArray(machineFlat["nozzle_type"]) ? machineFlat["nozzle_type"] as unknown[] : [];

@@ -122,9 +122,15 @@ right). `slice_stl` and `slice_with_template` take that per extruder, and so do
 - `filament_map` sets `filament_map_mode` to Manual, so each filament prints on
   the nozzle its AMS or spool can feed. Without it Bambu Studio groups filaments
   itself and may pick the other nozzle. Filament types the machine profile lists
-  as unprintable on that extruder are refused.
+  as unprintable on that extruder are refused. The CLI slices each plate in the
+  plate's own mode, so the map goes on its command line (`--filament-map-mode`,
+  `--filament-map`); a manual map in a profile file alone was ignored. On the
+  H2C the CLI only accepts it as Nozzle Manual, so each filament also gets its
+  flow and hotend (`--filament-volume-map`, `--filament-nozzle-map`): its own
+  hotend of the extruder's flow while there are enough.
 - `nozzles_from_printer: true` reads the mounted nozzles from a fresh printer
-  report instead (rack hotends that are not mounted are ignored), and with
+  report instead (on the H2C, the rack's hotends of the slice diameter set how
+  many hotends of each flow the right extruder has, see below), and with
   `filament_sources` (`"ams"`, `"ams:<unit id>"`, `"external"` per slot) checks
   which nozzle each AMS unit (its `info` binding) and external holder (254 left,
   255 right) feeds. A filament mapped to a nozzle its source can't feed is
