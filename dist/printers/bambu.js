@@ -524,6 +524,16 @@ function ftpsSecureOptions(host) {
     }
     return opts;
 }
+export function uniqueModules(modules) {
+    const byId = new Map();
+    for (const module of modules) {
+        const m = module;
+        const id = m && typeof m === "object" ? `${m.name ?? ""}\u0000${m.sn ?? ""}` : JSON.stringify(module);
+        byId.delete(id);
+        byId.set(id, module);
+    }
+    return [...byId.values()];
+}
 class BambuClientStore {
     constructor() {
         this.printers = new Map();
@@ -557,7 +567,11 @@ class BambuClientStore {
         }
         const previous = this.reportSnapshots.get(key) || {};
         // Pushes are often deltas: restore them onto the cached report like Bambu Studio (nested objects merge).
-        this.reportSnapshots.set(key, mergeReport(previous, update));
+        const merged = mergeReport(previous, update);
+        // bambu-node's data appends get_version's module list on every reply; keep one entry per module (the newest).
+        if (Array.isArray(merged.modules))
+            merged.modules = uniqueModules(merged.modules);
+        this.reportSnapshots.set(key, merged);
         this.resolveInitialReport(key);
     }
     clearPrinterState(key) {

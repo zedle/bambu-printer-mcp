@@ -604,6 +604,17 @@ function ftpsSecureOptions(host: string): Record<string, unknown> {
   return opts;
 }
 
+export function uniqueModules(modules: unknown[]): unknown[] {
+  const byId = new Map<string, unknown>();
+  for (const module of modules) {
+    const m = module as Record<string, unknown> | null;
+    const id = m && typeof m === "object" ? `${m.name ?? ""}\u0000${m.sn ?? ""}` : JSON.stringify(module);
+    byId.delete(id);
+    byId.set(id, module);
+  }
+  return [...byId.values()];
+}
+
 class BambuClientStore {
   private printers: Map<string, BambuClient> = new Map();
   private initialConnectionPromises: Map<string, Promise<void>> = new Map();
@@ -641,7 +652,10 @@ class BambuClientStore {
 
     const previous = this.reportSnapshots.get(key) || {};
     // Pushes are often deltas: restore them onto the cached report like Bambu Studio (nested objects merge).
-    this.reportSnapshots.set(key, mergeReport(previous, update));
+    const merged = mergeReport(previous, update);
+    // bambu-node's data appends get_version's module list on every reply; keep one entry per module (the newest).
+    if (Array.isArray(merged.modules)) merged.modules = uniqueModules(merged.modules);
+    this.reportSnapshots.set(key, merged);
     this.resolveInitialReport(key);
   }
 

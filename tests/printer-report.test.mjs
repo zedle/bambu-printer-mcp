@@ -137,3 +137,11 @@ test('checks require a restored full report from around the request and a recent
     assert.throws(() => safety.validatePrinterState(status(observation), requirements), /fresh observed MQTT report/, JSON.stringify(observation));
   }
 });
+
+test("status snapshots keep one entry per get_version module", async () => {
+  const { uniqueModules } = await import("../dist/printers/bambu.js");
+  const ota = { name: "ota", sn: "31B", sw_ver: "01.01" };
+  const ams = { name: "n3f/0", sn: "19C", sw_ver: "04.00" };
+  const newer = { name: "ota", sn: "31B", sw_ver: "01.02" };
+  assert.deepEqual(uniqueModules([ota, ams, ota, ams, newer]), [ams, newer]);
+});
