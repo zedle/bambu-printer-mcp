@@ -1,6 +1,6 @@
 import { BambuClient, GetVersionCommand, PushAllCommand } from "bambu-node";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
-import { DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
+import { DEPUTY_EXTRUDER_ID, DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
 
 const MAX_REPORT_AGE_MS = 15_000;
 const MODEL_IDS: Record<string, string> = {
@@ -301,6 +301,41 @@ function mappedTray(raw: Record<string,any>, index: number): Record<string,any> 
   return tray;
 }
 
+/**
+ * On dual-nozzle printers each AMS is bound to one extruder (BambuStudio DevFilaSystemParser::ParseAmsInfo: `info` hex
+ * bits 8-11: 0 main/right, 1 deputy/left, 0xE a Filament Track Switch) and each external holder
+ * feeds one (254 left, 255 right). Studio only offers trays that can reach the filament's extruder; a job mapped
+ * otherwise pauses with 1807-8006 ("The AMS may be mismatched with the extruder"), so it's refused here.
+ */
+function assertFeedsExtruder(raw: Record<string,any>, model: string, trayIndex: number, extruder: number, position: number): void {
+  const side = (id: number) => id === MAIN_EXTRUDER_ID ? "right" : "left";
+  let feeds: number[];
+  let source: string;
+  if (isExternalTray(trayIndex)) {
+    feeds = [trayIndex === 254 ? DEPUTY_EXTRUDER_ID : MAIN_EXTRUDER_ID];
+    source = `External spool ${trayIndex}`;
+  } else {
+    const unitId = trayIndex >= 128 ? trayIndex : Math.floor(trayIndex / 4);
+    const unit = (raw.ams?.ams as any[]).find((value:any) => Number(value?.id) === unitId);
+    source = `AMS ${trayIndex >= 128 ? `HT ${unitId}` : unitId}`;
+    // Dual-nozzle firmware reports info for every unit; without it the binding can't be established (Studio would
+    // assume the main extruder), so only the tray's own checks apply.
+    if (unit?.info === undefined) return;
+    {
+      let info: bigint;
+      try { info = BigInt(`0x${String(unit.info).replace(/^0x/i, "")}`); } catch { throw new Error(`${source} reports a malformed info field.`); }
+      const bound = Number((info >> 8n) & 0xfn);
+      // A Filament Track Switch can route to both extruders, but only while one is reported fitted.
+      if (bound === 0xe) feeds = raw.device?.fila_switch && typeof raw.device.fila_switch === "object" ? [MAIN_EXTRUDER_ID, DEPUTY_EXTRUDER_ID] : [];
+      else feeds = [bound];
+    }
+  }
+  if (!feeds.includes(extruder)) {
+    throw new Error(`${source} can't feed the ${model.toUpperCase()}'s ${side(extruder)} nozzle, which filament ${position + 1} is sliced for` +
+      ` (it feeds ${feeds.length ? feeds.map(side).join(" and ") : "no nozzle"}). Map it to a tray on that side or re-slice; the printer would stop with 1807-8006.`);
+  }
+}
+
 /** Verifies reported configuration, not a physical nozzle/spool inspection. */
 export function validatePrinterState(status: any, requirements: PrinterStateRequirements): ValidatedPrinterState {
   if (status?.connected !== true) throw new Error("A connected printer is required for safety validation.");
@@ -405,6 +440,7 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
       if (trayIndex === undefined || !Number.isInteger(trayIndex) || trayIndex < 0 || trayIndex > 255) throw new Error(`Complete AMS mapping is required for filament position ${position}.`);
       if (!requirements.useAMS && !isExternalTray(trayIndex)) throw new Error(`Filament position ${position} must map to an external spool holder when AMS is off.`);
       const tray = isExternalTray(trayIndex) ? externalTray(raw,model,trayIndex) : mappedTray(raw,trayIndex);
+      if (DUAL_EXTRUDER_MODELS.has(model) && !requirements.usedNozzleIndices) assertFeedsExtruder(raw, model, trayIndex, physicalExtruderMap(model, requirements.physicalExtruderMap)[(requirements.filamentMap?.[position] ?? 1) - 1], position);
       const reportedType = typeof tray?.tray_type === "string" ? tray.tray_type.trim() : "";
       if (reportedType && normalizeMaterial(reportedType) !== material) throw new Error(`Reported material ${reportedType} in slot ${trayIndex} contradicts declared ${materials[position]}.`);
       const nozzleMin = trayRange(tray?.nozzle_temp_min,"minimum");

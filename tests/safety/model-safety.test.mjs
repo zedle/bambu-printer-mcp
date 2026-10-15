@@ -26,14 +26,15 @@ test('dual-nozzle printers pick the holder the filament is mapped to', () => {
   // H2D with PLA on the left holder (254) and TPU on the right one (255).
   const status = mockStatus('H2DEXTSPOOLACTIVE');
   assert.doesNotThrow(() => validatePrinterState(status, external('h2d', { amsMapping: [254] })));
-  assert.throws(() => validatePrinterState(status, external('h2d', { amsMapping: [255] })), /TPU in slot 255 contradicts/);
-  assert.doesNotThrow(() => validatePrinterState(status, external('h2d', { materials: ['TPU'], amsMapping: [255] })));
+  const right = { filamentMap: [2] };
+  assert.throws(() => validatePrinterState(status, external('h2d', { amsMapping: [255], ...right })), /TPU in slot 255 contradicts/);
+  assert.doesNotThrow(() => validatePrinterState(status, external('h2d', { materials: ['TPU'], amsMapping: [255], ...right })));
   for (const [name, model] of [['H2D', 'h2d'], ['X2D', 'x2d']]) {
-    assert.doesNotThrow(() => validatePrinterState(mockStatus(name), external(model, { amsMapping: [255] })), name);
+    assert.doesNotThrow(() => validatePrinterState(mockStatus(name), external(model, { amsMapping: [255], ...right })), name);
     assert.doesNotThrow(() => validatePrinterState(mockStatus(name), external(model, { amsMapping: [254] })), name);
   }
   // The H2D Pro mock has TPU on its right holder.
-  assert.doesNotThrow(() => validatePrinterState(mockStatus('H2DPRO'), external('h2dpro', { materials: ['TPU'], amsMapping: [255] })));
+  assert.doesNotThrow(() => validatePrinterState(mockStatus('H2DPRO'), external('h2dpro', { materials: ['TPU'], amsMapping: [255], ...right })));
   // The H2C reports a 255 holder, but its right (rack) extruder is fed by the AMS only.
   assert.doesNotThrow(() => validatePrinterState(mockStatus('H2C'), external('h2c', { amsMapping: [254] })));
   assert.throws(() => validatePrinterState(mockStatus('H2C'), external('h2c', { amsMapping: [255] })), /no usable external spool holder 255/);
@@ -62,11 +63,11 @@ test('every dual-nozzle model compares the sliced left nozzle with physical id 1
     // Right (id 0) 0.6, left (id 1) 0.4.
     const device = { ...mockStatus(name).raw.device, nozzle: { info: [{ id: 0, diameter: 0.6, type: 'HS01', stat: 0 }, { id: 1, diameter: 0.4, type: 'HS01', stat: 0 }] } };
     const status = mockStatus(name, { device });
-    const job = nozzleDiameters => ({ model, nozzleDiameters, nozzleFlows: ['standard', 'standard'], materials: ['PLA'], useAMS: false, amsMapping: [254] });
+    const job = nozzleDiameters => ({ model, nozzleDiameters, nozzleFlows: ['standard', 'standard'], materials: ['PLA'], useAMS: false, amsMapping: [254], filamentMap: [1] });
     assert.doesNotThrow(() => validatePrinterState(status, job([0.4, 0.6])), name);
     assert.throws(() => validatePrinterState(status, job([0.6, 0.4])), /nozzle 1 diameter/, name);
     // A file that declares the identity map is compared that way.
-    assert.doesNotThrow(() => validatePrinterState(status, { ...job([0.6, 0.4]), physicalExtruderMap: [0, 1] }), name);
+    assert.doesNotThrow(() => validatePrinterState(status, { ...job([0.6, 0.4]), physicalExtruderMap: [0, 1], filamentMap: [2] }), name);
   }
   assert.deepEqual(models.physicalExtruderMap('h2d'), [1, 0]);
   assert.deepEqual(models.physicalExtruderMap('p2s'), [0]);
@@ -105,7 +106,8 @@ test('the H2C right extruder accepts a matching rack hotend and blocks on a busy
 });
 
 test('AMS-HT units are addressed by unit id with presence from the top-level bits 16+', () => {
-  const ams = (materials, extra = {}) => ({ model: 'h2d', nozzleDiameters: [], materials, useAMS: true, ...extra });
+  // The AMS-HT units are bound to the right extruder (info 2004), so the filament is sliced for it (filament_map 2).
+  const ams = (materials, extra = {}) => ({ model: 'h2d', nozzleDiameters: [], materials, useAMS: true, filamentMap: [2], ...extra });
   // H2D with AMS-HT units 128 (PLA) and 129 (PETG), both present (bits 16 and 17 of 0x3bbed).
   const h2d = mockStatus('H2DEXTSPOOLACTIVE');
   assert.doesNotThrow(() => validatePrinterState(h2d, ams(['PLA'], { amsMapping: [128] })));
@@ -128,4 +130,29 @@ test('tray mappings use Studio\'s encoding on every transport', () => {
   // A single-extruder printer's one holder is 255 to Studio.
   assert.deepEqual(studioTrayMapping([254, 3], true).v1, [{ ams_id: 255, slot_id: 0 }, { ams_id: 0, slot_id: 3 }]);
   assert.deepEqual(studioTrayMapping([254, 3], true).trays, [255, 3]);
+});
+
+test('a tray must be able to feed the nozzle its filament is sliced for', () => {
+  // H2D mock: AMS 0 (info 2103) feeds the left extruder, AMS 1 (info 2003) the right one.
+  const job = (amsMapping, filamentMap, extra = {}) => ({ model: 'h2d', nozzleDiameters: [], materials: ['PLA'], useAMS: true, amsMapping, filamentMap, ...extra });
+  const h2d = mockStatus('H2D');
+  assert.doesNotThrow(() => validatePrinterState(h2d, job([1], [1])));
+  assert.doesNotThrow(() => validatePrinterState(h2d, job([4], [2])));
+  assert.throws(() => validatePrinterState(h2d, job([1], [2])), /AMS 0 can't feed the H2D's right nozzle.*1807-8006/);
+  assert.throws(() => validatePrinterState(h2d, job([4], [1])), /AMS 1 can't feed the H2D's left nozzle/);
+  // External holders: 254 left, 255 right.
+  assert.throws(() => validatePrinterState(h2d, { ...job([254], [2]), useAMS: false }), /External spool 254 can't feed the H2D's right nozzle/);
+  // H2C: its AMS feeds only the right (rack) extruder; the left one only from the external spool.
+  const h2c = mockStatus('H2C', { ams: { tray_exist_bits: '1', tray_now: '255', ams: [{ id: '0', info: '1023', tray: [{ id: '0', tray_type: 'PLA' }] }] } });
+  assert.doesNotThrow(() => validatePrinterState(h2c, { ...job([0], [2]), model: 'h2c' }));
+  assert.throws(() => validatePrinterState(h2c, { ...job([0], [1]), model: 'h2c' }), /AMS 0 can't feed the H2C's left nozzle/);
+  // X2D: the AMS is bound to the left extruder (info 11002103); a Filament Track Switch (0xE) feeds both only when fitted.
+  const x2d = mockStatus('X2D');
+  assert.doesNotThrow(() => validatePrinterState(x2d, { ...job([0], [1]), model: 'x2d' }));
+  assert.throws(() => validatePrinterState(x2d, { ...job([0], [2]), model: 'x2d' }), /can't feed the X2D's right nozzle/);
+  const switched = units => mockStatus('X2D', { ams: { ...x2d.raw.ams, ams: x2d.raw.ams.ams.map(unit => ({ ...unit, info: '11000E03' })) }, device: { ...x2d.raw.device, ...units } });
+  assert.doesNotThrow(() => validatePrinterState(switched({ fila_switch: { info: 1 } }), { ...job([0], [2]), model: 'x2d' }));
+  assert.throws(() => validatePrinterState(switched({ fila_switch: null }), { ...job([0], [2]), model: 'x2d' }), /feeds no nozzle/);
+  // Single-nozzle printers have nothing to bind.
+  assert.doesNotThrow(() => validatePrinterState(mockStatus('P2S'), { ...job([0], [1]), model: 'p2s' }));
 });
