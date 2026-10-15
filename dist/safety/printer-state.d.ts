@@ -35,6 +35,7 @@ export interface ValidatedPrinterState {
     model: string;
     reportedNozzles: ReportedNozzle[];
     filaments: ReportedFilament[];
+    hmsWarnings: string[];
 }
 /** Verifies reported configuration, not a physical nozzle/spool inspection. */
 export declare function validatePrinterState(status: any, requirements: PrinterStateRequirements): ValidatedPrinterState;

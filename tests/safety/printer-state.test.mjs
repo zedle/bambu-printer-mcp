@@ -86,8 +86,12 @@ test('rejects busy, failed, missing or unknown states while allowing IDLE and FI
 });
 test('requires explicit clean print error and valid HMS severity, but permits informative HMS', () => {
   for(const print_error of [undefined,1,'03008004','not-a-number']) assert.throws(() => check(fresh({print_error})), /error/i);
-  for(const hms of [undefined,'bad',[{attr:0,code:0x10001}],[{attr:0,code:0x20001}],[{attr:0,code:0x30001}],[{attr:0,code:0x50001}],[{attr:0}],[{severity:'info',code:0x10001}]]) assert.throws(() => check(fresh({hms})), /HMS/i);
+  // Fatal, unknown-severity and malformed entries block; serious and common ones come back as warnings.
+  for(const hms of [undefined,'bad',[{attr:0,code:0x10001}],[{attr:0,code:0x50001}],[{attr:0,code:0x00001}],[{attr:0}],[{severity:'info',code:0x10001}]]) assert.throws(() => check(fresh({hms})), /HMS/i);
   assert.doesNotThrow(() => check(fresh({hms:[{attr:0x03000100,code:0x40001}]})));
+  assert.deepEqual(check(fresh({hms:[{attr:0x0C000100,code:0x0002001B},{attr:0x03000100,code:0x30001},{attr:0x03000100,code:0x40001}]})).hmsWarnings,
+    ['HMS 0C00-0100-0002-001B (serious)','HMS 0300-0100-0003-0001 (common)']);
+  assert.throws(() => check(fresh({hms:[{attr:0x0C000100,code:0x0002001B},{attr:0x05000500,code:0x00010007}]})), /fatal HMS error \(HMS 0500-0500-0001-0007\)/);
   // A blocking entry names its code, so a lingering command-verification rejection is recognizable.
   assert.throws(() => check(fresh({hms:[{attr:0x05000500,code:0x00010007}]})), /HMS 0500-0500-0001-0007/);
 });
@@ -97,8 +101,11 @@ test('known maintenance reminders do not block, but faults beside them and unkno
   assert.doesNotThrow(() => check(fresh({hms:reminders})));
   for(const code of [0x00030003,0x00030005,0x00030006,0x00030007,0x00030010]) assert.doesNotThrow(() => check(fresh({hms:[{attr:0x05010400,code}]})));
   assert.throws(() => check(fresh({hms:[...reminders,{attr:0x05000500,code:0x00010007}]})), /HMS 0500-0500-0001-0007/);
-  for(const [attr,code] of [[0x05010400,0x00030008],[0x05010400,0x00010044],[0x05010401,0x00030002],[0x05000400,0x00030002]])
-    assert.throws(() => check(fresh({hms:[{attr,code}]})), /HMS/i);
+  // Codes outside the known reminder list keep their own severity: fatal blocks, common is only a warning.
+  assert.throws(() => check(fresh({hms:[{attr:0x05010400,code:0x00010044}]})), /fatal HMS/i);
+  for(const [attr,code] of [[0x05010400,0x00030008],[0x05010401,0x00030002],[0x05000400,0x00030002]])
+    assert.deepEqual(check(fresh({hms:[{attr,code}]})).hmsWarnings.map(w=>w.endsWith('(common)')), [true]);
+  assert.deepEqual(check(fresh({hms:reminders})).hmsWarnings, ['HMS 0501-0400-0003-0002 (maintenance reminder)','HMS 0501-0400-0003-0004 (maintenance reminder)']);
   assert.throws(() => check(fresh({print_error:1,hms:reminders})), /error/i);
 });
 const ams = {ams:[{id:'0',tray:[{id:'0',tray_type:'PLA',nozzle_temp_min:'190',nozzle_temp_max:'240'},{id:'1',tray_type:'PETG',nozzle_temp_min:'220',nozzle_temp_max:'270'}]}]};

@@ -1579,7 +1579,7 @@ class BambuPrinterMCPServer {
       validatePrinterState(initialStatus, requirements);
       const bedClearance = await this.bambu.confirmPrintPreflight(devId, initialStatus, inspection);
       const confirmedStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
-      validatePrinterState(confirmedStatus, requirements);
+      const { hmsWarnings } = validatePrinterState(confirmedStatus, requirements);
       this.bambu.assertBedClearance(confirmedStatus, bedClearance);
       const amsMapping = stringifyBridgeJson(mapping);
       const remoteFileName = uniquePrintName(threeMFPath);
@@ -1702,6 +1702,7 @@ class BambuPrinterMCPServer {
         useAMS,
         amsMapping: mapping,
         params: redactPrintParams(params),
+        ...(hmsWarnings.length ? { hmsWarnings } : {}),
       };
     }));
   }

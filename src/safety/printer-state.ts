@@ -116,7 +116,7 @@ export interface PrinterStateRequirements {
 }
 interface ReportedNozzle { index: number; diameter: number; type?: string; flow?: string }
 interface ReportedFilament { position: number; material: string; trayIndex: number; nozzleMin?: number; nozzleMax?: number }
-export interface ValidatedPrinterState { model: string; reportedNozzles: ReportedNozzle[]; filaments: ReportedFilament[] }
+export interface ValidatedPrinterState { model: string; reportedNozzles: ReportedNozzle[]; filaments: ReportedFilament[]; hmsWarnings: string[] }
 
 function finiteNumber(value: unknown): number | undefined {
   if (typeof value !== "number" && (typeof value !== "string" || !value.trim())) return undefined;
@@ -192,25 +192,31 @@ const MAINTENANCE_REMINDER_ATTR = 0x05010400;
 const MAINTENANCE_REMINDER_CODES = new Set([0x00030002, 0x00030003, 0x00030004, 0x00030005, 0x00030006, 0x00030007, 0x00030010]);
 const isMaintenanceReminder = (attr: number, code: number) => attr === MAINTENANCE_REMINDER_ATTR && MAINTENANCE_REMINDER_CODES.has(code);
 
-function validateErrors(raw: Record<string,any>, requireIdle: boolean) {
+// HMS severities (BambuStudio DevHMS.cpp: code >> 16; DevHMS.h): 1 fatal, 2 serious, 3 common, 4 info.
+// Only fatal entries block, like a print error: the printer itself refuses to start a job it can't run, and Bambu
+// Studio starts prints with serious/common entries listed. Those come back as warnings so the caller sees them.
+// Malformed entries and unknown severities still fail closed.
+function validateErrors(raw: Record<string,any>, requireIdle: boolean): string[] {
   const state = typeof raw.gcode_state === "string" ? raw.gcode_state.toUpperCase() : "UNKNOWN";
   if (requireIdle && !["IDLE","FINISH"].includes(state)) throw new Error(`Printer state ${state} is not safely idle.`);
   if (!requireIdle && !["IDLE","FINISH","RUNNING","PAUSE"].includes(state)) throw new Error(`Printer state ${state} is unknown or failed.`);
   if (finiteNumber(raw.print_error) !== 0) throw new Error("Printer reports a print error or did not report its error state.");
   if (!Array.isArray(raw.hms)) throw new Error("Printer HMS error state is missing or malformed.");
+  const warnings: string[] = [];
   for (const entry of raw.hms) {
     const code = finiteNumber(entry?.code);
     const attr = finiteNumber(entry?.attr);
-    if (code !== undefined && attr !== undefined && isMaintenanceReminder(attr, code)) continue;
-    // BambuStudio DevHMS.cpp: code >> 16; DevHMS.h: 1=fatal,2=serious,3=common,4=info.
-    // Unknown severities fail closed; attr identifies the module and is not a severity bitmask.
-    if (code === undefined || attr === undefined || !Number.isInteger(code) || !Number.isInteger(attr) || code < 0 || code > 0xffffffff || attr < 0 || attr > 0xffffffff || Math.floor(code / 65536) !== 4) {
-      const hex = (value: number) => value.toString(16).toUpperCase().padStart(8, "0");
-      const label = code !== undefined && attr !== undefined && Number.isInteger(code) && Number.isInteger(attr) && code >= 0 && attr >= 0
-        ? ` (HMS ${hex(attr).slice(0, 4)}-${hex(attr).slice(4)}-${hex(code).slice(0, 4)}-${hex(code).slice(4)})` : "";
-      throw new Error(`Printer reports actionable or unknown HMS errors${label}; inspect and resolve them before proceeding.`);
-    }
+    const wellFormed = code !== undefined && attr !== undefined && Number.isInteger(code) && Number.isInteger(attr) &&
+      code >= 0 && code <= 0xffffffff && attr >= 0 && attr <= 0xffffffff;
+    const hex = (value: number) => value.toString(16).toUpperCase().padStart(8, "0");
+    const label = wellFormed ? `HMS ${hex(attr!).slice(0, 4)}-${hex(attr!).slice(4)}-${hex(code!).slice(0, 4)}-${hex(code!).slice(4)}` : "";
+    if (wellFormed && isMaintenanceReminder(attr!, code!)) { warnings.push(`${label} (maintenance reminder)`); continue; }
+    const severity = wellFormed ? Math.floor(code! / 65536) : 0;
+    if (severity === 2 || severity === 3) { warnings.push(`${label} (${severity === 2 ? "serious" : "common"})`); continue; }
+    if (severity === 4) continue;
+    throw new Error(`Printer reports ${severity === 1 ? "a fatal" : "an unknown or malformed"} HMS error${label ? ` (${label})` : ""}; inspect and resolve it before proceeding.`);
   }
+  return warnings;
 }
 function trayRange(value: unknown, label: string): number | undefined {
   if (value === undefined || value === null || value === "" || value === "0" || value === 0) return undefined;
@@ -261,7 +267,7 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
   const identity = observedIdentity(raw, String(status.serial ?? ""));
   const model = normalizeModel(requirements.model);
   if (!model || !identity.model || model !== identity.model) throw new Error(`Printer model identity mismatch: requested ${requirements.model}, observed ${identity.model ?? "unknown"}.`);
-  validateErrors(raw, requirements.requireIdle !== false);
+  const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false);
   if (requirements.requireLoadedFilament && (raw.ams?.tray_now !== undefined || Array.isArray(raw.ams?.ams))) {
     const current = finiteNumber(raw.ams?.tray_now);
     if (current === 255) throw new Error("The nozzle is explicitly reported unloaded. Load the declared filament before starting or resuming this G-code job.");
@@ -320,7 +326,7 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
       filaments.push({position,material,trayIndex,nozzleMin,nozzleMax});
     }
   }
-  return {model,reportedNozzles:nozzles,filaments};
+  return {model,reportedNozzles:nozzles,filaments,hmsWarnings};
 }
 
 /** Manual M104 cannot remap filament slots. Validate the material already at the nozzle. */
