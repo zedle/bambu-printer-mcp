@@ -694,5 +694,6 @@ export async function inspectPrintFile(filePath, options) {
         ...(filamentMap && filamentMap.every(value => Number.isInteger(value) && value >= 1 && value <= nozzleDiameters.length) ? { filamentMap } : {}),
         ...(physicalMap ? { physicalExtruderMap: physicalMap } : {}),
         ...(perFilament('filament_ids') ? { filamentIds: perFilament('filament_ids') } : {}),
-        ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {}) };
+        ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {}),
+        ...(perFilament('filament_type') ? { filamentTypes: perFilament('filament_type') } : {}) };
 }

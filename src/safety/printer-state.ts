@@ -1,6 +1,6 @@
 import { BambuClient, GetVersionCommand, PushAllCommand } from "bambu-node";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
-import { DUAL_EXTRUDER_MODELS, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
+import { DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
 
 const MAX_REPORT_AGE_MS = 15_000;
 const MODEL_IDS: Record<string, string> = {
@@ -116,8 +116,12 @@ export interface PrinterStateRequirements {
   nozzleFlows?: string[];
   /** Sliced (logical, left first) extruder to physical extruder id; Studio's default for dual-nozzle printers is [1,0]. */
   physicalExtruderMap?: number[];
+  /** Per filament: sliced extruder (1 = left, 2 = right), raw filament_type (e.g. PLA-CF) and Bambu filament id. */
+  filamentMap?: number[];
+  filamentTypes?: string[];
+  filamentIds?: string[];
 }
-interface ReportedNozzle { index: number; diameter: number; type?: string; flow?: string }
+interface ReportedNozzle { index: number; diameter: number; type?: string; flow?: string; stat?: number }
 interface ReportedFilament { position: number; material: string; trayIndex: number; nozzleMin?: number; nozzleMax?: number }
 export interface ValidatedPrinterState { model: string; reportedNozzles: ReportedNozzle[]; filaments: ReportedFilament[]; hmsWarnings: string[] }
 
@@ -127,6 +131,18 @@ function finiteNumber(value: unknown): number | undefined {
   return Number.isFinite(number) ? number : undefined;
 }
 const token = (value: unknown) => typeof value === "string" ? value.trim().toLowerCase().replace(/[\s_-]/g, "") : "";
+const NOZZLE_TYPES = ["stainlesssteel","hardenedsteel","tungstencarbide","brass"];
+const NOZZLE_FLOWS = ["standard","highflow","tpuhighflow","e3dhighflow"];
+// BambuStudio resources/info/nozzle_info.json nozzle_hrc (Print::get_hrc_by_nozzle_type defaults).
+const NOZZLE_HRC: Record<string, number> = { hardenedsteel: 55, stainlesssteel: 20, tungstencarbide: 85, brass: 2 };
+/** Bambu filament profiles' required_nozzle_HRC: 40 for carbon/glass-filled, PA/PPA/PPS and PLA Glow, 3 otherwise. */
+function requiredNozzleHrc(type: unknown, filamentId?: string): number {
+  const id = String(filamentId ?? "").trim().toUpperCase();
+  if (id === "GFA12") return 40;
+  if (id === "GFN99" || /^GFS/.test(id)) return 3;
+  const text = String(type ?? "").trim().toUpperCase();
+  return /-(?:CF|GF)\b|^(?:PA(?:6|12|HT)?|PPA|PPS)(?:$|[-\s])/.test(text) ? 40 : 3;
+}
 function nozzleTypeAndFlow(value: unknown): {type?: string; flow?: string} {
   const text = String(value ?? "");
   if (/^H[A-Z]\d\d/i.test(text)) {
@@ -138,23 +154,28 @@ function nozzleTypeAndFlow(value: unknown): {type?: string; flow?: string} {
   const type = token(value);
   return {type: ["stainlesssteel","hardenedsteel","tungstencarbide","brass"].includes(type) ? type : undefined};
 }
-function reportedNozzles(raw: Record<string,any>): ReportedNozzle[] {
+/** Mounted nozzles (ids 0-15). Hotend-rack nozzles (ids 16-31, H2C) come from rackNozzles. */
+function reportedNozzles(raw: Record<string,any>, rack = false): ReportedNozzle[] {
   const info = raw.device?.nozzle?.info;
   const output: ReportedNozzle[] = [];
   if (Array.isArray(info)) {
     for (const entry of info) {
       const index = finiteNumber(entry?.id);
-      // Rack nozzles (0x10+) are not interchangeable with the active extruder nozzle.
-      if (index !== undefined && index >= 16) continue;
+      // Rack nozzles (0x10+) are stored hotends, not the one mounted on an extruder.
+      if (index !== undefined && (index >= 16) !== rack) continue;
       const diameter = finiteNumber(entry?.diameter);
-      if (index === undefined || !Number.isInteger(index) || index < 0 || diameter === undefined || diameter <= 0) throw new Error("Printer reported malformed nozzle identity or diameter.");
+      if (index === undefined || !Number.isInteger(index) || index < 0 || index > 31 || diameter === undefined || diameter <= 0) throw new Error("Printer reported malformed nozzle identity or diameter.");
+      let stat: number | undefined;
       if (entry.stat !== undefined) {
-        const stat = finiteNumber(entry.stat);
-        if (stat === undefined || !Number.isInteger(stat) || stat < 0 || (stat & 7) !== 0) throw new Error(`Printer nozzle ${index} information is unreliable, abnormal or unknown.`);
+        stat = finiteNumber(entry.stat);
+        if (stat === undefined || !Number.isInteger(stat) || stat < 0) throw new Error(`Printer nozzle ${index} status is malformed.`);
       }
       if (output.some(nozzle => nozzle.index === index)) throw new Error("Printer reported ambiguous duplicate nozzle indices.");
-      output.push({index,diameter,...nozzleTypeAndFlow(entry.type)});
+      output.push({index,diameter,...nozzleTypeAndFlow(entry.type),...(stat === undefined ? {} : {stat})});
     }
+    if (rack) return output;
+  } else if (rack) {
+    return output;
   } else if (Array.isArray(raw.nozzle_diameter)) {
     raw.nozzle_diameter.forEach((value: unknown,index: number) => {
       const diameter = finiteNumber(value);
@@ -174,9 +195,8 @@ function reportedNozzles(raw: Record<string,any>): ReportedNozzle[] {
         if (raw.flag3 !== undefined) {
           const flag = finiteNumber(raw.flag3);
           if (flag === undefined || !Number.isInteger(flag) || flag < 0 || flag > 0xffffffff) throw new Error("Printer legacy nozzle flow report is malformed.");
-          const flowFlag = (flag >>> 10) & 7;
-          if (flowFlag > 1) throw new Error("Printer legacy nozzle flow variant is unknown.");
-          if (flowFlag === 1) configuration.flow = "highflow";
+          // DevNozzleSystem ParseV1_0: 1 is the high-flow upgrade, every other value standard flow.
+          if (((flag >>> 10) & 7) === 1) configuration.flow = "highflow";
         }
       }
       output.push({index:0,diameter,...configuration,
@@ -319,18 +339,54 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
   if (indices.length !== expectedDiameters.length || (!requirements.usedNozzleIndices && nozzles.length !== expectedDiameters.length)) {
     throw new Error("Nozzle selection is missing or ambiguous; specify each used nozzle and verify its reported diameter.");
   }
-  expectedDiameters.forEach((diameter,position) => {
-    const nozzle = nozzles.find(value => value.index === indices[position]);
-    if (!Number.isFinite(diameter) || diameter <= 0 || !nozzle || Math.abs(nozzle.diameter - diameter) > 0.0001) throw new Error(`Printer nozzle ${indices[position]} diameter does not match the job (${diameter} mm).`);
+  // Bambu Studio (SelectMachine.cpp CheckErrorExtruderNozzleWithSlicing) checks only the extruders the plate's used
+  // filaments run on, and only diameter and flow; nozzle material feeds a hardness warning. An unreliable report is a
+  // warning (PrintStatusHasUnreliableNozzleWarning); an abnormal or unknown nozzle on a used extruder blocks here.
+  const dualJob = !!extruderMap && extruderMap.length === 2 && !requirements.usedNozzleIndices;
+  const usedFilaments = requirements.usedFilamentPositions ?? (requirements.materials ?? []).map((_, index) => index);
+  const filamentsOn = (position: number) => dualJob && requirements.filamentMap
+    ? usedFilaments.filter(filament => requirements.filamentMap![filament] === position + 1) : usedFilaments;
+  const checked = expectedDiameters.map((_, position) => position).filter(position => !dualJob || !requirements.filamentMap || filamentsOn(position).length > 0);
+  const rack = NOZZLE_RACK_MODELS.has(model) ? reportedNozzles(raw, true) : [];
+  const usable = (nozzle: ReportedNozzle, diameter: number, flow: string) => (nozzle.stat === undefined || ((nozzle.stat >>> 1) & 3) === 0) &&
+    Math.abs(nozzle.diameter - diameter) <= 0.0001 && (requirements.nozzleFlows === undefined || flow === nozzle.flow);
+  for (const position of checked) {
+    const diameter = expectedDiameters[position];
+    const physical = indices[position];
     const expectedType = token(requirements.nozzleTypes?.[broadcast ? 0 : position]);
     const expectedFlow = token(requirements.nozzleFlows?.[broadcast ? 0 : position]);
-    if (requirements.nozzleTypes !== undefined && (!["stainlesssteel","hardenedsteel","tungstencarbide","brass"].includes(expectedType) || expectedType !== nozzle.type)) {
-      throw new Error(`Printer nozzle ${indices[position]} type is unknown or does not match the job.`);
+    if (!Number.isFinite(diameter) || diameter <= 0) throw new Error(`Printer nozzle ${physical} diameter does not match the job (${diameter} mm).`);
+    if (requirements.nozzleTypes !== undefined && !NOZZLE_TYPES.includes(expectedType)) throw new Error(`The job's nozzle type for printer nozzle ${physical} is unknown.`);
+    if (requirements.nozzleFlows !== undefined && !NOZZLE_FLOWS.includes(expectedFlow)) throw new Error(`Printer nozzle ${physical} flow variant is unknown or does not match the job.`);
+    const mounted = nozzles.find(value => value.index === physical);
+    let selected: ReportedNozzle[];
+    if (rack.length && physical === MAIN_EXTRUDER_ID && !requirements.usedNozzleIndices) {
+      // The H2C's right extruder swaps hotends from its rack: Studio accepts the job when the mounted hotend or any rack
+      // hotend matches (DevNozzleSystem::CollectNozzles skips abnormal ones), and blocks while the rack is being read or
+      // when the toolhead and all six rack places are full.
+      const state = finiteNumber(raw.device?.nozzle?.state);
+      if (state !== undefined && ((state >>> 4) & 0xf) > 0) throw new Error("The printer is still reading its hotend rack; wait for it to finish and retry.");
+      selected = [mounted, ...rack].filter((nozzle): nozzle is ReportedNozzle => !!nozzle && usable(nozzle, diameter, expectedFlow));
+      if (!selected.length) throw new Error(`No mounted or rack hotend on the right nozzle matches the job (${diameter} mm${requirements.nozzleFlows !== undefined ? `, ${expectedFlow}` : ""}).`);
+      if (mounted && rack.filter(nozzle => nozzle.index <= 21).length >= 6) throw new Error("The toolhead and hotend rack are full. Remove at least one hotend before printing.");
+    } else {
+      if (!mounted || Math.abs(mounted.diameter - diameter) > 0.0001) throw new Error(`Printer nozzle ${physical} diameter does not match the job (${diameter} mm).`);
+      if (mounted.stat !== undefined && ((mounted.stat >>> 1) & 3) !== 0) throw new Error(`Printer nozzle ${physical} is reported abnormal or unknown; refresh or replace it before printing.`);
+      if (requirements.nozzleTypes !== undefined && !mounted.type) throw new Error(`Printer nozzle ${physical} type is unknown; the printer must report its installed nozzle.`);
+      if (requirements.nozzleFlows !== undefined && expectedFlow !== mounted.flow) throw new Error(`Printer nozzle ${physical} flow variant is unknown or does not match the job.`);
+      selected = [mounted];
     }
-    if (requirements.nozzleFlows !== undefined && (!["standard","highflow","tpuhighflow","e3dhighflow"].includes(expectedFlow) || expectedFlow !== nozzle.flow)) {
-      throw new Error(`Printer nozzle ${indices[position]} flow variant is unknown or does not match the job.`);
+    if (selected.every(nozzle => nozzle.stat !== undefined && (nozzle.stat & 1) !== 0)) hmsWarnings.push(`nozzle ${physical} information is unreliable (refresh the nozzle information on the printer)`);
+    // Studio's hardness check (is_nozzle_hrc_matched) warns, never blocks: the filament is harder than the nozzle.
+    for (const filament of filamentsOn(position)) {
+      const material = requirements.filamentTypes?.[filament] ?? requirements.materials?.[filament];
+      const required = requiredNozzleHrc(material, requirements.filamentIds?.[filament]);
+      const nozzle = selected.find(value => value.type) ?? selected[0];
+      if (nozzle.type && NOZZLE_HRC[nozzle.type] < required) {
+        hmsWarnings.push(`${material} is harder than nozzle ${physical} (${nozzle.type.replace("steel", " steel").replace("tungstencarbide", "tungsten carbide")}); it may wear the nozzle`);
+      }
     }
-  });
+  }
   const filaments: ReportedFilament[] = [];
   // Heating the bed alone has no filament requirement. All other callers declare each used material.
   if (requirements.verifyMaterials !== false && (requirements.materials !== undefined || requirements.nozzleDiameters.length)) {

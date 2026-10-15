@@ -71,3 +71,34 @@ test('every dual-nozzle model compares the sliced left nozzle with physical id 1
   assert.deepEqual(models.physicalExtruderMap('p2s'), [0]);
   for (const bad of [[1, 1], [0], [2, 0]]) assert.throws(() => models.physicalExtruderMap('x2d', bad), /physical_extruder_map/);
 });
+
+test('only the extruders the used filaments run on are checked', () => {
+  // Right (id 0) 0.4 standard; left (id 1) a 0.8 high-flow hotend the job never touches.
+  const device = nozzles => ({ ...mockStatus('H2D').raw.device, nozzle: { info: nozzles } });
+  const status = mockStatus('H2D', { device: device([{ id: 0, diameter: 0.4, type: 'HS01', stat: 0 }, { id: 1, diameter: 0.8, type: 'HH01', stat: 6 }]) });
+  const job = extra => ({ model: 'h2d', nozzleDiameters: [0.4, 0.4], nozzleFlows: ['standard', 'standard'], materials: ['PLA', 'PETG'],
+    usedFilamentPositions: [1], filamentMap: [1, 2], useAMS: false, amsMapping: [-1, 255], ...extra });
+  assert.doesNotThrow(() => validatePrinterState(status, job()));
+  // Once a used filament runs on the left extruder, its nozzle is compared and its abnormal state blocks.
+  assert.throws(() => validatePrinterState(status, job({ usedFilamentPositions: [0, 1], amsMapping: [254, 255] })), /nozzle 1 diameter/);
+  const abnormal = mockStatus('H2D', { device: device([{ id: 0, diameter: 0.4, type: 'HS01', stat: 0 }, { id: 1, diameter: 0.4, type: 'HS01', stat: 2 }]) });
+  assert.throws(() => validatePrinterState(abnormal, job({ usedFilamentPositions: [0, 1], amsMapping: [254, 255] })), /nozzle 1 is reported abnormal/);
+  assert.doesNotThrow(() => validatePrinterState(abnormal, job()));
+});
+
+test('the H2C right extruder accepts a matching rack hotend and blocks on a busy or full rack', () => {
+  // Mock H2C: mounted 0.4 HS01 on both extruders; rack 16 (0.2 HS00), 17-19/21 (0.4/0.6 HS01).
+  const job = (diameters, extra = {}) => ({ model: 'h2c', nozzleDiameters: diameters, nozzleFlows: ['standard', 'standard'], materials: ['PLA'],
+    usedFilamentPositions: [0], filamentMap: [2], useAMS: true, amsMapping: [0], ...extra });
+  const ams = { ...mockStatus('H2C').raw.ams, tray_exist_bits: '1', ams: [{ id: '0', info: '1023', tray: [{ id: '0', tray_type: 'PLA' }] }] };
+  const status = (nozzle = {}) => mockStatus('H2C', { ams, device: { ...mockStatus('H2C').raw.device, nozzle: { ...mockStatus('H2C').raw.device.nozzle, ...nozzle } } });
+  assert.doesNotThrow(() => validatePrinterState(status(), job([0.4, 0.4])));
+  assert.doesNotThrow(() => validatePrinterState(status(), job([0.4, 0.6])), 'a 0.6 job is served from rack 18');
+  assert.doesNotThrow(() => validatePrinterState(status(), job([0.4, 0.2])), 'a 0.2 job is served from rack 16');
+  assert.throws(() => validatePrinterState(status(), job([0.4, 0.8])), /No mounted or rack hotend on the right nozzle matches/);
+  assert.throws(() => validatePrinterState(status({ state: 0x111 }), job([0.4, 0.4])), /reading its hotend rack/);
+  const full = mockStatus('H2C').raw.device.nozzle.info.concat([{ id: 20, diameter: 0.4, type: 'HS01', stat: 0 }]);
+  assert.throws(() => validatePrinterState(status({ info: full }), job([0.4, 0.4])), /hotend rack are full/);
+  // The left extruder has no rack: it must match its own mounted hotend.
+  assert.throws(() => validatePrinterState(status(), job([0.6, 0.4], { filamentMap: [1], amsMapping: [254], useAMS: false })), /nozzle 1 diameter/);
+});

@@ -78,10 +78,16 @@ test('matches used nozzles by index rather than accepting one matching nozzle am
   assert.doesNotThrow(() => check(status,req({model:'h2d',nozzleDiameters:[0.6],usedNozzleIndices:[1],nozzleFlows:['Standard']})));
   assert.throws(() => check(status,req({model:'h2d',nozzleDiameters:[0.6],usedNozzleIndices:[1],nozzleFlows:['High Flow']})), /flow/i);
 });
-test('reported type, flow, absent or abnormal multi nozzle state cannot contradict job', () => {
-  assert.throws(() => check(fresh({nozzle_type:'stainless_steel'}),req({nozzleTypes:['hardened_steel']})), /type/i);
+test('nozzle material only feeds a hardness warning; flow and abnormal nozzles block, like Bambu Studio', () => {
+  // Studio compares diameter and flow (CheckErrorExtruderNozzleWithSlicing): a stock hardened-steel preset prints on a
+  // stainless nozzle, with a warning only when the filament is harder than the nozzle.
+  assert.deepEqual(check(fresh({nozzle_type:'stainless_steel'}),req({nozzleTypes:['hardened_steel']})).hmsWarnings, []);
+  assert.match(check(fresh({nozzle_type:'stainless_steel'}),req({nozzleTypes:['hardened_steel'],filamentTypes:['PLA-CF']})).hmsWarnings.join(), /PLA-CF is harder than nozzle 0 \(stainless steel\)/);
+  assert.deepEqual(check(fresh({nozzle_type:'hardened_steel'}),req({filamentTypes:['PLA-CF']})).hmsWarnings, []);
   assert.throws(() => check(fresh({nozzle_type:'HH01'}),req({nozzleFlows:['Standard']})), /flow/i);
-  for(const stat of [1,2,4]) assert.throws(() => check(fresh({device:{nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat}]}}})), /nozzle|reliable|abnormal/i);
+  // stat bit 0 is "unreliable" (a warning in Studio); bits 1-2 abnormal or unknown, which block a used nozzle.
+  assert.match(check(fresh({device:{nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat:1}]}}})).hmsWarnings.join(), /nozzle 0 information is unreliable/);
+  for(const stat of [2,4]) assert.throws(() => check(fresh({device:{nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat}]}}})), /abnormal or unknown/i);
 });
 test('rejects busy, failed, missing or unknown states while allowing IDLE and FINISH', () => {
   for(const gcode_state of ['RUNNING','PAUSE','PREPARE','SLICING','OFFLINE','UNKNOWN',undefined]) assert.throws(() => check(fresh({gcode_state})), /state|idle/i);
@@ -233,7 +239,8 @@ test('legacy nozzle reports use Bambu standard-flow default and flag3 high-flow 
   assert.throws(() => check(fresh({flag3:1024}),req({nozzleFlows:['Standard']})),/flow/i);
   assert.doesNotThrow(() => check(fresh({flag3:1024}),req({nozzleFlows:['High Flow']})));
   assert.throws(() => check(fresh({flag3:1024}),req({nozzleFlows:['Standard']})),/flow/i);
-  assert.throws(() => check(fresh({flag3:2048}),req({nozzleFlows:['Standard']})),/flow|nozzle/i);
+  // Studio's ParseV1_0 treats any other flag value as standard flow.
+  assert.doesNotThrow(() => check(fresh({flag3:2048}),req({nozzleFlows:['Standard']})));
 });
 
 for (const [prefix, model, reportedModel] of [['039', 'a1', 'A1'], ['030', 'a1mini', 'A1M']]) {
@@ -266,7 +273,8 @@ test('H2C job nozzles (left, right) are matched to the printer report (id 1 left
   const job=(nozzleTypes,nozzleFlows)=>req({model:'h2c',serial,nozzleDiameters:[0.4,0.4],nozzleTypes,nozzleFlows});
   assert.doesNotThrow(()=>check(status,job(['tungsten_carbide','hardened_steel'],['high_flow','standard'])));
   assert.throws(()=>check(status,job(['hardened_steel','tungsten_carbide'],['standard','high_flow'])),/type|flow/i);
-  assert.throws(()=>check(status,job(['hardened_steel','hardened_steel'],['standard','standard'])),/nozzle 1 type/i);
+  // The nozzle material doesn't have to match the preset (Studio checks diameter and flow only).
+  assert.doesNotThrow(()=>check(status,job(['hardened_steel','hardened_steel'],['high_flow','standard'])));
   assert.throws(()=>check(status,job(['tungsten_carbide','hardened_steel'],['standard','standard'])),/nozzle 1 flow/i);
   // Explicit physical selections keep the printer's own ids.
   assert.doesNotThrow(()=>check(status,req({model:'h2c',serial,nozzleDiameters:[0.4],usedNozzleIndices:[1],nozzleTypes:['tungsten_carbide'],nozzleFlows:['high_flow']})));

@@ -19,6 +19,8 @@ export interface PrintFileInspection {
     /** Per filament, from the plate header: Bambu filament ids (e.g. GFL99) and #RRGGBB colours. */
     filamentIds?: string[];
     filamentColours?: string[];
+    /** Per filament, from the plate header: the raw filament_type (e.g. PLA-CF; materials holds the base family). */
+    filamentTypes?: string[];
 }
 /** Inspect the exact selected plate. This does not simulate firmware or arbitrary motion:
  * only declared object bounds are checked, never purge/homing/wipe travel coordinates.

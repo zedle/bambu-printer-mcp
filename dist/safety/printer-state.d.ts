@@ -19,12 +19,17 @@ export interface PrinterStateRequirements {
     nozzleFlows?: string[];
     /** Sliced (logical, left first) extruder to physical extruder id; Studio's default for dual-nozzle printers is [1,0]. */
     physicalExtruderMap?: number[];
+    /** Per filament: sliced extruder (1 = left, 2 = right), raw filament_type (e.g. PLA-CF) and Bambu filament id. */
+    filamentMap?: number[];
+    filamentTypes?: string[];
+    filamentIds?: string[];
 }
 interface ReportedNozzle {
     index: number;
     diameter: number;
     type?: string;
     flow?: string;
+    stat?: number;
 }
 interface ReportedFilament {
     position: number;

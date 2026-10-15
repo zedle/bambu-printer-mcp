@@ -24,6 +24,8 @@ export interface PrintFileInspection {
   /** Per filament, from the plate header: Bambu filament ids (e.g. GFL99) and #RRGGBB colours. */
   filamentIds?: string[];
   filamentColours?: string[];
+  /** Per filament, from the plate header: the raw filament_type (e.g. PLA-CF; materials holds the base family). */
+  filamentTypes?: string[];
 }
 type Metadata = Record<string, unknown>;
 const NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
@@ -501,5 +503,6 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
     ...(filamentMap && filamentMap.every(value => Number.isInteger(value) && value >= 1 && value <= nozzleDiameters.length) ? { filamentMap } : {}),
     ...(physicalMap ? { physicalExtruderMap: physicalMap } : {}),
     ...(perFilament('filament_ids') ? { filamentIds: perFilament('filament_ids') } : {}),
-    ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {})};
+    ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {}),
+    ...(perFilament('filament_type') ? { filamentTypes: perFilament('filament_type') } : {})};
 }
