@@ -53,6 +53,14 @@ export declare function buildLanProjectFile(options: LanProjectFileOptions): {
 export declare function withHmsWarnings<T extends Record<string, unknown>>(result: T, hmsWarnings: readonly string[] | undefined): T & {
     hmsWarnings?: string[];
 };
+/**
+ * Bambu Studio's clear-error command (MachineObject::command_clean_print_error): the job's subtask_id and the
+ * print_error being cleared, from a fresh report; the bare form leaves the error in place. Every route (LAN MQTT,
+ * the signed bridge, the native helper) sends this one shape.
+ */
+export declare function buildCleanPrintError(raw: Record<string, any> | undefined, sequenceId?: string): {
+    print: Record<string, unknown>;
+};
 /** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
 export declare function dispatchStatusLabel(dispatch: "started" | "unconfirmed"): "success" | "dispatched_unconfirmed";
 type DispatchVerdict = {
@@ -125,7 +133,9 @@ export declare class BambuImplementation {
     cancelJob(host: string, serial: string, token: string, dispatch?: () => Promise<any>): Promise<any>;
     pauseJob(host: string, serial: string, token: string, dispatch?: () => Promise<any>): Promise<any>;
     resumeJob(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>) => Promise<any>): Promise<any>;
-    clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>) => Promise<any>): Promise<any>;
+    clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: {
+        print: Record<string, unknown>;
+    }) => Promise<any>): Promise<any>;
     setPrintSpeed(host: string, serial: string, token: string, speedMode: string | number): Promise<any>;
     setAirductMode(host: string, serial: string, token: string, mode: string): Promise<any>;
     rereadAmsRfid(host: string, serial: string, token: string, amsId: number, slotId: number): Promise<any>;

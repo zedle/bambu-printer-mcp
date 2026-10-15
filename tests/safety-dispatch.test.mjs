@@ -1009,3 +1009,20 @@ test("bridge snapshots are retained only after handoff, including an uncertain r
   assert.deepEqual(await fs.readFile(dispatchedSnapshot), await fs.readFile(file));
   await fs.rm(path.dirname(dispatchedSnapshot), { recursive: true, force: true });
 });
+
+test("LAN and signed error clears send the same Studio-form clean_print_error", async () => {
+  const status = safetyStatus({ state: "FAILED", print_error: 0x0700_8012, subtask_id: "4567", hms: [] });
+  const { printer, events } = isolatedPrinter(status);
+  await printer.clearHmsErrors(host, serial, token);
+  const lan = events.filter(({ action }) => action === "publish").map(({ payload }) => payload.print);
+  assert.equal(lan.length, 1);
+  let signed;
+  await printer.clearHmsErrors(host, serial, token, async (_active, beforeDispatch, command) => { await beforeDispatch(); signed = command.print; });
+  for (const command of [lan[0], signed]) {
+    assert.deepEqual(Object.keys(command).sort(), ["command", "print_error", "sequence_id", "subtask_id"]);
+    assert.equal(command.command, "clean_print_error");
+    assert.equal(command.subtask_id, "4567");
+    assert.equal(command.print_error, 0x0700_8012);
+    assert.match(command.sequence_id, /^4\d{4}$/);
+  }
+});

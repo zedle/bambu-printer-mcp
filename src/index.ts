@@ -3672,12 +3672,9 @@ class BambuPrinterMCPServer {
           case "clear_hms_errors":
             result = await this.bambu.clearHmsErrors(host, bambuSerial, bambuToken,
               nativeControls
-                ? async (assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
-                    // Studio's form (MachineObject::command_clean_print_error): the job's subtask_id and the error being
-                    // cleared; without them the printer keeps the error.
-                    messageJson: JSON.stringify({ print: { command: "clean_print_error", sequence_id: nextSequenceId(),
-                      ...await (async () => { const raw = (await this.bambu.getSafetyStatus(host, bambuSerial, bambuToken))?.raw ?? {};
-                        return { subtask_id: String(raw.subtask_id ?? ""), print_error: Number(raw.print_error ?? 0) }; })() } }), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
+                ? async (assertActive, beforeDispatch, command) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
+                    // The same Studio-form command the LAN route publishes (buildCleanPrintError).
+                    messageJson: JSON.stringify(command), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
                 : undefined);
             break;
 

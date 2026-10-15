@@ -121,6 +121,14 @@ export function buildLanProjectFile(options) {
 export function withHmsWarnings(result, hmsWarnings) {
     return hmsWarnings?.length ? { ...result, hmsWarnings: [...hmsWarnings] } : result;
 }
+/**
+ * Bambu Studio's clear-error command (MachineObject::command_clean_print_error): the job's subtask_id and the
+ * print_error being cleared, from a fresh report; the bare form leaves the error in place. Every route (LAN MQTT,
+ * the signed bridge, the native helper) sends this one shape.
+ */
+export function buildCleanPrintError(raw, sequenceId = nextSequenceId()) {
+    return { print: { command: "clean_print_error", sequence_id: sequenceId, subtask_id: String(raw?.subtask_id ?? ""), print_error: Number(raw?.print_error ?? 0) } };
+}
 /** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
 export function dispatchStatusLabel(dispatch) {
     return dispatch === "started" ? "success" : "dispatched_unconfirmed";
@@ -967,20 +975,25 @@ export class BambuImplementation {
             };
             const codes = codesFor(await this.getSafetyStatus(host, serial, token));
             await this.confirmHardwareAction(`Clear reported hardware errors on ${serial}: ${codes.join(", ")}? Inspect the printer and resolve the physical cause first. Confirm only after removing obstructions and correcting the fault.`, true);
+            let freshRaw;
             const beforeDispatch = async () => {
                 assertActive();
-                const current = codesFor(await this.getSafetyStatus(host, serial, token));
+                const status = await this.getSafetyStatus(host, serial, token);
+                const current = codesFor(status);
                 if (JSON.stringify(current) !== JSON.stringify(codes))
                     throw new Error("Hardware errors changed before clearing. Inspect the new report before retrying.");
+                freshRaw = status.raw;
                 assertActive();
             };
             await beforeDispatch();
+            // Built from the report just checked; the print_error it names is the one the codes check pins.
+            const command = buildCleanPrintError(freshRaw);
             const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
             assertActive();
             if (dispatch)
-                await dispatch(assertActive, beforeDispatch);
+                await dispatch(assertActive, beforeDispatch, command);
             else
-                await printer.publish({ print: { command: "clean_print_error", sequence_id: nextSequenceId() } });
+                await printer.publish(command);
             this.clearedErrors.set(serial, codes);
             await sleep(COMMAND_SETTLE_MS);
             return { status: "success", message: "Confirmed HMS clear command sent. The next print requires acknowledgment of these cleared codes.", cleared_codes: codes };

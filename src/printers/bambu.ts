@@ -160,6 +160,15 @@ export function withHmsWarnings<T extends Record<string, unknown>>(result: T, hm
   return hmsWarnings?.length ? { ...result, hmsWarnings: [...hmsWarnings] } : result;
 }
 
+/**
+ * Bambu Studio's clear-error command (MachineObject::command_clean_print_error): the job's subtask_id and the
+ * print_error being cleared, from a fresh report; the bare form leaves the error in place. Every route (LAN MQTT,
+ * the signed bridge, the native helper) sends this one shape.
+ */
+export function buildCleanPrintError(raw: Record<string, any> | undefined, sequenceId: string = nextSequenceId()): { print: Record<string, unknown> } {
+  return { print: { command: "clean_print_error", sequence_id: sequenceId, subtask_id: String(raw?.subtask_id ?? ""), print_error: Number(raw?.print_error ?? 0) } };
+}
+
 /** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
 export function dispatchStatusLabel(dispatch: "started" | "unconfirmed"): "success" | "dispatched_unconfirmed" {
   return dispatch === "started" ? "success" : "dispatched_unconfirmed";
@@ -1109,7 +1118,7 @@ export class BambuImplementation {
     });
   }
 
-  async clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>) => Promise<any>): Promise<any> {
+  async clearHmsErrors(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: { print: Record<string, unknown> }) => Promise<any>): Promise<any> {
     return withPrinterOperation(host, serial, async assertActive => {
       const codesFor = (status: any): string[] => {
         if (!Array.isArray(status.raw?.hms) || status.raw?.print_error === undefined) throw new Error("Fresh error codes are required before clearing hardware errors.");
@@ -1117,17 +1126,22 @@ export class BambuImplementation {
       };
       const codes = codesFor(await this.getSafetyStatus(host, serial, token));
       await this.confirmHardwareAction(`Clear reported hardware errors on ${serial}: ${codes.join(", ")}? Inspect the printer and resolve the physical cause first. Confirm only after removing obstructions and correcting the fault.`, true);
+      let freshRaw: Record<string, any> | undefined;
       const beforeDispatch = async () => {
         assertActive();
-        const current = codesFor(await this.getSafetyStatus(host, serial, token));
+        const status = await this.getSafetyStatus(host, serial, token);
+        const current = codesFor(status);
         if (JSON.stringify(current) !== JSON.stringify(codes)) throw new Error("Hardware errors changed before clearing. Inspect the new report before retrying.");
+        freshRaw = status.raw;
         assertActive();
       };
       await beforeDispatch();
+      // Built from the report just checked; the print_error it names is the one the codes check pins.
+      const command = buildCleanPrintError(freshRaw);
       const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
       assertActive();
-      if (dispatch) await dispatch(assertActive, beforeDispatch);
-      else await printer!.publish({ print: { command: "clean_print_error", sequence_id: nextSequenceId() } });
+      if (dispatch) await dispatch(assertActive, beforeDispatch, command);
+      else await printer!.publish(command);
       this.clearedErrors.set(serial, codes);
       await sleep(COMMAND_SETTLE_MS);
       return { status: "success", message: "Confirmed HMS clear command sent. The next print requires acknowledgment of these cleared codes.", cleared_codes: codes };
