@@ -514,6 +514,11 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
       if (DUAL_EXTRUDER_MODELS.has(model) && !requirements.usedNozzleIndices) assertFeedsExtruder(raw, model, trayIndex, physicalExtruderMap(model, requirements.physicalExtruderMap)[(requirements.filamentMap?.[position] ?? 1) - 1], position);
       const reportedType = typeof tray?.tray_type === "string" ? tray.tray_type.trim() : "";
       if (reportedType && normalizeMaterial(reportedType) !== material) throw new Error(`Reported material ${reportedType} in slot ${trayIndex} contradicts declared ${materials[position]}.`);
+      // A present tray whose type was never set (no RFID tag, nothing entered): Studio shows it as unset, so the
+      // declared material is the only evidence.
+      if (object(tray) && !reportedType) {
+        hmsWarnings.push(`${isExternalTray(trayIndex) ? `external spool ${trayIndex}` : `AMS slot ${trayIndex}`} reports no filament type; ${materials[position]} is as declared, not as reported`);
+      }
       if (!requirements.usedNozzleIndices) {
         const dual = DUAL_EXTRUDER_MODELS.has(model);
         const logical = dual ? (requirements.filamentMap?.[position] ?? 1) - 1 : 0;

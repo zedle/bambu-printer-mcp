@@ -72,3 +72,12 @@ test('the gates apply to print starts only, through validatePrinterState', () =>
   const warned = validatePrinterState(mockStatus('H2D', { ams_status: 0x0200 }), { ...job, printStart: true });
   assert.ok(warned.hmsWarnings.some(warning => /RFID/.test(warning)));
 });
+
+test('a present tray with no reported filament type is a warning: the declared material is unverified', () => {
+  const job = { model: 'h2d', nozzleDiameters: [], materials: ['PETG'], usedFilamentPositions: [0], useAMS: true, amsMapping: [0] };
+  const raw = mockReport('H2D');
+  const unset = { ...raw.ams, ams: raw.ams.ams.map(unit => unit.id === '0' ? { ...unit, tray: unit.tray.map(tray => tray.id === '0' ? { id: '0' } : tray) } : unit) };
+  const status = mockStatus('H2D', { ams: unset });
+  const { hmsWarnings } = validatePrinterState(status, job);
+  assert.ok(hmsWarnings.includes('AMS slot 0 reports no filament type; PETG is as declared, not as reported'), JSON.stringify(hmsWarnings));
+});
