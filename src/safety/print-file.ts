@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readBoundedPrintFile, loadSafe3mfArchive } from './archive.js';
 import { MACHINE_LIMITS, normalizeMaterial, normalizeModel, validateStartupPurgeTemperature, validateTemperature } from './limits.js';
+import { extruderCount, physicalExtruderMap } from './models.js';
 
 export interface PrintFileInspection {
   model: string;
@@ -18,6 +19,8 @@ export interface PrintFileInspection {
   nozzleFlows?: string[];
   /** Per filament, from the plate header: physical extruder (1 = left, 2 = right on dual-nozzle printers). */
   filamentMap?: number[];
+  /** Logical extruder (left first) to the printer's physical extruder id, from the project's physical_extruder_map. */
+  physicalExtruderMap?: number[];
   /** Per filament, from the plate header: Bambu filament ids (e.g. GFL99) and #RRGGBB colours. */
   filamentIds?: string[];
   filamentColours?: string[];
@@ -484,8 +487,19 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
     return values;
   };
   const filamentMap = perFilament('filament_map')?.map(Number);
+  // Studio compares sliced extruder i with physical extruder physical_extruder_map[i] (["1","0"] on every dual-nozzle
+  // Bambu profile). A declared map must describe this model's extruders; a missing one falls back to Studio's.
+  const declaredExtruderMap=metadataValues(metadata,['physical_extruder_map']);
+  const extruderMap=declaredExtruderMap.length ? consistent(declaredExtruderMap,value=>{
+    const values=list(value);return values.length && values.every(v=>/^\d+$/.test(v))?values.map(Number):undefined;
+  },'physical extruder map') : undefined;
+  if(extruderMap && nozzleDiameters.length!==extruderCount(model)) fail('sliced nozzle count does not match this printer model');
+  let physicalMap:number[]|undefined;
+  try {physicalMap=nozzleDiameters.length===extruderCount(model)?physicalExtruderMap(model,extruderMap):undefined;}
+  catch(error) {return fail(error instanceof Error?error.message:String(error));}
   return {model,nozzleDiameters,materials,usedFilamentPositions:[...used].sort((a,b)=>a-b),plateInternalPath,sha256,maxNozzleTemperature,maxBedTemperature,maxChamberTemperature,bedType,selectsAms,nozzleTypes,nozzleFlows,
     ...(filamentMap && filamentMap.every(value => Number.isInteger(value) && value >= 1 && value <= nozzleDiameters.length) ? { filamentMap } : {}),
+    ...(physicalMap ? { physicalExtruderMap: physicalMap } : {}),
     ...(perFilament('filament_ids') ? { filamentIds: perFilament('filament_ids') } : {}),
     ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {})};
 }

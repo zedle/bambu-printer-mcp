@@ -17,6 +17,8 @@ export interface PrinterStateRequirements {
     usedNozzleIndices?: number[];
     nozzleTypes?: string[];
     nozzleFlows?: string[];
+    /** Sliced (logical, left first) extruder to physical extruder id; Studio's default for dual-nozzle printers is [1,0]. */
+    physicalExtruderMap?: number[];
 }
 interface ReportedNozzle {
     index: number;

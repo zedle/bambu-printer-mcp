@@ -55,3 +55,19 @@ test('tray values accept both external holders and only real AMS-HT units', () =
   for (const value of [-1, 0, 15, 128, 135, 254, 255]) assert.equal(normalizeBridgeAmsTrayValue(value, 'ams'), value);
   for (const value of [16, 127, 136, 253, 256]) assert.throws(() => normalizeBridgeAmsTrayValue(value, 'ams'), /254\/255/);
 });
+
+test('every dual-nozzle model compares the sliced left nozzle with physical id 1', () => {
+  for (const [name, model] of [['H2D', 'h2d'], ['H2DPRO', 'h2dpro'], ['H2C', 'h2c'], ['X2D', 'x2d']]) {
+    // Right (id 0) 0.6, left (id 1) 0.4.
+    const device = { ...mockStatus(name).raw.device, nozzle: { info: [{ id: 0, diameter: 0.6, type: 'HS01', stat: 0 }, { id: 1, diameter: 0.4, type: 'HS01', stat: 0 }] } };
+    const status = mockStatus(name, { device });
+    const job = nozzleDiameters => ({ model, nozzleDiameters, nozzleFlows: ['standard', 'standard'], materials: ['PLA'], useAMS: false, amsMapping: [254] });
+    assert.doesNotThrow(() => validatePrinterState(status, job([0.4, 0.6])), name);
+    assert.throws(() => validatePrinterState(status, job([0.6, 0.4])), /nozzle 1 diameter/, name);
+    // A file that declares the identity map is compared that way.
+    assert.doesNotThrow(() => validatePrinterState(status, { ...job([0.6, 0.4]), physicalExtruderMap: [0, 1] }), name);
+  }
+  assert.deepEqual(models.physicalExtruderMap('h2d'), [1, 0]);
+  assert.deepEqual(models.physicalExtruderMap('p2s'), [0]);
+  for (const bad of [[1, 1], [0], [2, 0]]) assert.throws(() => models.physicalExtruderMap('x2d', bad), /physical_extruder_map/);
+});

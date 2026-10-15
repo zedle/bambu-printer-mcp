@@ -14,6 +14,8 @@ export interface PrintFileInspection {
     nozzleFlows?: string[];
     /** Per filament, from the plate header: physical extruder (1 = left, 2 = right on dual-nozzle printers). */
     filamentMap?: number[];
+    /** Logical extruder (left first) to the printer's physical extruder id, from the project's physical_extruder_map. */
+    physicalExtruderMap?: number[];
     /** Per filament, from the plate header: Bambu filament ids (e.g. GFL99) and #RRGGBB colours. */
     filamentIds?: string[];
     filamentColours?: string[];

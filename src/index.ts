@@ -994,17 +994,18 @@ function nativeAmsMapping2(mapping: number[] | undefined): string | undefined {
  * trays as {254|255, 0} and AMS-HT units as {unit, 0}; ams_mapping_info adds type, id, colours and the cloud task
  * nozzle (right 0, left 1, from the file's filament_map). Without them the printer runs the job as use_ams false.
  */
-function studioCloudMappings(mapping: number[], inspection: { materials: string[]; filamentMap?: number[]; filamentIds?: string[]; filamentColours?: string[]; nozzleDiameters: number[] },
+function studioCloudMappings(mapping: number[], inspection: { materials: string[]; filamentMap?: number[]; filamentIds?: string[]; filamentColours?: string[]; nozzleDiameters: number[]; physicalExtruderMap?: number[] },
   trayColour: (tray: number) => string | undefined): { v0: number[]; v1: { ams_id: number; slot_id: number }[]; info: Record<string, unknown>[] } {
   const v0 = mapping.map(tray => (tray === 254 || tray === 255 ? -1 : tray));
   const v1 = mapping.map(tray => tray < 0 ? { ams_id: 255, slot_id: 255 } : tray >= 128 ? { ams_id: tray, slot_id: 0 } : { ams_id: Math.floor(tray / 4), slot_id: tray % 4 });
   v1.forEach((entry, position) => { if (mapping[position] === 254 || mapping[position] === 255) v1[position] = { ams_id: mapping[position], slot_id: 0 }; });
   const info = mapping.map((tray, position) => {
     if (tray < 0) return { ams: -1, targetColor: "", filamentId: "", filamentType: "" };
-    const nozzle = inspection.nozzleDiameters.length === 2 ? inspection.filamentMap?.[position] : undefined;
+    const logical = inspection.nozzleDiameters.length === 2 ? inspection.filamentMap?.[position] : undefined;
+    const nozzleId = logical === undefined ? undefined : (inspection.physicalExtruderMap ?? [1, 0])[logical - 1];
     return {
       ams: tray, targetColor: trayColour(tray) ?? "", filamentId: inspection.filamentIds?.[position] ?? "", filamentType: inspection.materials[position] ?? "",
-      ...(nozzle === 1 ? { nozzleId: 1 } : nozzle === 2 ? { nozzleId: 0 } : {}),
+      ...(nozzleId === 0 || nozzleId === 1 ? { nozzleId } : {}),
       sourceColor: inspection.filamentColours?.[position] ?? "",
     };
   });

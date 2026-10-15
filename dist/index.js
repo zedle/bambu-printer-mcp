@@ -749,10 +749,11 @@ function studioCloudMappings(mapping, inspection, trayColour) {
     const info = mapping.map((tray, position) => {
         if (tray < 0)
             return { ams: -1, targetColor: "", filamentId: "", filamentType: "" };
-        const nozzle = inspection.nozzleDiameters.length === 2 ? inspection.filamentMap?.[position] : undefined;
+        const logical = inspection.nozzleDiameters.length === 2 ? inspection.filamentMap?.[position] : undefined;
+        const nozzleId = logical === undefined ? undefined : (inspection.physicalExtruderMap ?? [1, 0])[logical - 1];
         return {
             ams: tray, targetColor: trayColour(tray) ?? "", filamentId: inspection.filamentIds?.[position] ?? "", filamentType: inspection.materials[position] ?? "",
-            ...(nozzle === 1 ? { nozzleId: 1 } : nozzle === 2 ? { nozzleId: 0 } : {}),
+            ...(nozzleId === 0 || nozzleId === 1 ? { nozzleId } : {}),
             sourceColor: inspection.filamentColours?.[position] ?? "",
         };
     });

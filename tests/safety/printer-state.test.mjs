@@ -68,8 +68,11 @@ test('diameter must be reported and match; bed-only state reads may omit diamete
   assert.doesNotThrow(() => check(fresh({nozzle_diameter:undefined}),req({nozzleDiameters:[]})));
 });
 test('matches used nozzles by index rather than accepting one matching nozzle among multiple', () => {
+  // Report: id 0 is the right (main) nozzle, id 1 the left (deputy). Sliced files list the left nozzle first.
   const status = fresh({model_id:'O1D',nozzle_diameter:undefined,device:{nozzle:{info:[{id:0,diameter:0.4,type:'HH01',stat:0},{id:1,diameter:0.6,type:'HS01',stat:0}]}}});
-  assert.doesNotThrow(() => check(status,req({model:'h2d',nozzleDiameters:[0.4,0.6]})));
+  assert.doesNotThrow(() => check(status,req({model:'h2d',nozzleDiameters:[0.6,0.4]})));
+  // The mirror-image job (left 0.4, right 0.6) must not pass on this printer.
+  assert.throws(() => check(status,req({model:'h2d',nozzleDiameters:[0.4,0.6]})), /nozzle 1 diameter/i);
   assert.throws(() => check(status,req({model:'h2d',nozzleDiameters:[0.4,0.4]})), /nozzle|diameter/i);
   assert.throws(() => check(status,req({model:'h2d',nozzleDiameters:[0.4]})), /nozzle|ambiguous/i);
   assert.doesNotThrow(() => check(status,req({model:'h2d',nozzleDiameters:[0.6],usedNozzleIndices:[1],nozzleFlows:['Standard']})));

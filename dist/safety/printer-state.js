@@ -1,6 +1,6 @@
 import { GetVersionCommand, PushAllCommand } from "bambu-node";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
-import { DUAL_EXTRUDER_MODELS, externalHolders, isExternalTray } from "./models.js";
+import { DUAL_EXTRUDER_MODELS, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
 const MAX_REPORT_AGE_MS = 15000;
 const MODEL_IDS = {
     O1C: "H2C", O1C2: "H2C", O1D: "H2D", O1E: "H2D Pro", O1S: "H2S", N6: "X2D",
@@ -333,10 +333,12 @@ export function validatePrinterState(status, requirements) {
     // Without a physical selection, a scalar file requirement must match every reported nozzle.
     const broadcast = !requirements.usedNozzleIndices && requirements.nozzleDiameters.length === 1 && nozzles.length > 1;
     const expectedDiameters = broadcast ? nozzles.map(() => requirements.nozzleDiameters[0]) : requirements.nozzleDiameters;
-    // Sliced files list extruders left to right; the H2C reports its right (main) nozzle as id 0 and its left
-    // (deputy) as id 1. Verified on an H2C: id 0 carries the hotend rack (ids 16+) and the AMS, id 1 the
-    // external spool (extruder snow 0xFE..), matching Bambu Studio's "Right nozzle R3 / Left nozzle Ext".
-    const physicalIndex = (position) => model === "h2c" && requirements.nozzleDiameters.length === 2 ? 1 - position : position;
+    // Sliced files list extruders left to right; dual-nozzle printers report their right (main) nozzle as id 0 and
+    // their left (deputy) as id 1. Studio maps logical extruder i to physical_extruder_map[i], ["1","0"] on H2D, H2D Pro,
+    // H2C and X2D (fdm_bbl_3dp_002_common.json; DevNozzle::AtLeftExtruder is id 1). Verified on an H2C: id 0 carries the
+    // hotend rack (ids 16+) and the AMS, id 1 the external spool.
+    const extruderMap = requirements.nozzleDiameters.length === extruderCount(model) ? physicalExtruderMap(model, requirements.physicalExtruderMap) : undefined;
+    const physicalIndex = (position) => extruderMap?.[position] ?? position;
     const indices = requirements.usedNozzleIndices ?? (broadcast ? nozzles.map(nozzle => nozzle.index) : requirements.nozzleDiameters.map((_, index) => physicalIndex(index)));
     if (indices.length !== expectedDiameters.length || (!requirements.usedNozzleIndices && nozzles.length !== expectedDiameters.length)) {
         throw new Error("Nozzle selection is missing or ambiguous; specify each used nozzle and verify its reported diameter.");

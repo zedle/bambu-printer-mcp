@@ -561,3 +561,11 @@ test('H2C all-hotend preheat checks unused declared materials without adding AMS
 test('unrecognized G383 U targets cannot bypass other models thermal checks',async t=>{
   for(const model of ['P1S','H2D','X2D']) await assert.rejects(inspect(t,header(model)+'G383 O2 U400 L0\n',{model:model.toLowerCase()}),/unsupported|temperature/i);
 });
+test('dual-nozzle inspection reports the project physical_extruder_map, defaulting to Studio\'s [1,0]',async t=>{
+  const plate=header('H2D','PLA','0.4,0.6')+'M104 S220\nG1 X10 Y10 E1\n';
+  const project=map=>({'Metadata/project_settings.config':{printer_model:'Bambu Lab H2D',nozzle_diameter:['0.4','0.6'],filament_type:['PLA'],...(map?{physical_extruder_map:map}:{})},'Metadata/plate_1.gcode':plate});
+  assert.deepEqual((await inspect(t,'',{model:'h2d'},project(['1','0']))).physicalExtruderMap,[1,0]);
+  assert.deepEqual((await inspect(t,'',{model:'h2d'},project())).physicalExtruderMap,[1,0]);
+  assert.deepEqual((await inspect(t,'',{model:'h2d'},project(['0','1']))).physicalExtruderMap,[0,1]);
+  for(const map of [['1','1'],['0'],['2','0']]) await assert.rejects(inspect(t,'',{model:'h2d'},project(map)),/physical_extruder_map|extruder/i);
+});
