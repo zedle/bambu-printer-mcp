@@ -80,6 +80,7 @@ export class BambuNetworkBridge {
         this.lastStderr = "";
         this.recentLogs = [];
         this.subscribedDevices = new Set();
+        this.localChannels = new Set();
     }
     resolveBridgeCommand(override) {
         return (trimEnv(override) ||
@@ -254,6 +255,7 @@ export class BambuNetworkBridge {
             await withAgent("net.change_user", { user_info: userInfo });
         }
         this.subscribedDevices.clear();
+        this.localChannels.clear();
         this.agentId = agent;
         this.agentKey = key;
         return { agent, handshake: this.handshake };
@@ -339,6 +341,76 @@ export class BambuNetworkBridge {
             this.subscribedDevices.add(devId);
         }
     }
+    /**
+     * Open the plugin's own LAN MQTT session to a printer the way Bambu Studio does before a LAN print
+     * (MachineObject::connect, GUI_App's on_local_connect / on_printer_connected handlers): callbacks, connect_printer
+     * as bblp with the access code over TLS, wait for on_local_connect, request a full push and the version, wait
+     * until the printer's own report arrives on that session (the plugin reads its signing flag from it), then
+     * install the device certificate. Without it start_local_print has no session to publish on (-4030) and nothing
+     * to sign with. Once per agent and printer address.
+     */
+    async ensureLocalChannel(devId, devIp, accessCode, options = {}) {
+        if (!devId.trim())
+            throw new Error("A printer dev_id is required for a BambuNetwork LAN connection.");
+        if (!devIp.trim() || !accessCode.trim())
+            throw new Error("A printer address and LAN access code are required for a BambuNetwork LAN connection.");
+        const key = `${devId}\n${devIp}`;
+        if (this.localChannels.has(key))
+            return;
+        const lanOnly = options.lanOnly ?? true;
+        for (const fn of ["set_on_local_connect_fn", "set_on_local_message_fn", "set_on_printer_connected_fn"]) {
+            assertBridgeOk(await this.callWithAgent(`net.${fn}`, {}, options), `net.${fn}`);
+        }
+        assertBridgeOk(await this.callWithAgent("net.update_cert", {}, options), "net.update_cert");
+        const connect = await this.callWithAgent("net.connect_printer", { dev_id: devId, dev_ip: devIp, username: "bblp", password: accessCode, use_ssl: true }, options);
+        assertBridgeOk(connect, "net.connect_printer");
+        const connectCode = bridgeValueAsNumber(connect, "net.connect_printer");
+        if (connectCode !== 0)
+            throw new Error(`Bambu's network plugin could not start a LAN connection to printer ${devId} (connect_printer returned ${connectCode}); nothing was sent.`);
+        const poll = async () => (await this.request("bridge.poll_events", { limit: 256 }, options))?.events ?? [];
+        const forPrinter = (payload) => !payload?.dev_id || payload.dev_id === devId;
+        let connected = false;
+        // connect_printer only starts the MQTT loop: publishing before on_local_connect races the CONNACK (-4030).
+        for (let attempt = 0; attempt < 20 && !connected; attempt++) {
+            for (const event of await poll()) {
+                if (event.name !== "on_local_connect" || !forPrinter(event.payload))
+                    continue;
+                const status = Number(event.payload?.status);
+                if (status === 0) {
+                    connected = true;
+                    continue;
+                }
+                const message = String(event.payload?.msg ?? "");
+                throw new Error(message === "5"
+                    ? `Printer ${devId} refused the LAN access code (Bambu Studio: "Incorrect password"); nothing was sent.`
+                    : `Bambu's network plugin could not connect to printer ${devId} over LAN (status ${status}${message ? `, code ${message}` : ""}); nothing was sent.`);
+            }
+            if (!connected)
+                await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        if (!connected)
+            throw new Error(`Bambu's network plugin did not connect to printer ${devId} at ${devIp} over LAN within 10 seconds; nothing was sent.`);
+        // Studio's on-connect requests (GUI_App.cpp on_local_connect): a full push and the version.
+        for (const hello of [{ pushing: { command: "pushall", sequence_id: "0", version: 1, push_target: 1 } }, { info: { command: "get_version", sequence_id: "0" } }]) {
+            assertBridgeOk(await this.callWithAgent("net.send_message_to_printer", { dev_id: devId, msg: JSON.stringify(hello), qos: 0, flag: 0 }, options), "net.send_message_to_printer");
+        }
+        let reported = false;
+        for (let attempt = 0; attempt < 20 && !reported; attempt++) {
+            for (const event of await poll()) {
+                if (event.name !== "on_local_message" || !forPrinter(event.payload))
+                    continue;
+                if (String(event.payload?.msg ?? "").includes("push_status"))
+                    reported = true;
+            }
+            if (!reported)
+                await new Promise(resolve => setTimeout(resolve, 500));
+        }
+        if (!reported)
+            throw new Error(`Printer ${devId} sent no status report on the plugin's LAN session within 10 seconds, so the plugin can't sign for it; nothing was sent.`);
+        assertBridgeOk(await this.callWithAgent("net.install_device_cert", { dev_id: devId, lan_only: lanOnly }, options), "net.install_device_cert");
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        this.localChannels.add(key);
+    }
     async callWithAgent(method, payload = {}, options = {}) {
         const { agent } = await this.ensureAgent(options);
         return await this.request(method, { ...payload, agent }, options);
@@ -351,6 +423,7 @@ export class BambuNetworkBridge {
         this.agentKey = undefined;
         this.handshake = undefined;
         this.subscribedDevices.clear();
+        this.localChannels.clear();
         this.stdoutBuffer = Buffer.alloc(0);
         for (const [id, pending] of this.pending.entries()) {
             clearTimeout(pending.timer);

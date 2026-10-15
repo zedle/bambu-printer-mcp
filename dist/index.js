@@ -1277,9 +1277,18 @@ class BambuPrinterMCPServer {
                 this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
                 return { ...nativeResult, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping };
             }
-            // Cloud prints need the printer's channel open (its version and signing state): -3140 ENC_FLAG_NOT_READY otherwise.
-            if (bridgeMethod === "net.start_print")
-                await this.bambuNetwork.ensurePrinterChannel(devId, this.bridgeOptionsFromArgs(args, "print_3mf_bambu_network"));
+            // Open the plugin's channel to the printer first, as Studio does. Cloud jobs (start_print, and the cloud record
+            // of start_local_print_with_record) need its cloud channel: -3140 ENC_FLAG_NOT_READY otherwise. A LAN job
+            // publishes on the plugin's own LAN session, which connect_printer opens: -4030 without it.
+            const channelOptions = this.bridgeOptionsFromArgs(args, "print_3mf_bambu_network");
+            if (bridgeMethod === "net.start_print" || bridgeMethod === "net.start_local_print_with_record") {
+                await this.bambuNetwork.ensurePrinterChannel(devId, channelOptions);
+            }
+            else if (bridgeMethod === "net.start_local_print" || bridgeMethod === "net.start_sdcard_print") {
+                const reportedConnection = confirmedStatus?.raw?.device?.connection_type;
+                await this.bambuNetwork.ensureLocalChannel(devId, devIp, password, { ...channelOptions, lanOnly: reportedConnection === undefined ? true : reportedConnection === "lan" });
+            }
+            assertActive();
             const bridgeResult = await this.bambuNetwork.callWithAgent(bridgeMethod, { client_job_id: clientJobId, params }, {
                 ...this.bridgeOptionsFromArgs(args, "print_3mf_bambu_network"),
                 beforeDispatch: async (method) => {

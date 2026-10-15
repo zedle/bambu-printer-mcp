@@ -46,6 +46,7 @@ export declare class BambuNetworkBridge {
     private recentLogs;
     private inferredExpectedNetworkVersion?;
     private subscribedDevices;
+    private localChannels;
     resolveBridgeCommand(override?: string): string;
     resolveConfigDir(override?: string): string;
     resolveCountryCode(override?: string): string;
@@ -70,6 +71,17 @@ export declare class BambuNetworkBridge {
      * signs with. Cloud prints need it too: without it start_print fails with -3140 (ENC_FLAG_NOT_READY).
      */
     ensurePrinterChannel(devId: string, options?: BambuNetworkBridgeOptions): Promise<void>;
+    /**
+     * Open the plugin's own LAN MQTT session to a printer the way Bambu Studio does before a LAN print
+     * (MachineObject::connect, GUI_App's on_local_connect / on_printer_connected handlers): callbacks, connect_printer
+     * as bblp with the access code over TLS, wait for on_local_connect, request a full push and the version, wait
+     * until the printer's own report arrives on that session (the plugin reads its signing flag from it), then
+     * install the device certificate. Without it start_local_print has no session to publish on (-4030) and nothing
+     * to sign with. Once per agent and printer address.
+     */
+    ensureLocalChannel(devId: string, devIp: string, accessCode: string, options?: BambuNetworkBridgeOptions & {
+        lanOnly?: boolean;
+    }): Promise<void>;
     callWithAgent(method: string, payload?: JsonObject, options?: BambuNetworkBridgeOptions): Promise<unknown>;
     stop(): Promise<void>;
     private ensureStarted;

@@ -71,6 +71,9 @@ test("X2D MCP print requests stop before slicing, status, uploads, and connectio
       appendFileSync(${JSON.stringify(effectsFile)}, 'slice\\n');
       throw new Error('Unexpected slicing');
     };
+    BambuNetworkBridge.prototype.ensureLocalChannel = async (devId, devIp) => {
+      appendFileSync(${JSON.stringify(bridgeFile)}, JSON.stringify({ method: 'local-channel', payload: { dev_id: devId, dev_ip: devIp } }) + '\\n');
+    };
     BambuNetworkBridge.prototype.callWithAgent = async (method, payload) => {
       appendFileSync(${JSON.stringify(bridgeFile)}, JSON.stringify({ method, payload }) + '\\n');
       return { ok: true, value: 0 };
@@ -126,8 +129,10 @@ test("X2D MCP print requests stop before slicing, status, uploads, and connectio
     assert.notEqual(result.isError, true, "the explicitly configured bridge retains its separate print path");
   }
   const bridgeCalls = (await fs.readFile(bridgeFile, "utf8")).trim().split("\n").map(JSON.parse);
-  assert.equal(bridgeCalls.length, 2);
-  for (const call of bridgeCalls) {
+  assert.deepEqual(bridgeCalls.map(call => call.method), ["local-channel", "net.start_local_print", "local-channel", "net.start_local_print"],
+    "each LAN print opens the plugin's LAN session first");
+  for (const call of bridgeCalls.filter(call => call.method === "local-channel")) assert.deepEqual(call.payload, { dev_id: "20PTEST", dev_ip: "127.0.0.1" });
+  for (const call of bridgeCalls.filter(call => call.method !== "local-channel")) {
     assert.equal(call.method, "net.start_local_print");
     assert.equal(call.payload.params.dev_id, "20PTEST");
     assert.notEqual(call.payload.params.filename, slicedFile, "bridge must receive a checked private snapshot");

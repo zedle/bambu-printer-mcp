@@ -53,3 +53,49 @@ test("cloud control refuses without a signed-in account, and reports a plugin re
   await assert.rejects(unbound.bridge.sendPrinterMessage("31BTEST", "{}"), /refused the subscription/);
   assert.ok(!unbound.calls.some(call => call.method === "net.send_message"));
 });
+
+// Bambu Studio connects a LAN printer itself (MachineObject::connect) and waits for on_local_connect before a LAN print.
+function fakeLocalBridge({ connectResult = 0, events } = {}) {
+  const bridge = new BambuNetworkBridge();
+  const calls = [];
+  bridge.callWithAgent = async (method, payload = {}) => {
+    calls.push({ method, payload });
+    if (method === "net.connect_printer") return { ok: true, value: connectResult };
+    return { ok: true, value: 0 };
+  };
+  bridge.request = async (method) => {
+    calls.push({ method });
+    if (method === "bridge.poll_events") return { ok: true, events: events ?? [
+      { name: "on_local_connect", payload: { status: 0, dev_id: "31BTEST", msg: "" } },
+      { name: "on_local_message", payload: { dev_id: "31BTEST", msg: JSON.stringify({ print: { command: "push_status", gcode_state: "IDLE" } }) } },
+    ] };
+    return { ok: true };
+  };
+  return { bridge, calls };
+}
+
+test("a LAN bridge print first opens the plugin's LAN session like Studio: connect, push, report, certificate", async () => {
+  const { bridge, calls } = fakeLocalBridge();
+  await bridge.ensureLocalChannel("31BTEST", "192.0.2.5", "CODE");
+  assert.deepEqual(calls.map(call => call.method), ["net.set_on_local_connect_fn", "net.set_on_local_message_fn", "net.set_on_printer_connected_fn",
+    "net.update_cert", "net.connect_printer", "bridge.poll_events", "net.send_message_to_printer", "net.send_message_to_printer",
+    "bridge.poll_events", "net.install_device_cert"]);
+  const payload = method => calls.filter(call => call.method === method).map(call => call.payload);
+  assert.deepEqual(payload("net.connect_printer"), [{ dev_id: "31BTEST", dev_ip: "192.0.2.5", username: "bblp", password: "CODE", use_ssl: true }]);
+  assert.deepEqual(payload("net.send_message_to_printer").map(p => Object.keys(JSON.parse(p.msg))[0]), ["pushing", "info"]);
+  assert.deepEqual(payload("net.install_device_cert"), [{ dev_id: "31BTEST", lan_only: true }]);
+  calls.length = 0;
+  await bridge.ensureLocalChannel("31BTEST", "192.0.2.5", "CODE");
+  assert.deepEqual(calls, [], "the LAN session is reused");
+});
+
+test("a LAN bridge session that fails to connect stops before anything is sent", async () => {
+  const wrongCode = fakeLocalBridge({ events: [{ name: "on_local_connect", payload: { status: 1, dev_id: "31BTEST", msg: "5" } }] });
+  await assert.rejects(wrongCode.bridge.ensureLocalChannel("31BTEST", "192.0.2.5", "BAD"), /refused the LAN access code.*nothing was sent/);
+  const refused = fakeLocalBridge({ connectResult: -1 });
+  await assert.rejects(refused.bridge.ensureLocalChannel("31BTEST", "192.0.2.5", "CODE"), /connect_printer returned -1/);
+  for (const { calls } of [wrongCode, refused]) {
+    assert.ok(!calls.some(call => call.method === "net.send_message_to_printer" || call.method === "net.install_device_cert"));
+  }
+  await assert.rejects(fakeLocalBridge().bridge.ensureLocalChannel("31BTEST", "", "CODE"), /address and LAN access code/);
+});

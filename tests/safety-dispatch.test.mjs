@@ -392,6 +392,7 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
         observation:{source:'mqtt',requestedAt:now,receivedAt:now,identitySource:'report'}};
     };
     BambuNetworkBridge.prototype.ensurePrinterChannel = async (devId) => { log({ action: 'bridge-channel', devId }); };
+    BambuNetworkBridge.prototype.ensureLocalChannel = async (devId, devIp) => { log({ action: 'bridge-local-channel', devId, devIp }); };
     BambuNetworkBridge.prototype.ensureAgent = async () => {
       ${blockBridgeInitialization ? `log({action:'agent-wait'}); while (!fs.existsSync(${JSON.stringify(releasePath)})) await new Promise(resolve => setTimeout(resolve,10));` : ""}
       return { agent: 0, handshake: { ok: true } };
