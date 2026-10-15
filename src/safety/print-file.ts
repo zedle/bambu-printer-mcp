@@ -416,10 +416,10 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
           heat('bed',args.get('D')!,undefined,true);continue;
         }
         const vendorWait=code==='M109' && ['a1','a1mini'].includes(model);
-        // H2C multi-extruder pre-cooling/pre-heating/tower reheat of the idle hotend:
-        // M104 T<physical extruder> S<target> N0. S stays the checked target (all materials).
-        const idleHotend=code==='M104' && model==='h2c' && args.has('N');
-        if(idleHotend && (args.get('N')!==0 || !args.has('T') || !args.has('S') || args.size!==3)) fail('unsupported H2C idle-hotend M104 parameters');
+        // Dual-extruder pre-cooling/pre-heating/tower reheat of the idle hotend (Bambu Studio's G-code writer emits it on
+        // every two-nozzle printer): M104 T<physical extruder> S<target> N0. S stays the checked target (all materials).
+        const idleHotend=code==='M104' && extruderCount(model)===2 && args.has('N');
+        if(idleHotend && (args.get('N')!==0 || !args.has('T') || !args.has('S') || args.size!==3)) fail('unsupported idle-hotend M104 parameters');
         for(const key of args.keys()) if(!'SRTA'.includes(key) && !(key==='H' && vendorWait) && !(key==='N' && idleHotend)) fail(`unsupported ${code} temperature parameter ${key}`);
         if(args.has('H') && (!Number.isFinite(args.get('H')) || args.get('H')!<0 || args.get('H')!>300)) fail(`unsupported ${code} wait parameter H`);
         if(!args.has('S')&&!args.has('R')) fail(`missing ${code} temperature target`);

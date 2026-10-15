@@ -499,8 +499,19 @@ test('BambuStudio 02.08 H2C two-colour filament-change forms pass with independe
     ['M9711 M0 E0 Z2.6 S11 C10 O0 T3000','M9711 M0 E0 Z2.6 R300']])
     await assert.rejects(inspect(t,h2cTwoColourHeader()+h2cTwoColour.replace(form,bad),{model:'h2c'}),/unsupported|parameter|temperature|limit|declared|duplicate/i,bad);
   for(const model of ['P1S','H2D','X1C']) for(const command of ['M104 T1 S25 N0','M620.15 P180','M620.14 X40.4635 Y226.381'])
-    await assert.rejects(inspect(t,header(model,'PLA;PLA',model==='H2D'?'0.4;0.4':'0.4')+command+'\n',{model:model.toLowerCase()}),/unsupported|parameter|command/i,`${model} ${command}`);
+    if(!(model==='H2D' && command.startsWith('M104'))) await assert.rejects(inspect(t,header(model,'PLA;PLA',model==='H2D'?'0.4;0.4':'0.4')+command+'\n',{model:model.toLowerCase()}),/unsupported|parameter|command/i,`${model} ${command}`);
   for(const model of ['P1S','X1C','P2S','H2S']) await assert.rejects(inspect(t,header(model,'PLA','0.4')+'M9711 M0 E0 Z2.6 S11 C10 O0 T3000\n',{model:model.toLowerCase()}),/multiple commands/i,model);
+});
+test('the idle-hotend M104 T S N0 form passes on every dual-nozzle model and nowhere else',async t=>{
+  // Bambu Studio's G-code writer pre-cools/pre-heats the idle hotend this way on any two-nozzle printer.
+  for(const model of ['H2D','H2D Pro','X2D','H2C']) {
+    const id=model.toLowerCase().replace(' ','');
+    const r=await inspect(t,header(model,'PLA;PLA','0.4;0.4')+'M104 S220\nM104 T1 S25 N0\nM104 T0 S220 N0\nG1 X10 Y10 E1\n',{model:id});
+    assert.equal(r.maxNozzleTemperature,220,model);
+    for(const bad of ['M104 T1 S400 N0','M104 T1 S200 N1','M104 S200 N0','M104 T1 S200 R300 N0','M104 T2 S200 N0'])
+      await assert.rejects(inspect(t,header(model,'PLA;PLA','0.4;0.4')+bad+'\n',{model:id}),/unsupported|parameter|temperature|limit|nozzle/i,`${model} ${bad}`);
+  }
+  for(const model of ['P1S','X1C','H2S','A1']) await assert.rejects(inspect(t,header(model,'PLA','0.4')+'M104 T0 S220 N0\n',{model:model.toLowerCase()}),/unsupported|parameter/i,model);
 });
 test('timelapse capture M9711 passes on every model whose template emits it',async t=>{
   // time_lapse_gcode on H2D, H2D Pro and X2D (X/Y form on H2D) and on the H2C (U/V form); it sets no heater.
