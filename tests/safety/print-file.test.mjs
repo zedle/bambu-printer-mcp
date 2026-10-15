@@ -603,3 +603,27 @@ test('a 3MF carries its plate nozzle plan from slice_info.config and filament_se
   // Without slice_info (raw G-code, older exports) there is no plan.
   assert.equal((await inspect(t,h2cTwoColourHeader()+h2cTwoColour,{model:'h2c'})).nozzlePlan,undefined);
 });
+// Bambu Studio 02.08.02.61 CLI, H2C with a Hybrid right extruder (rack of 3 Standard + 3 High Flow): both filaments
+// on the right, one Standard and one High Flow hotend. The header's selected rows name extruder 2 once per flow.
+const hybridHeader=(ids='1,2,2')=>h2cTwoColourHeader()+'; nozzle_volume_type = High Flow,Hybrid\n; extruder_type = Direct Drive,Direct Drive\n'+
+  `; nozzle_type = tungsten_carbide,hardened_steel,hardened_steel\n; printer_extruder_id = ${ids}\n`+
+  '; printer_extruder_variant = "Direct Drive High Flow";"Direct Drive Standard";"Direct Drive High Flow"\n; filament_map = 2,2\n; physical_extruder_map = 1,0\n';
+const hybridProject={nozzle_volume_type:['High Flow','Hybrid'],extruder_type:['Direct Drive','Direct Drive'],
+  nozzle_type:['tungsten_carbide','tungsten_carbide','tungsten_carbide','hardened_steel','hardened_steel'],printer_extruder_id:['1','1','1','2','2'],
+  printer_extruder_variant:['Direct Drive Standard','Direct Drive High Flow','Direct Drive E3D High Flow','Direct Drive Standard','Direct Drive High Flow']};
+const hybridSliceInfo='<config><plate><metadata key="index" value="1"/><filament id="1" group_id="1" nozzle_diameter="0.40" volume_type="Standard"/>'+
+  '<filament id="2" group_id="4" nozzle_diameter="0.40" volume_type="High Flow"/><nozzle id="1" extruder_id="2" nozzle_diameter="0.4" volume_type="Standard"/>'+
+  '<nozzle id="4" extruder_id="2" nozzle_diameter="0.4" volume_type="High Flow"/></plate></config>';
+test('a Hybrid H2C job (several flows on the rack extruder) inspects with its per-flow rows',async t=>{
+  const entries=(header,project=hybridProject,info=hybridSliceInfo)=>({'Metadata/plate_1.gcode':header+h2cTwoColour,'Metadata/project_settings.config':project,'Metadata/slice_info.config':info});
+  const r=await inspect(t,'',{model:'h2c'},entries(hybridHeader()));
+  assert.deepEqual(r.nozzleFlows,['high_flow','hybrid']);
+  assert.deepEqual(r.nozzleTypes,['tungsten_carbide','hardened_steel']);
+  assert.deepEqual(r.nozzlePlan.nozzles.map(nozzle=>nozzle.flow),['standard','high_flow']);
+  // The left (non-Hybrid) extruder owns exactly one selected row.
+  await assert.rejects(inspect(t,'',{model:'h2c'},entries(hybridHeader('1,1,2'))),/printer extruder id/);
+  // Hybrid rows of one extruder must agree on the hotend material.
+  await assert.rejects(inspect(t,'',{model:'h2c'},entries(hybridHeader().replace('hardened_steel,hardened_steel','hardened_steel,stainless_steel'))),/nozzle type/);
+  // A plan nozzle on a non-Hybrid extruder keeps that extruder's flow.
+  await assert.rejects(inspect(t,'',{model:'h2c'},entries(hybridHeader(),hybridProject,hybridSliceInfo.replace(/extruder_id="2" nozzle_diameter="0.4" volume_type="Standard"/,'extruder_id="1" nozzle_diameter="0.4" volume_type="Standard"'))),/slice_info nozzle metadata contradicts the sliced nozzle flows/);
+});

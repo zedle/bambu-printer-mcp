@@ -251,34 +251,60 @@ export async function inspectPrintFile(filePath, options) {
     // G-code header as the per-physical-extruder selection it sliced with (for
     // example ["1","1","1"] vs "1" on a single-nozzle P2S). Preserve the source:
     // a plate header can never substitute a full table for its selected values.
+    // A Hybrid extruder (an H2C rack mixing flows) has one selected variant row per flow it slices with, so the
+    // header's selected form then lists more rows than extruders (printer_extruder_id = 1,2,2).
+    let selectedRows = nozzleDiameters.length;
     const variantTable = (key, rows, convert) => {
         const field = key.replace(/_/g, ' ');
         const tableValues = metadataValues([project], [key]);
         const selectedValues = metadataValues(headers, [key]);
-        if (tableValues.some(value => list(value).length !== rows) || selectedValues.some(value => list(value).length !== nozzleDiameters.length))
+        if (tableValues.some(value => list(value).length !== rows) || selectedValues.some(value => list(value).length !== selectedRows))
             return fail(`unknown or malformed ${field} metadata`);
         const table = consistent(tableValues, convert, field);
         return { table, selected: selectedValues.length ? consistent(selectedValues, convert, `selected ${field}`) : undefined };
     };
+    const extruderIds = (value) => {
+        const ids = list(value);
+        return ids.length > 0 && ids.every(id => /^[1-9]\d*$/.test(id) && Number(id) <= nozzleDiameters.length) ? ids.map(Number) : undefined;
+    };
     const nozzleMetadata = (keys, variantRows = false) => {
         const values = metadataValues(metadata, keys);
+        const hybrid = variantRows && !!nozzleFlows?.includes('hybrid');
+        // The selected rows' owners, in order: each extruder once, a Hybrid one once per flow.
+        let selectedOwners;
+        if (hybrid) {
+            const owners = metadataValues(headers, ['printer_extruder_id']);
+            if (!owners.length)
+                return fail('a Hybrid nozzle needs the selected printer extruder id metadata');
+            selectedOwners = consistent(owners, extruderIds, 'selected printer extruder id');
+            const covered = nozzleDiameters.every((_, index) => {
+                const count = selectedOwners.filter(id => id === index + 1).length;
+                return nozzleFlows[index] === 'hybrid' ? count >= 1 : count === 1;
+            });
+            if (!covered || selectedOwners.some((id, index) => index > 0 && id < selectedOwners[index - 1]))
+                return fail('unknown or malformed selected printer extruder id metadata');
+            selectedRows = selectedOwners.length;
+        }
         return values.length ? consistent(values, value => {
             const entries = normalizedEntries(value);
             if (!entries)
                 return undefined;
-            if (entries.length === nozzleDiameters.length)
+            // Every row an extruder owns must agree on a per-extruder value such as the hotend material.
+            const agree = (rows) => rows.length > 0 && rows.every(row => entries[row] === entries[rows[0]]) ? entries[rows[0]] : undefined;
+            if (selectedOwners && entries.length === selectedOwners.length) {
+                const resolved = nozzleDiameters.map((_, index) => agree(selectedOwners.flatMap((id, row) => id === index + 1 ? [row] : [])));
+                return resolved.every(entry => entry !== undefined) ? resolved : undefined;
+            }
+            if (entries.length === nozzleDiameters.length && !hybrid)
                 return entries;
             if (!variantRows)
                 return undefined;
             // Bambu GUI projects may store nozzle types per extruder variant, while
             // diameters and selected flow types are per physical extruder. Never truncate
             // that variant table or mistake its rows for filament/nozzle positions.
-            const { table: ids, selected: selectedIds } = variantTable('printer_extruder_id', entries.length, value => {
-                const ids = list(value);
-                return ids.length > 0 && ids.every(id => /^[1-9]\d*$/.test(id) && Number(id) <= nozzleDiameters.length) ? ids.map(Number) : undefined;
-            });
-            // The selected form names each physical extruder once, in order.
-            if (selectedIds && selectedIds.some((id, index) => id !== index + 1))
+            const { table: ids, selected: selectedIds } = variantTable('printer_extruder_id', entries.length, extruderIds);
+            // The selected form names each physical extruder once, in order (a Hybrid one once per flow).
+            if (selectedIds && (selectedOwners ? JSON.stringify(selectedIds) !== JSON.stringify(selectedOwners) : selectedIds.some((id, index) => id !== index + 1)))
                 return undefined;
             const variants = metadataValues(metadata, ['printer_extruder_variant']).length
                 ? variantTable('printer_extruder_variant', entries.length, normalizedEntries) : undefined;
@@ -289,21 +315,29 @@ export async function inspectPrintFile(filePath, options) {
                 if (!rows.length)
                     return undefined;
                 if (!variants) {
-                    if (!rows.every(row => entries[row] === entries[rows[0]]))
+                    const entry = agree(rows);
+                    if (entry === undefined)
                         return undefined;
-                    resolved.push(entries[rows[0]]);
+                    resolved.push(entry);
                     continue;
                 }
                 // Validate declared variants even when all rows use the same material.
                 if (!extruders || extruders.length !== nozzleDiameters.length || !nozzleFlows)
                     return undefined;
-                const variant = `${extruders[index]}_${nozzleFlows[index]}`;
-                if (variants.selected && variants.selected[index] !== variant)
+                const chosen = selectedOwners && variants.selected
+                    ? variants.selected.filter((_, row) => selectedOwners[row] === index + 1)
+                    : variants.selected ? [variants.selected[index]] : [`${extruders[index]}_${nozzleFlows[index]}`];
+                // A Hybrid extruder's rows are the flows it uses; any other extruder's is its own flow.
+                if (nozzleFlows[index] === 'hybrid' ? !chosen.length || chosen.some(variant => !variant.startsWith(`${extruders[index]}_`))
+                    : chosen.length !== 1 || chosen[0] !== `${extruders[index]}_${nozzleFlows[index]}`)
                     return undefined;
-                const selected = rows.filter(row => variants.table[row] === variant);
-                if (selected.length !== 1)
+                const selected = chosen.map(variant => rows.filter(row => variants.table[row] === variant));
+                if (selected.some(match => match.length !== 1))
                     return undefined;
-                resolved.push(entries[selected[0]]);
+                const entry = agree(selected.map(match => match[0]));
+                if (entry === undefined)
+                    return undefined;
+                resolved.push(entry);
             }
             return resolved;
         }, keys[0].replace(/_/g, ' ')) : undefined;
@@ -702,6 +736,10 @@ export async function inspectPrintFile(filePath, options) {
             const diameter = nozzleDiameters[nozzle.extruder - 1];
             if (diameter === undefined || Math.abs(diameter - nozzle.diameter) > 1e-6)
                 fail('slice_info nozzle metadata contradicts the sliced nozzle diameters');
+            // ...and, unless that extruder is Hybrid, its flow.
+            const flow = nozzleFlows?.[nozzle.extruder - 1];
+            if (flow !== undefined && flow !== 'hybrid' && flow !== nozzle.flow)
+                fail('slice_info nozzle metadata contradicts the sliced nozzle flows');
         }
     }
     return { model, nozzleDiameters, materials, usedFilamentPositions: [...used].sort((a, b) => a - b), plateInternalPath, sha256, maxNozzleTemperature, maxBedTemperature, maxChamberTemperature, bedType, selectsAms, nozzleTypes, nozzleFlows,

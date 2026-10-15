@@ -422,7 +422,16 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
     const expectedFlow = token(requirements.nozzleFlows?.[broadcast ? 0 : position]);
     if (!Number.isFinite(diameter) || diameter <= 0) throw new Error(`Printer nozzle ${physical} diameter does not match the job (${diameter} mm).`);
     if (requirements.nozzleTypes !== undefined && !NOZZLE_TYPES.includes(expectedType)) throw new Error(`The job's nozzle type for printer nozzle ${physical} is unknown.`);
-    if (requirements.nozzleFlows !== undefined && !NOZZLE_FLOWS.includes(expectedFlow)) throw new Error(`Printer nozzle ${physical} flow variant is unknown or does not match the job.`);
+    // Hybrid (Studio's nvtHybrid): an extruder slicing with several flows from a hotend rack. Its flows are the
+    // sliced plan's hotends, each matched below; it needs the rack and the plan.
+    const hybrid = expectedFlow === "hybrid";
+    if (hybrid && !(rack.length && physical === MAIN_EXTRUDER_ID && !requirements.usedNozzleIndices)) {
+      throw new Error(`The job slices printer nozzle ${physical} as Hybrid (several nozzle flows), which only an extruder with a hotend rack can serve.`);
+    }
+    if (hybrid && !requirements.nozzlePlan?.nozzles.some(nozzle => nozzle.extruder === position + 1)) {
+      throw new Error(`The job slices printer nozzle ${physical} as Hybrid but does not say which hotends it uses (slice_info.config); re-slice it with Bambu Studio 02.08 or later.`);
+    }
+    if (requirements.nozzleFlows !== undefined && !hybrid && !NOZZLE_FLOWS.includes(expectedFlow)) throw new Error(`Printer nozzle ${physical} flow variant is unknown or does not match the job.`);
     const mounted = nozzles.find(value => value.index === physical);
     let selected: ReportedNozzle[];
     if (rack.length && physical === MAIN_EXTRUDER_ID && !requirements.usedNozzleIndices) {
@@ -501,7 +510,9 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
         const dual = DUAL_EXTRUDER_MODELS.has(model);
         const logical = dual ? (requirements.filamentMap?.[position] ?? 1) - 1 : 0;
         const physical = dual ? physicalExtruderMap(model, requirements.physicalExtruderMap)[logical] : MAIN_EXTRUDER_ID;
-        const nozzle = nozzles.find(value => value.index === physical);
+        // The hotend the filament is sliced for: on a rack or Hybrid extruder the plan's, not the mounted one.
+        const planned = requirements.nozzlePlan?.nozzles.find(value => value.id === requirements.nozzlePlan!.filamentNozzles[position]);
+        const nozzle = planned ? { flow: token(planned.flow), diameter: planned.diameter } : nozzles.find(value => value.index === physical);
         const prohibition = filamentProhibition({
           model, external: isExternalTray(trayIndex),
           type: reportedType || requirements.filamentTypes?.[position] || materials[position],

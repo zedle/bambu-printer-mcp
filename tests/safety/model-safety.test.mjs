@@ -314,3 +314,18 @@ test('two-nozzle jobs carry Studio\'s nozzles_info', async () => {
   ]);
   assert.equal(options.studioNozzlesInfo({ nozzleDiameters: [0.4] }), '');
 });
+
+test('a Hybrid right extruder needs a matching rack hotend for every flow it plans', () => {
+  const ams = { ...mockStatus('H2C').raw.ams, tray_exist_bits: '3', ams: [{ id: '0', info: '1023', tray: [{ id: '0', tray_type: 'PLA' }, { id: '1', tray_type: 'PLA' }] }] };
+  const plan = { nozzles: [{ id: 1, extruder: 2, diameter: 0.4, flow: 'standard' }, { id: 4, extruder: 2, diameter: 0.4, flow: 'high_flow' }], filamentNozzles: [1, 4], dynamicNozzleMap: false };
+  const job = (extra = {}) => ({ model: 'h2c', nozzleDiameters: [0.4, 0.4], nozzleFlows: ['standard', 'hybrid'], materials: ['PLA', 'PLA'],
+    usedFilamentPositions: [0, 1], filamentMap: [2, 2], useAMS: true, amsMapping: [0, 1], nozzlePlan: plan, ...extra });
+  const withHighFlow = mockStatus('H2C').raw.device.nozzle.info.map(nozzle => nozzle.id === 21 ? { ...nozzle, type: 'HH01' } : nozzle);
+  const status = info => mockStatus('H2C', { ams, ...(info ? { device: { ...mockStatus('H2C').raw.device, nozzle: { ...mockStatus('H2C').raw.device.nozzle, info } } } : {}) });
+  assert.doesNotThrow(() => validatePrinterState(status(withHighFlow), job()));
+  // The mock's rack is all Standard: the planned High Flow hotend isn't there.
+  assert.throws(() => validatePrinterState(status(), job()), /No mounted or rack hotend on the right nozzle matches the job \(0.4 mm High Flow\)/);
+  assert.throws(() => validatePrinterState(status(withHighFlow), job({ nozzlePlan: undefined })), /Hybrid but does not say which hotends/);
+  // Only the rack extruder can mix flows.
+  assert.throws(() => validatePrinterState(status(withHighFlow), job({ nozzleFlows: ['hybrid', 'standard'], filamentMap: [1, 2] })), /only an extruder with a hotend rack/);
+});
