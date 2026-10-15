@@ -42,7 +42,7 @@ import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayVa
 import { assertAmsDryingSupported, buildAmsDryingCommand, normalizeAmsDryingRequest } from "./ams-drying.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, parse3MF } from './3mf_parser.js';
 import type { ThreeMFAmsRequirements } from "./types.js";
-import { BambuImplementation, assertDirectPrintSupported } from "./printers/bambu.js";
+import { BambuImplementation, assertDirectPrintSupported, unsignedLanPrintAllowed } from "./printers/bambu.js";
 import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
@@ -2655,7 +2655,7 @@ class BambuPrinterMCPServer {
           },
           {
             name: "upload_file",
-            description: "Upload a local file to the Bambu Lab printer",
+            description: "Upload a local file to the Bambu Lab printer. print: true starts a raw .gcode with an unsigned LAN gcode_file, refused like start_print when the printer only takes signed commands.",
             inputSchema: {
               type: "object",
               properties: {
@@ -2685,7 +2685,7 @@ class BambuPrinterMCPServer {
           },
           {
             name: "start_print",
-            description: "Start printing a G-code file already on the Bambu Lab printer. Alias of start_print_job for upstream MCP compatibility.",
+            description: "Start printing a G-code file already on the Bambu Lab printer. Alias of start_print_job for upstream MCP compatibility. Sends an unsigned LAN gcode_file, so it is refused (nothing sent) when the printer's report says it only takes signed commands, unless BAMBU_UNSIGNED_LAN_PRINT=1 (LAN Only + Developer Mode); print a sliced .3mf with print_3mf for the signed route.",
             inputSchema: {
               type: "object",
               properties: {
@@ -2704,7 +2704,7 @@ class BambuPrinterMCPServer {
           },
           {
             name: "start_print_job",
-            description: "Start printing a G-code file already on the Bambu Lab printer",
+            description: "Start printing a G-code file already on the Bambu Lab printer. Sends an unsigned LAN gcode_file, so it is refused (nothing sent) when the printer's report says it only takes signed commands, unless BAMBU_UNSIGNED_LAN_PRINT=1 (LAN Only + Developer Mode); print a sliced .3mf with print_3mf for the signed route.",
             inputSchema: {
               type: "object",
               properties: {
@@ -4009,16 +4009,21 @@ class BambuPrinterMCPServer {
             // rejects the legacy direct FTPS STOR operation with 553. Keep
             // an explicit old-mode request from re-entering that known-bad
             // path; callers still get a fully scriptable local print.
+            // With the signed bridge as the default, an unsigned LAN print would be refused by firmware 01.08.05+
+            // (and the refusal blocks the next print), so lan_mqtt_ftps goes through the bridge too unless the
+            // person opted in to unsigned LAN prints.
+            const routedToBridge = connectionMode === "lan_mqtt_ftps" && requestedModel !== "x2d" && bridgeControls && !unsignedLanPrintAllowed();
             const effectiveConnectionMode =
               connectionMode === "lan_mqtt_ftps" && requestedModel === "x2d"
                 ? "bambu_native"
-                : connectionMode;
+                : routedToBridge ? "bambu_network" : connectionMode;
             if (effectiveConnectionMode === "bambu_connect") {
               result = await this.handoff3mfViaBambuConnect(resolvedArgs);
               break;
             }
             if (effectiveConnectionMode === "bambu_network") {
               result = await this.print3mfViaBambuNetwork(resolvedArgs, host, bambuSerial, bambuToken);
+              if (routedToBridge) result = { ...result, routedFrom: "lan_mqtt_ftps", routeNote: "Sent through the signed BambuNetwork bridge: the default connection mode is bambu_network, and firmware 01.08.05+ refuses unsigned LAN prints. Set BAMBU_UNSIGNED_LAN_PRINT=1 to keep lan_mqtt_ftps (needs LAN Only + Developer Mode)." };
               break;
             }
             if (effectiveConnectionMode === "bambu_native") {

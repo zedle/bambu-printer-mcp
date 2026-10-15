@@ -8,7 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import JSZip from "jszip";
-import { BambuImplementation } from "../dist/printers/bambu.js";
+import { BambuImplementation, printerRequiresSignedCommands } from "../dist/printers/bambu.js";
 import { BambuNetworkBridge } from "../dist/bambu-network-bridge.js";
 import { withPrintSnapshot } from "../dist/safety/artifact.js";
 
@@ -184,6 +184,49 @@ test("an inspected print uploads its private copy when the caller's file changes
   assert.deepEqual(upload.bytes, expected, "uploaded bytes must be the file that passed inspection");
   assert.match(upload.remote, /^\/cache\/checked-[a-f0-9-]+-job\.gcode\.3mf$/);
   assert.match(JSON.stringify(events.find(({ action }) => action === "publish").payload), new RegExp(path.posix.basename(upload.remote).replaceAll(".", "\\.")));
+});
+
+test("the signed-command flag is read like Bambu's plugin: fun bit 29, else flag3 bit 4", () => {
+  for (const [raw, expected] of [
+    [{ fun: "14023FF1AFFF9CB7" }, true], // H2C
+    [{ fun: "11A30F9CFB" }, true], // X1C
+    [{ fun: "1F", flag3: 31 }, false], // fun wins over flag3
+    [{ flag3: 31 }, true], // A1
+    [{ flag3: 671 }, true], // P1P
+    [{ flag3: "15" }, false],
+    [{}, false],
+    [undefined, false],
+  ]) assert.equal(printerRequiresSignedCommands(raw), expected, JSON.stringify(raw));
+});
+
+const signedOnly = [["fun bit 29", { fun: "14023FF1AFFF9CB7" }], ["flag3 bit 4", { flag3: 31 }]];
+for (const [flag, raw] of signedOnly) {
+  test(`unsigned LAN 3MF print refuses a printer whose ${flag} says signed-only before upload`, async (t) => {
+    const file = await fixture(t);
+    const { printer, events } = isolatedPrinter(safetyStatus(raw));
+    await assert.rejects(printer.print3mf(host, serial, token, { projectName: "signed", filePath: file, bambuModel: "p1s", useAMS: false }), /only takes signed commands[\s\S]*Nothing was uploaded or sent[\s\S]*BAMBU_UNSIGNED_LAN_PRINT/);
+    assertNoDispatch(events);
+  });
+  test(`upload-and-print and remote start of raw G-code refuse a printer whose ${flag} says signed-only`, async (t) => {
+    const file = await fixture(t, { raw: true });
+    const { printer, events } = isolatedPrinter(safetyStatus(raw));
+    await assert.rejects(printer.uploadFile(host, serial, token, file, "job.gcode", true, "p1s"), /only takes signed commands/);
+    printer.ftpDownload = async (_host, _token, _remote, local) => { events.push({ action: "download" }); await fs.copyFile(file, local); };
+    await assert.rejects(printer.startJob(host, serial, token, "job.gcode", "p1s"), /only takes signed commands/);
+    assertNoDispatch(events);
+  });
+}
+
+test("unsigned LAN prints go out where the printer doesn't require signing, or with the explicit opt-in", async (t) => {
+  const file = await fixture(t);
+  const unsigned = isolatedPrinter(safetyStatus({ fun: "1F" }));
+  assert.equal((await unsigned.printer.print3mf(host, serial, token, { projectName: "plain", filePath: file, bambuModel: "p1s", useAMS: false })).dispatch, "unconfirmed");
+  assert.equal(unsigned.events.filter(({ action }) => action === "publish").length, 1);
+  process.env.BAMBU_UNSIGNED_LAN_PRINT = "1";
+  t.after(() => { delete process.env.BAMBU_UNSIGNED_LAN_PRINT; });
+  const optedIn = isolatedPrinter(safetyStatus({ fun: "14023FF1AFFF9CB7" }));
+  await optedIn.printer.print3mf(host, serial, token, { projectName: "dev-mode", filePath: file, bambuModel: "p1s", useAMS: false });
+  assert.equal(optedIn.events.filter(({ action }) => action === "publish").length, 1);
 });
 
 for (const [component, target, material] of [["nozzle", NaN, "PLA"], ["bed", Infinity, undefined], ["bed", 300, undefined], ["nozzle", 300, "PLA"], ["nozzle", 220, undefined]]) {
@@ -395,6 +438,17 @@ test("signed AMS drying checks a fresh report, then sends Studio's payload throu
   const { sequence_id, ...print } = sent[0].print;
   assert.match(sequence_id, /^\d+$/);
   assert.deepEqual(print, { command: "ams_filament_drying", ams_id: 128, mode: 1, filament: "PETG", temp: 65, duration: 8, humidity: 0, rotate_tray: false, cooling_temp: 60, close_power_conflict: false });
+});
+
+test("with the bridge as default, print_3mf lan_mqtt_ftps goes through the signed bridge, not unsigned MQTT", async (t) => {
+  const server = await interceptedMcp(t, { env: bridgeMode });
+  const file = await fixture(t);
+  const result = await server.client.callTool({ name: "print_3mf", arguments: { three_mf_path: file, bambu_model: "p1s", bed_type: "textured_plate", use_ams: false, connection_mode: "lan_mqtt_ftps" } });
+  assert.notEqual(result.isError, true, result.content?.[0]?.text);
+  const events = await readEvents(server.eventsPath);
+  assert.deepEqual(events.filter(event => event.action === "publish" || event.action === "upload"), [], "no unsigned MQTT print or FTPS upload");
+  assert.ok(events.some(event => event.method === "net.start_print"), "the bridge carries the print");
+  assert.equal(JSON.parse(result.content[0].text).routedFrom, "lan_mqtt_ftps");
 });
 
 test("raw BambuNetwork start_print cannot bypass the inspected print handler", async (t) => {

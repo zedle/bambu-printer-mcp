@@ -1,5 +1,16 @@
 import { inspectPrintFile } from "../safety/print-file.js";
 import { type PrinterStateRequirements } from "../safety/printer-state.js";
+/**
+ * Whether the printer only takes signed `print` commands. Bambu's network plugin decides this from the printer's
+ * own push_status (plugin 02.08.02.54 filter_security_flag): `fun` bit 29 when `fun` is present, else `flag3` bit 4,
+ * else no. Firmware that sets it refuses an unsigned print with HMS 0500-0500-0001-0007, unless LAN Only Mode and
+ * Developer Mode are both on, which the report doesn't show.
+ */
+export declare function printerRequiresSignedCommands(raw: Record<string, any> | undefined): boolean;
+/** Opt-in for unsigned LAN prints on a printer that reports signing (LAN Only + Developer Mode, not visible in the report). */
+export declare function unsignedLanPrintAllowed(): boolean;
+export declare const UNSIGNED_PRINT_REFUSED_MESSAGE: string;
+export declare function assertUnsignedPrintAccepted(status: any): void;
 export declare function assertDirectPrintSupported(model: string | undefined, serial?: string): void;
 interface BambuPrintOptionsInternal {
     projectName: string;

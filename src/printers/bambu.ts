@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { readFreshPrinterStatus } from "../safety/printer-state.js";
-import { assertAmsDryingSupported, buildAmsDryingCommand, normalizeAmsDryingRequest } from "../ams-drying.js";
+import { assertAmsDryingSupported, buildAmsDryingCommand, hexFlagBit, normalizeAmsDryingRequest } from "../ams-drying.js";
 import fs from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
@@ -57,6 +57,36 @@ const COMMAND_REJECTED_MESSAGE =
 const DISPATCH_CANCELLED_MESSAGE =
   "A stop or heater-off request arrived after the print command was sent, so this call does not report the print as started. " +
   "Check get_printer_status.";
+
+/**
+ * Whether the printer only takes signed `print` commands. Bambu's network plugin decides this from the printer's
+ * own push_status (plugin 02.08.02.54 filter_security_flag): `fun` bit 29 when `fun` is present, else `flag3` bit 4,
+ * else no. Firmware that sets it refuses an unsigned print with HMS 0500-0500-0001-0007, unless LAN Only Mode and
+ * Developer Mode are both on, which the report doesn't show.
+ */
+export function printerRequiresSignedCommands(raw: Record<string, any> | undefined): boolean {
+  if (!raw || typeof raw !== "object") return false;
+  if (typeof raw.fun === "string" && raw.fun.trim()) return hexFlagBit(raw.fun, 29);
+  const flag3 = typeof raw.flag3 === "number" ? raw.flag3 : typeof raw.flag3 === "string" && /^\d+$/.test(raw.flag3.trim()) ? Number(raw.flag3) : undefined;
+  return flag3 !== undefined && Number.isSafeInteger(flag3) && ((flag3 >> 4) & 1) === 1;
+}
+
+/** Opt-in for unsigned LAN prints on a printer that reports signing (LAN Only + Developer Mode, not visible in the report). */
+export function unsignedLanPrintAllowed(): boolean {
+  return /^(1|true|yes)$/i.test(process.env.BAMBU_UNSIGNED_LAN_PRINT?.trim() ?? "");
+}
+
+export const UNSIGNED_PRINT_REFUSED_MESSAGE =
+  "This printer's report says it only takes signed commands (push_status fun bit 29, or flag3 bit 4 on older firmware), " +
+  "and this route sends an unsigned LAN print command. Bambu firmware 01.08.05 and later refuse that with HMS " +
+  "0500-0500-0001-0007, which then stays on the printer and blocks the next print. Nothing was uploaded or sent. " +
+  "Print a sliced .3mf with print_3mf through the signed route instead (BAMBU_DEFAULT_CONNECTION_MODE=bambu_network " +
+  "with the FULU bridge, or connection_mode bambu_network); raw G-code has no signed print route. If the printer has " +
+  "LAN Only Mode and Developer Mode on (its report doesn't show Developer Mode), set BAMBU_UNSIGNED_LAN_PRINT=1 to send unsigned prints anyway.";
+
+export function assertUnsignedPrintAccepted(status: any): void {
+  if (printerRequiresSignedCommands(status?.raw) && !unsignedLanPrintAllowed()) throw new Error(UNSIGNED_PRINT_REFUSED_MESSAGE);
+}
 
 /** How long to watch fresh reports after a print command (BAMBU_DISPATCH_CHECK_MS, 0 disables). */
 function dispatchCheckMs(): number {
@@ -825,6 +855,7 @@ export class BambuImplementation {
     const initialStatus = await this.getSafetyStatus(host, serial, token);
     if (legacyContainer) requirements = this.validateLoadedGcodeState(initialStatus, inspection);
     else validatePrinterState(initialStatus, requirements);
+    assertUnsignedPrintAccepted(initialStatus);
     const bedClearance = await this.confirmPrintPreflight(serial, initialStatus, inspection);
     const confirmedStatus = await this.getSafetyStatus(host, serial, token);
     if (legacyContainer) requirements = this.validateLoadedGcodeState(confirmedStatus, inspection);
@@ -1401,6 +1432,7 @@ export class BambuImplementation {
     if (inspection.selectsAms) throw new Error("Raw G-code with AMS selection requires a .3mf project export with verified physical slot mappings.");
     const initialStatus = await this.getSafetyStatus(host, serial, token);
     let requirements = this.validateLoadedGcodeState(initialStatus, inspection);
+    assertUnsignedPrintAccepted(initialStatus);
     const bedClearance = await this.confirmPrintPreflight(serial, initialStatus, inspection);
     const confirmedStatus = await this.getSafetyStatus(host, serial, token);
     requirements = this.validateLoadedGcodeState(confirmedStatus, inspection);
