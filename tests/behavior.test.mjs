@@ -1194,7 +1194,7 @@ test("H2 ams_mapping2 preserves external spool and HT tray encodings", async () 
     assert.ok(publishedPayload?.print, "project_file payload should be published");
     assert.deepEqual(publishedPayload.print.ams_mapping, [254, 128, 131, 15]);
     assert.deepEqual(publishedPayload.print.ams_mapping2, [
-      { ams_id: 254, slot_id: 254 },
+      { ams_id: 254, slot_id: 0 },
       { ams_id: 128, slot_id: 0 },
       { ams_id: 128, slot_id: 3 },
       { ams_id: 3, slot_id: 3 },

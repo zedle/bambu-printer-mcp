@@ -9,6 +9,8 @@ import { readSafe3mfArchive } from "../safety/archive.js";
 import { inspectPrintFile } from "../safety/print-file.js";
 import { normalizeModel, validateTemperature } from "../safety/limits.js";
 import { validatePrinterState, manualHeatingRequirements } from "../safety/printer-state.js";
+import { externalSpoolMapping, isExternalTray } from "../safety/models.js";
+import { normalizeBridgeAmsTrayValue } from "../ams-mapping.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName, normalizedRemotePath, cancelPendingPrinterOperations } from "../safety/artifact.js";
 import { Client as FTPClient } from "basic-ftp";
 import { BambuPrinter } from "bambu-js";
@@ -607,12 +609,9 @@ export class BambuImplementation {
         // array here. `amsMapping` is the raw escape hatch (takes precedence
         // when both are supplied).
         const validateTrayValue = (v, label) => {
-            if (!Number.isInteger(v) ||
-                v < -1 ||
-                (v > 15 && v < 128) ||
-                v > 254) {
-                throw new Error(`${label} values must be integers in [-1, 15] (absolute tray) or 128-254 (HT/external); got ${v}`);
-            }
+            if (!Number.isInteger(v))
+                throw new Error(`${label} values must be integers; got ${v}`);
+            normalizeBridgeAmsTrayValue(v, label);
         };
         let baseMapping;
         if (options.amsMapping && options.amsMapping.length > 0) {
@@ -640,8 +639,9 @@ export class BambuImplementation {
             const positions = projectMetadata.usedFilamentPositions;
             const projectLen = Math.max(projectMetadata.projectFilamentCount, ...positions.map((p) => p + 1), 1);
             baseMapping = Array(projectLen).fill(-1);
+            const external = options.useAMS === false ? externalSpoolMapping(model, inspection) : undefined;
             positions.forEach((pos, i) => {
-                baseMapping[pos] = options.useAMS === false ? 254 : i;
+                baseMapping[pos] = external ? external[pos] : i;
             });
         }
         let amsMapping;
@@ -650,10 +650,11 @@ export class BambuImplementation {
             const projLen = Math.max(projectMetadata.projectFilamentCount, baseMapping.length, 1);
             amsMapping = Array.from({ length: projLen }, (_, i) => i < baseMapping.length ? baseMapping[i] : -1);
             amsMapping2 = amsMapping.map((v) => {
-                if (v < 0 || v === 255)
+                if (v < 0)
                     return { ams_id: 255, slot_id: 255 };
-                if (v === 254)
-                    return { ams_id: 254, slot_id: 254 };
+                // Studio (SelectMachine.cpp get_ams_mapping_result): an external holder is {254|255, 0}.
+                if (isExternalTray(v))
+                    return { ams_id: v, slot_id: 0 };
                 if (v >= 128)
                     return { ams_id: 128, slot_id: v - 128 };
                 return { ams_id: Math.floor(v / 4), slot_id: v % 4 };
@@ -667,8 +668,8 @@ export class BambuImplementation {
             if (baseMapping[position] === undefined || baseMapping[position] < 0) {
                 throw new Error(`Missing physical filament mapping for project filament ${position}.`);
             }
-            if (options.useAMS === false && baseMapping[position] !== 254) {
-                throw new Error("External-spool printing requires external spool mapping (254).");
+            if (options.useAMS === false && !isExternalTray(baseMapping[position])) {
+                throw new Error("External-spool printing requires an external spool mapping (254 left/only holder, 255 right holder).");
             }
         }
         const legacyContainer = options.filePath.toLowerCase().endsWith(".gcode.3mf") && !usesH2ProjectFile && !isA1;

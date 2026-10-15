@@ -1,5 +1,6 @@
 import { BambuClient, GetVersionCommand, PushAllCommand } from "bambu-node";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
+import { DUAL_EXTRUDER_MODELS, externalHolders, isExternalTray } from "./models.js";
 
 const MAX_REPORT_AGE_MS = 15_000;
 const MODEL_IDS: Record<string, string> = {
@@ -229,17 +230,32 @@ function trayRange(value: unknown, label: string): number | undefined {
   if (number === undefined || number <= 0) throw new Error(`Reported filament ${label} temperature is malformed.`);
   return number;
 }
-function externalTray(raw: Record<string,any>, model: string): Record<string,any> | undefined {
-  const slots = raw.vir_slot;
-  if (Array.isArray(slots)) {
-    const selected = slots.filter((slot:any) => Number(slot?.id) === 254);
-    // The H2C reports one external holder per nozzle (254 deputy/left, 255 main/right; verified: its left
-    // extruder loads from 0xFE). The mapping names 254, so that one slot is it; duplicates or extras stay ambiguous.
-    if (slots.length === 1 && selected.length === 1) return selected[0];
-    if (model === "h2c" && selected.length === 1 && slots.length === 2 && slots.every((slot:any) => [254,255].includes(Number(slot?.id)))) return selected[0];
-    if (slots.length > 0) throw new Error("External spool report is ambiguous for this nozzle; cannot verify the selected material.");
+function externalTray(raw: Record<string,any>, model: string, trayIndex: number): Record<string,any> | undefined {
+  const holders = externalHolders(model);
+  const dual = DUAL_EXTRUDER_MODELS.has(model);
+  // Single-extruder printers have one holder; 254 is the MCP's historical name for it, 255 Studio's.
+  if (!dual ? !isExternalTray(trayIndex) : !holders.includes(trayIndex)) {
+    throw new Error(dual && isExternalTray(trayIndex)
+      ? `The ${model.toUpperCase()} has no usable external spool holder ${trayIndex}; ${holders.join(" and ")} feed its nozzles.`
+      : `External spool ${trayIndex} is not a holder on this printer.`);
   }
-  return object(raw.vt_tray) ? raw.vt_tray : undefined;
+  const slots = raw.vir_slot;
+  if (Array.isArray(slots) && slots.length > 0) {
+    // BambuStudio DeviceManager.cpp: vir_slot id 255 is the main (right or only) holder, 254 the deputy (left).
+    if (slots.some((slot:any) => !isExternalTray(Number(slot?.id))) || new Set(slots.map((slot:any) => Number(slot.id))).size !== slots.length) {
+      throw new Error("External spool report is ambiguous for this nozzle; cannot verify the selected material.");
+    }
+    if (!dual) {
+      if (slots.length !== 1) throw new Error("External spool report is ambiguous for this nozzle; cannot verify the selected material.");
+      return slots[0];
+    }
+    const selected = slots.find((slot:any) => Number(slot.id) === trayIndex);
+    if (!selected) throw new Error(`External spool holder ${trayIndex} is not present in the fresh printer report.`);
+    return selected;
+  }
+  if (!object(raw.vt_tray)) return undefined;
+  // A legacy vt_tray names one holder; on a dual-nozzle printer it says nothing about the other one.
+  return !dual || raw.vt_tray.id === undefined || Number(raw.vt_tray.id) === trayIndex ? raw.vt_tray : undefined;
 }
 function mappedTray(raw: Record<string,any>, index: number): Record<string,any> {
   const unit = index >= 128 ? 128 : Math.floor(index / 4);
@@ -320,9 +336,10 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
     for (const position of positions) {
       const material = normalizeMaterial(materials[position]);
       if (!Number.isInteger(position) || position < 0 || !material) throw new Error(`A known declared material is required for filament position ${position}.`);
-      const trayIndex = requirements.useAMS ? requirements.amsMapping?.[position] : 254;
-      if (trayIndex === undefined || !Number.isInteger(trayIndex) || trayIndex < 0 || trayIndex > 254) throw new Error(`Complete AMS mapping is required for filament position ${position}.`);
-      const tray = trayIndex === 254 ? externalTray(raw,model) : mappedTray(raw,trayIndex);
+      const trayIndex = requirements.useAMS ? requirements.amsMapping?.[position] : (requirements.amsMapping?.[position] ?? 254);
+      if (trayIndex === undefined || !Number.isInteger(trayIndex) || trayIndex < 0 || trayIndex > 255) throw new Error(`Complete AMS mapping is required for filament position ${position}.`);
+      if (!requirements.useAMS && !isExternalTray(trayIndex)) throw new Error(`Filament position ${position} must map to an external spool holder when AMS is off.`);
+      const tray = isExternalTray(trayIndex) ? externalTray(raw,model,trayIndex) : mappedTray(raw,trayIndex);
       const reportedType = typeof tray?.tray_type === "string" ? tray.tray_type.trim() : "";
       if (reportedType && normalizeMaterial(reportedType) !== material) throw new Error(`Reported material ${reportedType} in slot ${trayIndex} contradicts declared ${materials[position]}.`);
       const nozzleMin = trayRange(tray?.nozzle_temp_min,"minimum");

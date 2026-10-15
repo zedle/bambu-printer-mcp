@@ -44,6 +44,7 @@ import type { ThreeMFAmsRequirements } from "./types.js";
 import { BambuImplementation, assertDirectPrintSupported } from "./printers/bambu.js";
 import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
+import { externalSpoolMapping } from "./safety/models.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
 
@@ -1593,10 +1594,7 @@ class BambuPrinterMCPServer {
         mapping = Array(inspection.materials.length).fill(-1);
         inspection.usedFilamentPositions.forEach((position, index) => { mapping![position] = finalAmsSlots[index]; });
       }
-      if (!useAMS) {
-        mapping = Array(inspection.materials.length).fill(-1);
-        inspection.usedFilamentPositions.forEach(position => { mapping![position] = 254; });
-      }
+      if (!useAMS) mapping = externalSpoolMapping(inspection.model, inspection);
       const requirements = { ...inspection, amsMapping: mapping, useAMS };
       const initialStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
       validatePrinterState(initialStatus, requirements);
