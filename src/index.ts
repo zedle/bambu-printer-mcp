@@ -127,7 +127,7 @@ function resolveNozzleType(value: unknown): string | undefined {
   }
   return normalized;
 }
-const VALID_BAMBUSTUDIO_CLI_BED_TYPES = ["textured_plate", "cool_plate", "engineering_plate", "hot_plate"] as const;
+const VALID_BAMBUSTUDIO_CLI_BED_TYPES = ["textured_plate", "cool_plate", "engineering_plate", "hot_plate", "supertack_plate"] as const;
 
 // Map model IDs to BambuStudio --load-machine preset names
 const BAMBU_MODEL_PRESETS: Record<string, (nozzle: string) => string> = {
@@ -623,7 +623,7 @@ function resolveBambuStudioCliBedType(argsBedType: string | undefined): string {
   const bedType = resolveBedType(argsBedType);
   if (!(VALID_BAMBUSTUDIO_CLI_BED_TYPES as readonly string[]).includes(bedType)) {
     throw new Error(
-      `BambuStudio CLI bed_type "${bedType}" is not verified. Use a pre-sliced 3MF for SuperTack, or choose one of: ${VALID_BAMBUSTUDIO_CLI_BED_TYPES.join(", ")}`
+      `BambuStudio CLI bed_type "${bedType}" is not supported. Choose one of: ${VALID_BAMBUSTUDIO_CLI_BED_TYPES.join(", ")}`
     );
   }
   return bedType;
@@ -1391,11 +1391,6 @@ class BambuPrinterMCPServer {
     }
     assertUniformCliNozzles(args);
 
-    if (bedType === "supertack_plate") {
-      throw new Error(
-        'BambuStudio CLI SuperTack bed type is not verified; use a pre-sliced 3MF for SuperTack or choose textured_plate, cool_plate, engineering_plate, or hot_plate.'
-      );
-    }
 
     console.error(`3MF has no gcode - auto-slicing with ${slicerType} for ${printModel}`);
     const autoSliceOptions: BambuSliceOptions = {
@@ -1924,11 +1919,6 @@ class BambuPrinterMCPServer {
     }
 
     const printPreset = BAMBU_MODEL_PRESETS[printModel]?.(printNozzle);
-    if (bedType === "supertack_plate") {
-      throw new Error(
-        'BambuStudio CLI SuperTack bed type is not verified; use a pre-sliced 3MF for SuperTack or choose textured_plate, cool_plate, engineering_plate, or hot_plate.'
-      );
-    }
     const autoSliceOptions: BambuSliceOptions = {
       uptodate: true,
       ensureOnBed: true,
@@ -2392,7 +2382,7 @@ class BambuPrinterMCPServer {
                 bed_type: {
                   type: "string",
                   enum: ["textured_plate", "cool_plate", "engineering_plate", "hot_plate", "supertack_plate"],
-                  description: "Bed plate type for slicing (default: textured_plate). SuperTack is accepted only for pre-sliced print jobs until the BambuStudio CLI identifier is verified."
+                  description: "Bed plate type for slicing (default: textured_plate)."
                 },
                 nozzle_type: {
                   type: "string",
@@ -2447,7 +2437,7 @@ class BambuPrinterMCPServer {
                 bed_type: {
                   type: "string",
                   enum: ["textured_plate", "cool_plate", "engineering_plate", "hot_plate", "supertack_plate"],
-                  description: "Bed plate type for slicing (default: textured_plate). SuperTack is accepted only for pre-sliced print jobs until the BambuStudio CLI identifier is verified."
+                  description: "Bed plate type for slicing (default: textured_plate)."
                 },
                 nozzle_type: {
                   type: "string",
@@ -4075,11 +4065,6 @@ class BambuPrinterMCPServer {
             );
             if (!hasGcode) {
               assertUniformCliNozzles(args as Record<string, any>);
-              if (printBedType === "supertack_plate") {
-                throw new Error(
-                  'BambuStudio CLI SuperTack bed type is not verified; use a pre-sliced 3MF for SuperTack or choose textured_plate, cool_plate, engineering_plate, or hot_plate.'
-                );
-              }
               console.error(`3MF has no gcode — auto-slicing with ${slicerType} for ${printModel}`);
               const autoSliceOptions: BambuSliceOptions = {
                 uptodate: true,
