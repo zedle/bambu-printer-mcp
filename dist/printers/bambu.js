@@ -976,7 +976,7 @@ export class BambuImplementation {
             if (dispatch)
                 await dispatch(assertActive, beforeDispatch);
             else
-                await printer.publish({ print: { command: "clean_print_error", sequence_id: "0" } });
+                await printer.publish({ print: { command: "clean_print_error", sequence_id: nextSequenceId() } });
             this.clearedErrors.set(serial, codes);
             await sleep(COMMAND_SETTLE_MS);
             return { status: "success", message: "Confirmed HMS clear command sent. The next print requires acknowledgment of these cleared codes.", cleared_codes: codes };
@@ -997,7 +997,7 @@ export class BambuImplementation {
             print: {
                 command: "print_speed",
                 param: String(mode),
-                sequence_id: "0",
+                sequence_id: nextSequenceId(),
             },
         });
         await sleep(COMMAND_SETTLE_MS);
@@ -1020,7 +1020,7 @@ export class BambuImplementation {
                 command: "set_airduct",
                 modeId: normalizedMode === "cooling" ? 0 : 1,
                 submode: -1,
-                sequence_id: "0",
+                sequence_id: nextSequenceId(),
             },
         });
         await sleep(COMMAND_SETTLE_MS);
@@ -1045,7 +1045,7 @@ export class BambuImplementation {
                 command: "ams_get_rfid",
                 ams_id: normalizedAmsId,
                 slot_id: normalizedSlotId,
-                sequence_id: "0",
+                sequence_id: nextSequenceId(),
             },
         });
         await sleep(COMMAND_SETTLE_MS);
@@ -1159,7 +1159,7 @@ export class BambuImplementation {
         if (request.action === "start")
             assertAmsDryingSupported((await this.getSafetyStatus(host, serial, token))?.raw, request);
         const printer = await this.getPrinter(host, serial, token);
-        await printer.publish(buildAmsDryingCommand(request, "0"));
+        await printer.publish(buildAmsDryingCommand(request, nextSequenceId()));
         await sleep(COMMAND_SETTLE_MS);
         const label = request.action === "start" ? "started" : "stopped";
         return {
@@ -1179,7 +1179,7 @@ export class BambuImplementation {
         }
         await printer.publish({
             print: {
-                sequence_id: "0",
+                sequence_id: nextSequenceId(),
                 command: "skip_objects",
                 obj_list: normalizedObjectIds,
             },

@@ -124,3 +124,10 @@ for (const [model, serial, suffix, url] of [
     if ("extrude_cali_manual_mode" in cmd) assert.notEqual(cmd.extrude_cali_manual_mode, -1);
   });
 }
+
+test("sequence ids come from the server's own counter, apart from Studio's 20000-30000 and the cloud's 0", async () => {
+  const { nextSequenceId } = await import("../dist/sequence-id.js");
+  const ids = Array.from({ length: 20000 }, () => Number(nextSequenceId()));
+  assert.ok(ids.every(id => Number.isInteger(id) && id >= 40000 && id <= 49999));
+  for (let i = 1; i < ids.length; i++) assert.equal(ids[i], ids[i - 1] === 49999 ? 40000 : ids[i - 1] + 1, "counts up and wraps within its range");
+});

@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { nextSequenceId } from "./sequence-id.js";
 
 export type BambuNativePrintOptions = {
   host: string;
@@ -316,7 +317,7 @@ const X2D_NATIVE_XCAM_COMMANDS = new Set(["xcam_control_set"]);
 export function buildBambuNativeFanCommand(
   fan: string | number,
   speed: number,
-  sequenceId = String(Date.now())
+  sequenceId = nextSequenceId()
 ): BambuNativeFanCommand {
   const normalized = String(fan).trim().toLowerCase();
   const fanConfig = normalized === "1" || normalized === "part" || normalized === "part_cooling"
@@ -356,7 +357,7 @@ export function buildBambuNativeFanCommand(
 export function buildBambuNativeTemperatureCommand(
   component: string,
   temperature: number,
-  sequenceId = String(Date.now())
+  sequenceId = nextSequenceId()
 ): BambuNativeTemperatureCommand {
   const normalized = component.trim().toLowerCase();
   const normalizedComponent = normalized === "bed"

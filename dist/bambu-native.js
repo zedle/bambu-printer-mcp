@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { nextSequenceId } from "./sequence-id.js";
 function firstExistingExecutable(candidates) {
     return candidates.find((candidate) => {
         try {
@@ -244,7 +245,7 @@ const X2D_NATIVE_CAMERA_COMMANDS = new Set([
     "ipcam_timelapse",
 ]);
 const X2D_NATIVE_XCAM_COMMANDS = new Set(["xcam_control_set"]);
-export function buildBambuNativeFanCommand(fan, speed, sequenceId = String(Date.now())) {
+export function buildBambuNativeFanCommand(fan, speed, sequenceId = nextSequenceId()) {
     const normalized = String(fan).trim().toLowerCase();
     const fanConfig = normalized === "1" || normalized === "part" || normalized === "part_cooling"
         ? { fan: "part", fanIndex: 1 }
@@ -278,7 +279,7 @@ export function buildBambuNativeFanCommand(fan, speed, sequenceId = String(Date.
         }),
     };
 }
-export function buildBambuNativeTemperatureCommand(component, temperature, sequenceId = String(Date.now())) {
+export function buildBambuNativeTemperatureCommand(component, temperature, sequenceId = nextSequenceId()) {
     const normalized = component.trim().toLowerCase();
     const normalizedComponent = normalized === "bed"
         ? "bed"

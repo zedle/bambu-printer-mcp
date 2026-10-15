@@ -22,6 +22,7 @@ import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
+import { nextSequenceId } from "./sequence-id.js";
 dotenv.config();
 const DEFAULT_HOST = process.env.BAMBU_PRINTER_HOST || process.env.PRINTER_HOST || "localhost";
 const DEFAULT_BAMBU_SERIAL = process.env.BAMBU_PRINTER_SERIAL || process.env.BAMBU_SERIAL || "";
@@ -2943,19 +2944,19 @@ class BambuPrinterMCPServer {
                     case "cancel_print":
                         result = await this.bambu.cancelJob(host, bambuSerial, bambuToken, nativeControls
                             ? () => signedCommand({ host, serial: bambuSerial, token: bambuToken,
-                                messageJson: JSON.stringify({ print: { command: "stop", param: "", sequence_id: String(Date.now()) } }), qos: 1 })
+                                messageJson: JSON.stringify({ print: { command: "stop", param: "", sequence_id: nextSequenceId() } }), qos: 1 })
                             : undefined);
                         break;
                     case "pause_print":
                         result = await this.bambu.pauseJob(host, bambuSerial, bambuToken, nativeControls
                             ? () => signedCommand({ host, serial: bambuSerial, token: bambuToken,
-                                messageJson: JSON.stringify({ print: { command: "pause", param: "", sequence_id: String(Date.now()) } }), qos: 1 })
+                                messageJson: JSON.stringify({ print: { command: "pause", param: "", sequence_id: nextSequenceId() } }), qos: 1 })
                             : undefined);
                         break;
                     case "resume_print":
                         result = await this.bambu.resumeJob(host, bambuSerial, bambuToken, nativeControls
                             ? (assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
-                                messageJson: JSON.stringify({ print: { command: "resume", param: "", sequence_id: String(Date.now()) } }), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
+                                messageJson: JSON.stringify({ print: { command: "resume", param: "", sequence_id: nextSequenceId() } }), qos: 1 }, { signal: extra.signal, assertActive, beforeDispatch })
                             : undefined);
                         break;
                     case "x2d_native_control": {
@@ -2981,7 +2982,7 @@ class BambuPrinterMCPServer {
                             ? async (assertActive, beforeDispatch) => signedCommand({ host, serial: bambuSerial, token: bambuToken,
                                 // Studio's form (MachineObject::command_clean_print_error): the job's subtask_id and the error being
                                 // cleared; without them the printer keeps the error.
-                                messageJson: JSON.stringify({ print: { command: "clean_print_error", sequence_id: String(Date.now()),
+                                messageJson: JSON.stringify({ print: { command: "clean_print_error", sequence_id: nextSequenceId(),
                                         ...await (async () => {
                                             const raw = (await this.bambu.getSafetyStatus(host, bambuSerial, bambuToken))?.raw ?? {};
                                             return { subtask_id: String(raw.subtask_id ?? ""), print_error: Number(raw.print_error ?? 0) };
@@ -3007,7 +3008,7 @@ class BambuPrinterMCPServer {
                                 serial: bambuSerial,
                                 token: bambuToken,
                                 messageJson: JSON.stringify({
-                                    print: { command: "print_speed", param: String(mode), sequence_id: String(Date.now()) },
+                                    print: { command: "print_speed", param: String(mode), sequence_id: nextSequenceId() },
                                 }),
                             });
                         }
@@ -3033,7 +3034,7 @@ class BambuPrinterMCPServer {
                                         command: "set_airduct",
                                         modeId: mode === "cooling" ? 0 : 1,
                                         submode: -1,
-                                        sequence_id: String(Date.now()),
+                                        sequence_id: nextSequenceId(),
                                     },
                                 }),
                             });
@@ -3062,7 +3063,7 @@ class BambuPrinterMCPServer {
                                 messageJson: JSON.stringify({
                                     print: {
                                         command: "ams_get_rfid",
-                                        sequence_id: String(Date.now()),
+                                        sequence_id: nextSequenceId(),
                                         ams_id: amsId,
                                         slot_id: slotId,
                                     },
@@ -3143,7 +3144,7 @@ class BambuPrinterMCPServer {
                                         led_off_time: 500,
                                         loop_times: 0,
                                         interval_time: 0,
-                                        sequence_id: String(Date.now()),
+                                        sequence_id: nextSequenceId(),
                                     },
                                 }),
                             });
@@ -3166,7 +3167,7 @@ class BambuPrinterMCPServer {
                                 serial: bambuSerial,
                                 token: bambuToken,
                                 messageJson: JSON.stringify({
-                                    print: { command: "skip_objects", obj_list: objectIds, sequence_id: String(Date.now()) },
+                                    print: { command: "skip_objects", obj_list: objectIds, sequence_id: nextSequenceId() },
                                 }),
                                 qos: 1,
                             });
@@ -3185,7 +3186,7 @@ class BambuPrinterMCPServer {
                                 host,
                                 serial: bambuSerial,
                                 token: bambuToken,
-                                messageJson: JSON.stringify(buildAmsDryingCommand(drying, String(Date.now()))),
+                                messageJson: JSON.stringify(buildAmsDryingCommand(drying, nextSequenceId())),
                             }, drying.action === "start"
                                 ? { beforeDispatch: async () => assertAmsDryingSupported((await this.bambu.getSafetyStatus(host, bambuSerial, bambuToken))?.raw, drying) }
                                 : {});

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { nextSequenceId } from "./sequence-id.js";
 const FRAME_MAGIC = 0x52424a50;
 const FRAME_HEADER_SIZE = 16;
 const FRAME_TYPE_JSON_REQUEST = 1;
@@ -377,7 +378,7 @@ export class BambuNetworkBridge {
             // (install_device_cert, as Studio does on connect); before that send_message refuses them with -2.
             // Studio's on-connect sequence (GUI_App.cpp): request a full push and the version first; the plugin uses the
             // printer's replies when it installs the device certificate.
-            for (const hello of [{ pushing: { command: "pushall", sequence_id: "0", version: 1, push_target: 1 } }, { info: { command: "get_version", sequence_id: "0" } }]) {
+            for (const hello of [{ pushing: { command: "pushall", sequence_id: nextSequenceId(), version: 1, push_target: 1 } }, { info: { command: "get_version", sequence_id: nextSequenceId() } }]) {
                 assertBridgeOk(await this.callWithAgent("net.send_message", { dev_id: devId, msg: JSON.stringify(hello), qos: 0, flag: 0 }, options), "net.send_message");
             }
             assertBridgeOk(await this.callWithAgent("net.update_cert", {}, options), "net.update_cert");
@@ -437,7 +438,7 @@ export class BambuNetworkBridge {
         if (!connected)
             throw new Error(`Bambu's network plugin did not connect to printer ${devId} at ${devIp} over LAN within 10 seconds; nothing was sent.`);
         // Studio's on-connect requests (GUI_App.cpp on_local_connect): a full push and the version.
-        for (const hello of [{ pushing: { command: "pushall", sequence_id: "0", version: 1, push_target: 1 } }, { info: { command: "get_version", sequence_id: "0" } }]) {
+        for (const hello of [{ pushing: { command: "pushall", sequence_id: nextSequenceId(), version: 1, push_target: 1 } }, { info: { command: "get_version", sequence_id: nextSequenceId() } }]) {
             assertBridgeOk(await this.callWithAgent("net.send_message_to_printer", { dev_id: devId, msg: JSON.stringify(hello), qos: 0, flag: 0 }, options), "net.send_message_to_printer");
         }
         let reported = false;

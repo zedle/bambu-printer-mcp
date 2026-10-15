@@ -1579,9 +1579,10 @@ test("set_ams_drying start sends Bambu Studio's ams_filament_drying payload", as
   const { bambu, published, reads } = dryingPrinter(dryingReport());
   const result = await bambu.setAmsDrying("127.0.0.1", "SERIAL", "TOKEN", { ...startDrying, rotate_tray: true });
   assert.equal(reads(), 1, "start reads a fresh report");
-  // DevFilaSystemCtrl.cpp CtrlAmsStartDryingHour, key for key.
+  // DevFilaSystemCtrl.cpp CtrlAmsStartDryingHour, key for key; the sequence id comes from the server's own range.
+  assert.match(published[0].print.sequence_id, /^4\d{4}$/);
   assert.deepEqual(published, [{ print: {
-    command: "ams_filament_drying", sequence_id: "0", ams_id: 0, mode: 1, filament: "PLA", temp: 55, duration: 8,
+    command: "ams_filament_drying", sequence_id: published[0].print.sequence_id, ams_id: 0, mode: 1, filament: "PLA", temp: 55, duration: 8,
     humidity: 0, rotate_tray: true, cooling_temp: 45, close_power_conflict: false,
   } }]);
   assert.equal(result.status, "success");
@@ -1601,7 +1602,7 @@ test("set_ams_drying stop sends Studio's mode 0 with zeros and needs no report",
   assert.equal(reads(), 0);
   // DevFilaSystemCtrl.cpp CtrlAmsStopDrying.
   assert.deepEqual(published, [{ print: {
-    command: "ams_filament_drying", sequence_id: "0", ams_id: 129, mode: 0, filament: "", temp: 0, duration: 0,
+    command: "ams_filament_drying", sequence_id: published[0].print.sequence_id, ams_id: 129, mode: 0, filament: "", temp: 0, duration: 0,
     humidity: 0, rotate_tray: false, cooling_temp: 0, close_power_conflict: false,
   } }]);
   assert.equal(result.status, "success");
