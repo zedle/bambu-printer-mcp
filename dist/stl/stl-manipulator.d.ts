@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { EventEmitter } from 'events';
+import type { ExtruderNozzle, FilamentSource, ReportedExtruders } from '../slicer/extruder-config.js';
 export type ProgressCallback = (progress: number, message?: string) => void;
 export type OperationResult = {
     success: boolean;
@@ -39,6 +40,10 @@ export interface BambuSliceOptions {
     filamentColours?: string[];
     bedType?: string;
     nozzleType?: string;
+    extruderNozzles?: ExtruderNozzle[];
+    reportedExtruders?: ReportedExtruders;
+    filamentMap?: number[];
+    filamentSources?: FilamentSource[];
     enableTimelapse?: boolean;
     allowMixTemp?: boolean;
     scale?: number;

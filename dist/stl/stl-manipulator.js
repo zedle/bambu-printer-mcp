@@ -9,7 +9,7 @@ import { promisify } from 'util';
 import { EventEmitter } from 'events';
 import * as crypto from 'crypto';
 import { execFile } from 'child_process';
-import { flattenForCli, detectProfilesRoot, resolveBblMachineProfile } from '../slicer/profile-flatten.js';
+import { flattenForCli, detectProfilesRoot, resolveBblMachineProfile, hasExtruderSetup } from '../slicer/profile-flatten.js';
 import { profileJsonFiles } from '../slicer/profile-files.js';
 const readFileAsync = promisify(fs.readFile);
 const writeFileAsync = promisify(fs.writeFile);
@@ -373,8 +373,12 @@ export class STLManipulator extends EventEmitter {
         });
         const isBundled = (filePath, profile) => String(profile.from).toLowerCase() === 'system' || isBundledFile(filePath);
         const needsResolution = (filePath, profile) => hasReferences(profile) || isBundled(filePath, profile);
-        if (![...settings, ...filaments].some((profile, i) => needsResolution([...parts, ...bundle.filamentPaths][i], profile)))
+        if (![...settings, ...filaments].some((profile, i) => needsResolution([...parts, ...bundle.filamentPaths][i], profile))) {
+            if (bambuOptions && hasExtruderSetup(bambuOptions)) {
+                throw new Error('Per-extruder nozzle and filament-map settings need a Bambu machine preset; these standalone profiles cannot take them.');
+            }
             return bundle;
+        }
         if (parts.length !== 2) {
             throw new Error('Resolving BBL profiles requires both a machine and process profile; refusing to slice with unresolved settings.');
         }
@@ -407,12 +411,22 @@ export class STLManipulator extends EventEmitter {
             bedType: this.resolveBambuStudioBedType(bambuOptions?.bedType),
             filamentColours: bambuOptions?.filamentColours ?? bundle.filamentColours,
             projectTowerPosition: bundle.projectTowerPosition,
+            ...(bambuOptions && hasExtruderSetup(bambuOptions) ? {
+                nozzleType: bambuOptions.nozzleType,
+                extruderNozzles: bambuOptions.extruderNozzles,
+                reportedExtruders: bambuOptions.reportedExtruders,
+                filamentMap: bambuOptions.filamentMap,
+                filamentSources: bambuOptions.filamentSources,
+            } : {}),
             sourceProfiles: {
                 machine: isBundledFile(machinePath) ? undefined : machine,
                 process: isBundledFile(processPath) ? undefined : processProfile,
                 filaments: filaments.map((profile, i) => isBundledFile(bundle.filamentPaths[i]) ? undefined : profile),
             },
         });
+        if (flat.meta.extruders) {
+            console.error(`Extruder setup for ${flat.meta.machineLeafName}: ${JSON.stringify(flat.meta.extruders)}`);
+        }
         // Standalone files retain their own identity and settings, but still need
         // the CLI colour/tower fields. Do not discard those required overlays when
         // choosing the original profile instead of the normalized BBL output.
@@ -423,11 +437,14 @@ export class STLManipulator extends EventEmitter {
                 return filePath;
             return this.writeTempJson(path.basename(filePath, '.json'), 'cli', { ...profile, ...fields });
         };
+        // Per-extruder settings are CLI fields too: keep them on standalone files.
+        const extruderSetup = Boolean(bambuOptions && hasExtruderSetup(bambuOptions));
         return {
             settingsArg: [
-                needsResolution(machinePath, machine) ? flat.machinePath : machinePath,
+                needsResolution(machinePath, machine) ? flat.machinePath
+                    : extruderSetup ? withCliFields(machinePath, machine, flat.machinePath, ['nozzle_volume_type', 'nozzle_type']) : machinePath,
                 needsResolution(processPath, processProfile) ? flat.processPath
-                    : withCliFields(processPath, processProfile, flat.processPath, ['wipe_tower_x', 'wipe_tower_y']),
+                    : withCliFields(processPath, processProfile, flat.processPath, ['wipe_tower_x', 'wipe_tower_y', ...(extruderSetup ? ['filament_map_mode', 'filament_map'] : [])]),
             ].join(';'),
             filamentPaths: filaments.map((profile, i) => needsResolution(bundle.filamentPaths[i], profile) ? flat.filamentPaths[i]
                 : withCliFields(bundle.filamentPaths[i], profile, flat.filamentPaths[i], ['filament_colour'])),
@@ -1281,7 +1298,8 @@ export class STLManipulator extends EventEmitter {
                         const settingsBundle = await this.maybeFlattenBundle(await this.expandProjectFilaments(stlFilePath, rawBundle), bambuOptions, profilesRoot);
                         // The machine preset assumes the stock hotend; record the installed one so
                         // the sliced job's nozzle_type matches what the printer reports.
-                        if (bambuOptions?.nozzleType && settingsBundle.settingsArg) {
+                        // With per-extruder settings the flattener already wrote each extruder's rows.
+                        if (bambuOptions?.nozzleType && settingsBundle.settingsArg && !hasExtruderSetup(bambuOptions)) {
                             const [machinePath, ...rest] = settingsBundle.settingsArg.split(';');
                             const machine = this.readJsonFile(machinePath);
                             const current = machine.nozzle_type;

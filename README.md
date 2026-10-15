@@ -1132,6 +1132,10 @@ When `slicer_type` is `bambustudio` (the default), these additional parameters a
 | `min_save` | boolean | Produce smaller output 3MF (faster uploads) |
 | `skip_modified_gcodes` | boolean | Ignore stale custom gcodes in the 3MF |
 | `slice_plate` | number | Which plate to slice (0 = all plates, default: 0) |
+| `nozzles` | array | Per-extruder nozzles, left first on dual-nozzle printers: `[{ "diameter", "flow", "type" }, ...]`. `flow` is `Standard`, `High Flow`, `TPU High Flow` or `E3D High Flow` and must be one of that extruder's variants in the Bambu Studio profiles; `type` is the hotend material. Both diameters must match (Bambu Studio has one machine preset per diameter). |
+| `nozzles_from_printer` | boolean | Read the mounted nozzles and the AMS / external spool feeds from a fresh printer report before slicing (default false). Explicit `nozzles` fields win. |
+| `filament_map` | array | Dual-nozzle printers: the extruder per filament slot (`1`/`"left"`, `2`/`"right"`), written as Bambu Studio's manual filament map. |
+| `filament_sources` | array | `"ams"`, `"ams:<unit id>"` or `"external"` per filament slot. With `nozzles_from_printer`, a filament mapped to a nozzle its AMS or holder can't feed is refused, and `filament_map` is derived when each slot reaches exactly one nozzle. |
 
 **Example: Slice with auto-orient and 3 copies**
 ```json

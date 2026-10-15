@@ -93,6 +93,45 @@ shared nozzle area. Saved project positions and explicit process positions
 are preserved. This does not guarantee a collision-free layout: inspect the
 slicer preview for the actual model and tower geometry.
 
+### Dual-nozzle printers with different nozzles
+
+H2D, H2C and X2D (and the H2D Pro, whose profiles are handled the same way but which is not a `bambu_model` choice yet) can carry a different hotend on each side (the H2C
+has a fixed High Flow nozzle on the left and a rack of Standard hotends on the
+right). `slice_stl` and `slice_with_template` take that per extruder:
+
+```json
+{
+  "stl_path": "/path/to/two-colour.3mf",
+  "bambu_model": "h2c",
+  "bed_type": "engineering_plate",
+  "nozzles": [
+    { "flow": "High Flow", "type": "tungsten_carbide" },
+    { "flow": "Standard", "type": "hardened_steel" }
+  ],
+  "filament_map": [2, 1]
+}
+```
+
+- `nozzles` is in Bambu Studio's extruder order: extruder 1 is the left nozzle.
+  The MCP writes `nozzle_volume_type` per extruder and each `nozzle_type` row of
+  the extruder that owns it (`printer_extruder_id`). A flow that extruder has no
+  variant for in the installed profiles, a diameter other than the machine
+  preset's, or a filament profile without settings for that variant is refused.
+  Bambu Studio has no machine preset that mixes nozzle diameters.
+- `filament_map` sets `filament_map_mode` to Manual, so each filament prints on
+  the nozzle its AMS or spool can feed. Without it Bambu Studio groups filaments
+  itself and may pick the other nozzle. Filament types the machine profile lists
+  as unprintable on that extruder are refused.
+- `nozzles_from_printer: true` reads the mounted nozzles from a fresh printer
+  report instead (rack hotends that are not mounted are ignored), and with
+  `filament_sources` (`"ams"`, `"ams:<unit id>"`, `"external"` per slot) checks
+  which nozzle each AMS unit (its `info` binding) and external holder (254 left,
+  255 right) feeds. A filament mapped to a nozzle its source can't feed is
+  refused; when every slot reaches exactly one nozzle (for the external spool,
+  the loaded holder) the map is derived.
+
+Single-nozzle printers are unchanged unless these options are given.
+
 [Sebastian's contribution](https://github.com/DMontgomery40/bambu-printer-mcp/pull/18)
 includes real Windows BambuStudio `02.08.02.60` bisection and a successful
 four-colour X2D slice. This is slicing evidence, not a physical-print test.

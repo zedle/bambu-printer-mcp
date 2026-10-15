@@ -23,6 +23,7 @@
  * BBL only. Other vendors are out of scope and rejected explicitly so we
  * fail loud rather than producing dangerous gcode for hardware we don't own.
  */
+import type { ExtruderNozzle, FilamentSource, ReportedExtruders } from './extruder-config.js';
 export type ProfileKind = "machine" | "process" | "filament";
 export interface FlattenedProfiles {
     machinePath: string;
@@ -38,6 +39,13 @@ export interface FlattenedProfiles {
         cliConfigValidated: boolean;
         /** Some validated official model configs intentionally have no limits. */
         cliOverlayApplied: boolean;
+        /** Per-extruder settings written into the profiles (Bambu Studio order, left first). */
+        extruders?: {
+            nozzleVolumeType: string[];
+            /** Hotend material per extruder; undefined where its rows disagree or are absent. */
+            nozzleTypes: (string | undefined)[];
+            filamentMap?: number[];
+        };
     };
 }
 export interface FlattenOptions {
@@ -56,14 +64,30 @@ export interface FlattenOptions {
     /** Vendor subdir under profilesRoot. Currently only "BBL" supported. */
     vendor?: string;
     /**
-     * Override for installed nozzle flow type. The printer reports this on
-     * boot from its physical nozzle scan; both nozzles always match (you
-     * can't mix Standard + High Flow, just like you can't mix 0.2 + 0.4).
+     * Override for installed nozzle flow type, applied to every extruder.
      * If omitted we use `default_nozzle_volume_type` from the profile tree
-     * (= "Standard" on stock BBL machines). Pass "High Flow" when HF
-     * nozzles are installed.
+     * (= "Standard" on stock BBL machines). Use `extruderNozzles` for
+     * printers whose nozzles differ (e.g. H2C: left High Flow, right Standard).
      */
     nozzleVolumeType?: "Standard" | "High Flow";
+    /**
+     * Hotend material for every `nozzle_type` row; per-extruder types from
+     * `extruderNozzles` or `reportedExtruders` win over it.
+     */
+    nozzleType?: string;
+    /**
+     * Per extruder, in Bambu Studio's order (extruder 1 = left on dual-nozzle
+     * printers): diameter (must match the machine preset), flow (must be one
+     * of that extruder's variants in the profile) and hotend material.
+     * Missing fields fall back to `reportedExtruders`, then the profile.
+     */
+    extruderNozzles?: ExtruderNozzle[];
+    /** Fresh printer report (firmware nozzle ids): nozzles and filament feeds. */
+    reportedExtruders?: ReportedExtruders;
+    /** Manual filament -> extruder map: Bambu Studio extruder number (1-based) per filament slot. */
+    filamentMap?: number[];
+    /** Where each filament slot is loaded from; checked against the report's feeds. */
+    filamentSources?: FilamentSource[];
     /** BambuStudio display name, e.g. "Textured PEI Plate" or "Cool Plate". */
     bedType?: string;
     /** Actual input configs, including user overrides on top of BBL parents. */
@@ -95,6 +119,8 @@ export declare const DEFAULT_FILAMENT_COLOUR = "#00AE42";
  * Throws on unknown leaf names, missing profilesRoot, or cycles.
  */
 export declare function flattenForCli(opts: FlattenOptions): Promise<FlattenedProfiles>;
+/** Whether per-extruder nozzle or filament-map settings were requested. */
+export declare function hasExtruderSetup(opts: Pick<FlattenOptions, "extruderNozzles" | "reportedExtruders" | "filamentMap" | "filamentSources">): boolean;
 /**
  * Given the SLICER_PATH (path to BambuStudio executable), walk up to the
  * profile directory for that installation (macOS, Windows, or Linux prefix).
