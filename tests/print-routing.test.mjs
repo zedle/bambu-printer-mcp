@@ -9,7 +9,7 @@ import { BambuImplementation } from "../dist/printers/bambu.js";
 // Mocked printers never report a started job; tests that cover it opt back in.
 process.env.BAMBU_DISPATCH_CHECK_MS = "0";
 
-async function capture(t, model, serial, { sparse = false, useAMS = true, suffix = ".gcode.3mf" } = {}) {
+async function capture(t, model, serial, { sparse = false, useAMS = true, suffix = ".gcode.3mf", hms = [] } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bambu-route-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const file = path.join(dir, `cube${suffix}`);
@@ -27,7 +27,7 @@ async function capture(t, model, serial, { sparse = false, useAMS = true, suffix
   printer.getSafetyStatus = async () => {
     const now = Date.now();
     return { connected: true, model, status: "IDLE", serial,
-      raw: { model, gcode_state: "IDLE", nozzle_diameter: "0.4", nozzle_type: "hardened_steel", device: { nozzle: { info: nozzleDiameters.map((diameter, id) => ({ id, diameter, type: "HH01", stat: 0 })) } }, print_error: 0, hms: [], ams: { tray_now: "254", ams: [{ id: "0", tray: [{ id: "1", tray_type: "PLA", nozzle_temp_min: "190", nozzle_temp_max: "240" }] }] } },
+      raw: { model, gcode_state: "IDLE", nozzle_diameter: "0.4", nozzle_type: "hardened_steel", device: { nozzle: { info: nozzleDiameters.map((diameter, id) => ({ id, diameter, type: "HH01", stat: 0 })) } }, print_error: 0, hms, ams: { tray_now: "254", ams: [{ id: "0", tray: [{ id: "1", tray_type: "PLA", nozzle_temp_min: "190", nozzle_temp_max: "240" }] }] } },
       observation: { source: "mqtt", requestedAt: now, receivedAt: now, identitySource: "report" } };
   };
   printer.getPrinter = async () => ({ publish: async (message) => { published.push(typeof message === "string" ? JSON.parse(message) : message); } });
@@ -39,7 +39,7 @@ async function capture(t, model, serial, { sparse = false, useAMS = true, suffix
   assert.equal(published.length, 1);
   assert.match(path.posix.basename(uploadedPath), /^checked-[a-f0-9-]+-cube(?:\.gcode)?\.3mf$/);
   assert.equal(uploadedPath, `/${result.remoteProjectPath}`);
-  return { uploadedPath, remote: result.remoteProjectPath, cmd: published[0].print };
+  return { uploadedPath, remote: result.remoteProjectPath, cmd: published[0].print, result };
 }
 
 test("full-size A1 uploads to SD root and uses project_file", async (t) => {
@@ -130,4 +130,14 @@ test("sequence ids come from the server's own counter, apart from Studio's 20000
   const ids = Array.from({ length: 20000 }, () => Number(nextSequenceId()));
   assert.ok(ids.every(id => Number.isInteger(id) && id >= 40000 && id <= 49999));
   for (let i = 1; i < ids.length; i++) assert.equal(ids[i], ids[i - 1] === 49999 ? 40000 : ids[i - 1] + 1, "counts up and wraps within its range");
+});
+
+test("LAN print results carry non-blocking HMS warnings like the cloud route", async (t) => {
+  const hms = [{ attr: 0x03000100, code: 0x30001 }];
+  for (const [model, serial, options] of [["h2d", "094TEST", {}], ["p1s", "01PTEST", { useAMS: false }]]) {
+    const { result } = await capture(t, model, serial, { ...options, hms });
+    assert.deepEqual(result.hmsWarnings, ["HMS 0300-0100-0003-0001 (common)"], model);
+  }
+  const { result } = await capture(t, "h2d", "094TEST");
+  assert.equal("hmsWarnings" in result, false, "no warnings, no field");
 });

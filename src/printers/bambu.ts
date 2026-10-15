@@ -152,6 +152,14 @@ export function buildLanProjectFile(options: LanProjectFileOptions): { print: Re
   };
 }
 
+/**
+ * Serious and common HMS entries (and the other non-blocking states validatePrinterState reports) don't stop a
+ * print, as in Bambu Studio, but the caller must see them: every print route adds them to its result the same way.
+ */
+export function withHmsWarnings<T extends Record<string, unknown>>(result: T, hmsWarnings: readonly string[] | undefined): T & { hmsWarnings?: string[] } {
+  return hmsWarnings?.length ? { ...result, hmsWarnings: [...hmsWarnings] } : result;
+}
+
 /** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
 export function dispatchStatusLabel(dispatch: "started" | "unconfirmed"): "success" | "dispatched_unconfirmed" {
   return dispatch === "started" ? "success" : "dispatched_unconfirmed";
@@ -657,15 +665,22 @@ export class BambuImplementation {
     this.clearedErrors.delete(serial);
   }
 
-  private validateLoadedGcodeState(status: any, inspection: Awaited<ReturnType<typeof inspectPrintFile>>): PrinterStateRequirements {
+  private validateLoadedGcodeState(status: any, inspection: Awaited<ReturnType<typeof inspectPrintFile>>): { requirements: PrinterStateRequirements; hmsWarnings: string[] } {
     const usedMaterials = inspection.usedFilamentPositions.map(position => inspection.materials[position]);
     if (new Set(usedMaterials).size !== 1) throw new Error("gcode_file printing cannot verify physical changes between different materials. Use a mapped .3mf project.");
     const loaded = manualHeatingRequirements(status, inspection.model, inspection.nozzleDiameters[0], usedMaterials[0]);
     const mapping = Array<number>(inspection.materials.length).fill(-1);
     inspection.usedFilamentPositions.forEach(position => { mapping[position] = loaded.amsMapping?.[0] ?? 254; });
     const requirements = { ...inspection, useAMS: loaded.useAMS, amsMapping: mapping, usedNozzleIndices: loaded.usedNozzleIndices, requireLoadedFilament: true };
-    validatePrinterState(status, requirements);
-    return requirements;
+    const { hmsWarnings } = validatePrinterState(status, requirements);
+    return { requirements, hmsWarnings };
+  }
+
+  /** Validate a fresh report for a print: loaded-filament checks for a legacy gcode_file job, the mapped checks otherwise. */
+  private validatePrintState(status: any, inspection: Awaited<ReturnType<typeof inspectPrintFile>>, requirements: PrinterStateRequirements, legacyContainer: boolean):
+    { requirements: PrinterStateRequirements; hmsWarnings: string[] } {
+    if (legacyContainer) return this.validateLoadedGcodeState(status, inspection);
+    return { requirements, hmsWarnings: validatePrinterState(status, requirements).hmsWarnings };
   }
 
   private async resolveProjectFileMetadata(
@@ -968,22 +983,19 @@ export class BambuImplementation {
         throw new Error("Legacy gcode_file printing requires a single plate_1.gcode. Export only the selected plate or use a .3mf project_file export.");
       }
     }
-    let requirements: PrinterStateRequirements = { ...inspection, amsMapping: baseMapping, useAMS: options.useAMS !== false };
+    const mappedRequirements: PrinterStateRequirements = { ...inspection, amsMapping: baseMapping, useAMS: options.useAMS !== false };
     const initialStatus = await this.getSafetyStatus(host, serial, token);
-    if (legacyContainer) requirements = this.validateLoadedGcodeState(initialStatus, inspection);
-    else validatePrinterState(initialStatus, requirements);
+    this.validatePrintState(initialStatus, inspection, mappedRequirements, legacyContainer);
     assertUnsignedPrintAccepted(initialStatus);
     const bedClearance = await this.confirmPrintPreflight(serial, initialStatus, inspection);
     const confirmedStatus = await this.getSafetyStatus(host, serial, token);
-    if (legacyContainer) requirements = this.validateLoadedGcodeState(confirmedStatus, inspection);
-    else validatePrinterState(confirmedStatus, requirements);
+    this.validatePrintState(confirmedStatus, inspection, mappedRequirements, legacyContainer);
     this.assertBedClearance(confirmedStatus, bedClearance);
     assertActive();
     await this.ftpUpload(host, token, options.filePath, remoteUploadPath);
     // Uploads can be long. Recheck current state before the command is dispatched.
     const dispatchStatus = await this.getSafetyStatus(host, serial, token);
-    if (legacyContainer) requirements = this.validateLoadedGcodeState(dispatchStatus, inspection);
-    else validatePrinterState(dispatchStatus, requirements);
+    const { requirements, hmsWarnings } = this.validatePrintState(dispatchStatus, inspection, mappedRequirements, legacyContainer);
     this.assertBedClearance(dispatchStatus, bedClearance);
     const printer = await this.getPrinter(host, serial, token);
     assertActive();
@@ -992,13 +1004,13 @@ export class BambuImplementation {
       try { await invokeWithoutAck(printer, new GCodeFileCommand({ fileName: remoteProjectPath })); } catch (error) { watcher.dispose(); throw error; }
       this.recordCheckedJob(host, serial, remoteProjectPath, requirements);
       const dispatch = await watcher.settled();
-      return {
+      return withHmsWarnings({
         status: dispatchStatusLabel(dispatch), dispatch, remoteProjectPath,
         message: dispatch === "started"
           ? `The printer accepted and started the checked gcode.3mf print: ${options.projectName}`
           : `Uploaded the checked gcode.3mf and sent the print command for ${options.projectName}; the printer has not reported starting yet. ` +
             "Check get_printer_status before assuming it is printing.",
-      };
+      }, hmsWarnings);
     }
 
     const bedLeveling = options.bedLeveling ?? true;
@@ -1033,7 +1045,7 @@ export class BambuImplementation {
     await new Promise((resolve) => setTimeout(resolve, 300));
     const dispatch = await watcher.settled();
 
-    return {
+    return withHmsWarnings({
       status: dispatchStatusLabel(dispatch),
       dispatch,
       message: dispatch === "started"
@@ -1045,7 +1057,7 @@ export class BambuImplementation {
       platePath: projectMetadata.plateInternalPath,
       md5,
       amsMapping,
-    };
+    }, hmsWarnings);
   }
 
   async cancelJob(host: string, serial: string, token: string, dispatch?: () => Promise<any>): Promise<any> {
@@ -1516,17 +1528,17 @@ export class BambuImplementation {
     const inspection = await inspectPrintFile(filePath, { model });
     if (inspection.selectsAms) throw new Error("Raw G-code with AMS selection requires a .3mf project export with verified physical slot mappings.");
     const initialStatus = await this.getSafetyStatus(host, serial, token);
-    let requirements = this.validateLoadedGcodeState(initialStatus, inspection);
+    this.validateLoadedGcodeState(initialStatus, inspection);
     assertUnsignedPrintAccepted(initialStatus);
     const bedClearance = await this.confirmPrintPreflight(serial, initialStatus, inspection);
     const confirmedStatus = await this.getSafetyStatus(host, serial, token);
-    requirements = this.validateLoadedGcodeState(confirmedStatus, inspection);
+    this.validateLoadedGcodeState(confirmedStatus, inspection);
     this.assertBedClearance(confirmedStatus, bedClearance);
     assertActive();
     const remotePath = path.posix.join(path.posix.dirname(filename), uniquePrintName(filename));
     await this.ftpUpload(host, token, filePath, `/${remotePath}`);
     const dispatchStatus = await this.getSafetyStatus(host, serial, token);
-    requirements = this.validateLoadedGcodeState(dispatchStatus, inspection);
+    const { requirements, hmsWarnings } = this.validateLoadedGcodeState(dispatchStatus, inspection);
     this.assertBedClearance(dispatchStatus, bedClearance);
     const printer = await this.getPrinter(host, serial, token);
     assertActive();
@@ -1534,12 +1546,12 @@ export class BambuImplementation {
     try { await invokeWithoutAck(printer, new GCodeFileCommand({ fileName: remotePath })); } catch (error) { watcher.dispose(); throw error; }
     this.recordCheckedJob(host, serial, remotePath, requirements);
     const dispatch = await watcher.settled();
-    return {
+    return withHmsWarnings({
       status: dispatchStatusLabel(dispatch), uploaded: true, printRequested: true, dispatch, remotePath,
       message: dispatch === "started"
         ? `The printer accepted and started ${remotePath}.`
         : `Sent the print command for ${remotePath}; the printer has not reported starting yet. Check get_printer_status before assuming it is printing.`,
-    };
+    }, hmsWarnings);
   }
 
   /**

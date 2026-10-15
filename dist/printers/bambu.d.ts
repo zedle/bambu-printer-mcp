@@ -46,6 +46,13 @@ export type LanProjectFileOptions = {
 export declare function buildLanProjectFile(options: LanProjectFileOptions): {
     print: Record<string, unknown>;
 };
+/**
+ * Serious and common HMS entries (and the other non-blocking states validatePrinterState reports) don't stop a
+ * print, as in Bambu Studio, but the caller must see them: every print route adds them to its result the same way.
+ */
+export declare function withHmsWarnings<T extends Record<string, unknown>>(result: T, hmsWarnings: readonly string[] | undefined): T & {
+    hmsWarnings?: string[];
+};
 /** A print the printer confirmed is "success"; one sent but not yet seen running is reported apart from it. */
 export declare function dispatchStatusLabel(dispatch: "started" | "unconfirmed"): "success" | "dispatched_unconfirmed";
 type DispatchVerdict = {
@@ -107,6 +114,8 @@ export declare class BambuImplementation {
     /** Internal handoff from a successful inspected transport; never exposed as an MCP tool. */
     recordCheckedJob(host: string, serial: string, remotePath: string, requirements: PrinterStateRequirements): void;
     private validateLoadedGcodeState;
+    /** Validate a fresh report for a print: loaded-filament checks for a legacy gcode_file job, the mapped checks otherwise. */
+    private validatePrintState;
     private resolveProjectFileMetadata;
     /** Safety reads never use the display cache or configured-serial model inference. */
     getSafetyStatus(host: string, serial: string, token: string): Promise<any>;
@@ -158,14 +167,16 @@ export declare class BambuImplementation {
         remotePath: string;
         printRequested: boolean;
         inspected: boolean;
-    } | {
+    } | ({
         status: "success" | "dispatched_unconfirmed";
         uploaded: boolean;
         printRequested: boolean;
         dispatch: "started" | "unconfirmed";
         remotePath: string;
         message: string;
-    }>;
+    } & {
+        hmsWarnings?: string[];
+    })>;
     private printRawPrepared;
     /**
      * A published print command is not proof the printer took it. Listen to the
@@ -189,6 +200,8 @@ export declare class BambuImplementation {
         dispatch: "started" | "unconfirmed";
         remotePath: string;
         message: string;
+    } & {
+        hmsWarnings?: string[];
     }>;
     private ftpDownload;
     /**

@@ -17,7 +17,7 @@ import { BlenderMcpBridge } from "./blender-mcp-bridge.js";
 import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue } from "./ams-mapping.js";
 import { assertAmsDryingSupported, buildAmsDryingCommand, normalizeAmsDryingRequest } from "./ams-drying.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, parse3MF } from './3mf_parser.js';
-import { BambuImplementation, assertDirectPrintSupported, dispatchStatusLabel, unsignedLanPrintAllowed } from "./printers/bambu.js";
+import { BambuImplementation, assertDirectPrintSupported, dispatchStatusLabel, unsignedLanPrintAllowed, withHmsWarnings } from "./printers/bambu.js";
 import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
@@ -1257,7 +1257,8 @@ class BambuPrinterMCPServer {
             validatePrinterState(initialStatus, requirements);
             const bedClearance = await this.bambu.confirmPrintPreflight(devId, initialStatus, inspection);
             const confirmedStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
-            const { hmsWarnings } = validatePrinterState(confirmedStatus, requirements);
+            // The warnings reported are those of the last check before dispatch.
+            let { hmsWarnings } = validatePrinterState(confirmedStatus, requirements);
             this.bambu.assertBedClearance(confirmedStatus, bedClearance);
             const amsMapping = stringifyBridgeJson(mapping);
             const trayColour = (tray) => {
@@ -1332,13 +1333,13 @@ class BambuPrinterMCPServer {
                 }, native.onUpdate, { signal: native.signal, assertActive, beforeDispatch: async () => {
                         assertActive();
                         const dispatchStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
-                        validatePrinterState(dispatchStatus, requirements);
+                        ({ hmsWarnings } = validatePrinterState(dispatchStatus, requirements));
                         this.bambu.assertBedClearance(dispatchStatus, bedClearance);
                         assertActive();
                     } });
                 assertActive();
                 this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
-                return { ...nativeResult, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping };
+                return withHmsWarnings({ ...nativeResult, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping }, hmsWarnings);
             }
             // Open the plugin's channel to the printer first, as Studio does. Cloud jobs (start_print, and the cloud record
             // of start_local_print_with_record) need its cloud channel: -3140 ENC_FLAG_NOT_READY otherwise. A LAN job
@@ -1362,7 +1363,7 @@ class BambuPrinterMCPServer {
                             return;
                         assertActive();
                         dispatchStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
-                        validatePrinterState(dispatchStatus, requirements);
+                        ({ hmsWarnings } = validatePrinterState(dispatchStatus, requirements));
                         this.bambu.assertBedClearance(dispatchStatus, bedClearance);
                     },
                     assertDispatchAllowed: method => { if (method === bridgeMethod)
@@ -1377,7 +1378,7 @@ class BambuPrinterMCPServer {
                 // Never resend: the job may still start. Look at the printer instead.
                 this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
                 if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive) === "started") {
-                    return { status: "success", dispatch: "started", message: `Bambu's network plugin did not answer, but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params) };
+                    return withHmsWarnings({ status: "success", dispatch: "started", message: `Bambu's network plugin did not answer, but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params) }, hmsWarnings);
                 }
                 throw error;
             }
@@ -1393,7 +1394,7 @@ class BambuPrinterMCPServer {
                     // The cloud task exists but the printer's ack didn't arrive in time: it may still start.
                     this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
                     if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive) === "started") {
-                        return { status: "success", dispatch: "started", message: `The plugin reported ${value} (${bridgePrintErrorText(value)}), but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, bridgeResult, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params) };
+                        return withHmsWarnings({ status: "success", dispatch: "started", message: `The plugin reported ${value} (${bridgePrintErrorText(value)}), but the printer reports ${threeMfFilename} printing. It was not sent again.`, bridgeMethod, bridgeResult, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params) }, hmsWarnings);
                     }
                     throw new Error(`FULU BambuNetwork bridge method ${bridgeMethod} returned ${value} (${bridgePrintErrorText(value)}). The job was posted and may still start. Do not send it again: check get_printer_status (gcode_state and the job name) first.`);
                 }
@@ -1404,7 +1405,7 @@ class BambuPrinterMCPServer {
             // A 0 from the plugin isn't proof (start_local_print returns ~3 s after publishing, with no printer ack):
             // confirm the job from the printer's own reports.
             const dispatch = await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive);
-            return {
+            return withHmsWarnings({
                 status: dispatchStatusLabel(dispatch),
                 dispatch,
                 message: dispatch === "started"
@@ -1420,8 +1421,7 @@ class BambuPrinterMCPServer {
                 useAMS,
                 amsMapping: mapping,
                 params: redactPrintParams(params),
-                ...(hmsWarnings.length ? { hmsWarnings } : {}),
-            };
+            }, hmsWarnings);
         }));
     }
     async handoff3mfViaBambuConnect(args) {
