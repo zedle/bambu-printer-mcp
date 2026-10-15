@@ -26,6 +26,8 @@ export interface PrintFileInspection {
   filamentColours?: string[];
   /** Per filament, from the plate header: the raw filament_type (e.g. PLA-CF; materials holds the base family). */
   filamentTypes?: string[];
+  /** Per filament, from the plate header: the filament preset name (filament_settings_id without " @<machine>"). */
+  filamentNames?: string[];
 }
 type Metadata = Record<string, unknown>;
 const NUMBER = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
@@ -504,5 +506,6 @@ export async function inspectPrintFile(filePath: string, options: {model:string;
     ...(physicalMap ? { physicalExtruderMap: physicalMap } : {}),
     ...(perFilament('filament_ids') ? { filamentIds: perFilament('filament_ids') } : {}),
     ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {}),
-    ...(perFilament('filament_type') ? { filamentTypes: perFilament('filament_type') } : {})};
+    ...(perFilament('filament_type') ? { filamentTypes: perFilament('filament_type') } : {}),
+    ...(perFilament('filament_settings_id') ? { filamentNames: perFilament('filament_settings_id')!.map(name => name.replace(/\s*@.*$/, '')) } : {})};
 }

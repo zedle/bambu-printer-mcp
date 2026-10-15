@@ -216,3 +216,36 @@ test('control commands take the form Studio picks for each printer', async () =>
   assert.equal(print(control.temperatureCommand(control.controlProtocol(undefined, 'x2d'), 'bed', 0)).command, 'set_bed_temp');
   assert.equal(print(control.temperatureCommand(control.controlProtocol(undefined, 'p1s'), 'bed', 0)).param, 'M140 S0\n');
 });
+
+test('Studio\'s filament prohibitions block the job', async () => {
+  const rules = await import('../../dist/safety/filament-rules.js');
+  const blocked = check => rules.filamentProhibition({ model: 'p1s', external: false, ...check });
+  assert.match(blocked({ type: 'TPU' }), /TPU is not supported by AMS/);
+  assert.equal(blocked({ type: 'TPU', external: true }), undefined);
+  assert.equal(blocked({ type: 'TPU-AMS' }), undefined);
+  assert.match(blocked({ type: 'PET-CF', filamentId: 'GFT01' }), /Bambu Lab PET-CF/);
+  assert.equal(blocked({ type: 'PET-CF', filamentId: 'GFT98' }), undefined, 'a generic PET-CF is allowed in the AMS');
+  // E3D high-flow hotends on the P1P, P1S and X1C.
+  assert.match(blocked({ type: 'PPS-CF', external: true, nozzleFlow: 'high_flow' }), /E3D high-flow/);
+  assert.match(blocked({ model: 'x1c', type: 'PA', name: 'Bambu PA6-GF', external: true, nozzleFlow: 'e3dhighflow' }), /E3D high-flow/);
+  assert.equal(blocked({ model: 'x1e', type: 'PPS-CF', external: true, nozzleFlow: 'high_flow' }), undefined);
+  assert.equal(blocked({ type: 'PPS-CF', external: true, nozzleFlow: 'standard' }), undefined);
+  // H2D/H2D Pro TPU high-flow nozzle: only Bambu's TPU ids; Bambu TPU 85A not on 0.4 Standard/High Flow.
+  assert.match(blocked({ model: 'h2d', type: 'PLA', filamentId: 'GFA00', external: true, nozzleFlow: 'tpuhighflow' }), /TPU high-flow nozzle/);
+  assert.equal(blocked({ model: 'h2d', type: 'TPU', filamentId: 'GFU01', external: true, nozzleFlow: 'tpuhighflow' }), undefined);
+  assert.match(blocked({ model: 'h2dpro', type: 'TPU', name: 'Bambu TPU 85A', external: true, nozzleFlow: 'standard', nozzleDiameter: 0.4 }), /TPU 85A/);
+  assert.equal(blocked({ model: 'h2dpro', type: 'TPU', name: 'Bambu TPU 85A', external: true, nozzleFlow: 'standard', nozzleDiameter: 0.6 }), undefined);
+
+  // Through the print gate: TPU mapped to an AMS slot is refused, from the tray or the declared material.
+  const status = mockStatus('P2S', { ams: { tray_exist_bits: 'f', tray_now: '255', ams: [{ id: '0', info: '1003', tray: [{ id: '0', tray_type: 'TPU' }, { id: '1', tray_type: '' }] }] } });
+  assert.throws(() => validatePrinterState(status, { model: 'p2s', nozzleDiameters: [], materials: ['TPU'], useAMS: true, amsMapping: [0] }), /TPU is not supported by AMS/);
+  assert.throws(() => validatePrinterState(status, { model: 'p2s', nozzleDiameters: [], materials: ['TPU'], filamentTypes: ['TPU'], useAMS: true, amsMapping: [1] }), /TPU is not supported by AMS/);
+  assert.doesNotThrow(() => validatePrinterState(status, { model: 'p2s', nozzleDiameters: [], materials: ['TPU'], filamentTypes: ['TPU-AMS'], useAMS: true, amsMapping: [1] }));
+  assert.doesNotThrow(() => validatePrinterState(mockStatus('P2S', { vir_slot: [{ id: '255', tray_type: 'TPU' }] }), { model: 'p2s', nozzleDiameters: [], materials: ['TPU'], useAMS: false }));
+  // TPU on the H2D: automatic flow calibration is prohibited, so it defaults off.
+  const options = await import('../../dist/printers/print-options.js');
+  assert.equal(options.studioPrintOptions('h2d', 1, {}, ['TPU']).autoFlowCalibration, 0);
+  assert.equal(options.studioPrintOptions('h2d', 1, { flowCalibration: true }, ['TPU']).autoFlowCalibration, 1);
+  assert.throws(() => options.studioPrintOptions('h2dpro', 1, { flowCalibration: 'auto' }, ['TPU']), /not supported for TPU/);
+  assert.equal(options.studioPrintOptions('h2s', 1, {}, ['TPU']).autoFlowCalibration, 2);
+});

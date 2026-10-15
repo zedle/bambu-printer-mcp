@@ -11,7 +11,7 @@ import { normalizeModel, validateTemperature } from "../safety/limits.js";
 import { validatePrinterState, manualHeatingRequirements } from "../safety/printer-state.js";
 import { DEPUTY_EXTRUDER_ID, MAIN_EXTRUDER_ID, externalSpoolMapping, extruderCount, isExternalTray } from "../safety/models.js";
 import { normalizeBridgeAmsTrayValue, studioTrayMapping } from "../ams-mapping.js";
-import { assertBedSupported, studioBedType, studioPrintOptions, usedExtruderCount } from "./print-options.js";
+import { assertBedSupported, studioBedType, studioPrintOptions, usedExtruderCount, usedFilamentTypes } from "./print-options.js";
 import { assertNoFilamentAtToolhead, controlProtocol, fanCommand, rfidCommand, temperatureCommand } from "./control-commands.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName, normalizedRemotePath, cancelPendingPrinterOperations } from "../safety/artifact.js";
 import { Client as FTPClient } from "basic-ftp";
@@ -725,7 +725,7 @@ export class BambuImplementation {
         // Studio's bed string from the sliced plate, and its calibration defaults with matching bool and int forms.
         const sentBedType = studioBedType(inspection.bedType) ?? studioBedType(options.bedType);
         assertBedSupported(model, sentBedType);
-        const printOptions = studioPrintOptions(model, usedExtruderCount(model, inspection), options);
+        const printOptions = studioPrintOptions(model, usedExtruderCount(model, inspection), options, usedFilamentTypes(inspection));
         let projectFileCmd;
         if (usesH2ProjectFile) {
             const submissionId = String(Date.now() & 0x7fffffff);

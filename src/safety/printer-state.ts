@@ -1,5 +1,6 @@
 import { BambuClient, GetVersionCommand, PushAllCommand } from "bambu-node";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
+import { filamentProhibition } from "./filament-rules.js";
 import { DEPUTY_EXTRUDER_ID, DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
 
 const MAX_REPORT_AGE_MS = 15_000;
@@ -127,6 +128,8 @@ export interface PrinterStateRequirements {
   filamentMap?: number[];
   filamentTypes?: string[];
   filamentIds?: string[];
+  /** Per filament: the preset name (filament_settings_id without its " @..." machine suffix). */
+  filamentNames?: string[];
 }
 interface ReportedNozzle { index: number; diameter: number; type?: string; flow?: string; stat?: number }
 interface ReportedFilament { position: number; material: string; trayIndex: number; nozzleMin?: number; nozzleMax?: number }
@@ -466,6 +469,21 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
       if (DUAL_EXTRUDER_MODELS.has(model) && !requirements.usedNozzleIndices) assertFeedsExtruder(raw, model, trayIndex, physicalExtruderMap(model, requirements.physicalExtruderMap)[(requirements.filamentMap?.[position] ?? 1) - 1], position);
       const reportedType = typeof tray?.tray_type === "string" ? tray.tray_type.trim() : "";
       if (reportedType && normalizeMaterial(reportedType) !== material) throw new Error(`Reported material ${reportedType} in slot ${trayIndex} contradicts declared ${materials[position]}.`);
+      if (!requirements.usedNozzleIndices) {
+        const dual = DUAL_EXTRUDER_MODELS.has(model);
+        const logical = dual ? (requirements.filamentMap?.[position] ?? 1) - 1 : 0;
+        const physical = dual ? physicalExtruderMap(model, requirements.physicalExtruderMap)[logical] : MAIN_EXTRUDER_ID;
+        const nozzle = nozzles.find(value => value.index === physical);
+        const prohibition = filamentProhibition({
+          model, external: isExternalTray(trayIndex),
+          type: reportedType || requirements.filamentTypes?.[position] || materials[position],
+          name: requirements.filamentNames?.[position],
+          filamentId: (typeof tray?.tray_info_idx === "string" && tray.tray_info_idx.trim()) || requirements.filamentIds?.[position],
+          nozzleFlow: nozzle?.flow ?? (requirements.nozzleFlows?.[logical] !== undefined ? token(requirements.nozzleFlows[logical]) : undefined),
+          nozzleDiameter: nozzle?.diameter ?? requirements.nozzleDiameters[logical],
+        });
+        if (prohibition) throw new Error(`Filament ${position + 1} (${reportedType || requirements.filamentNames?.[position] || materials[position]}) can't be printed this way: ${prohibition}`);
+      }
       const nozzleMin = trayRange(tray?.nozzle_temp_min,"minimum");
       const nozzleMax = trayRange(tray?.nozzle_temp_max,"maximum");
       if (nozzleMin !== undefined && nozzleMax !== undefined && nozzleMin > nozzleMax) throw new Error(`Reported filament temperature range in slot ${trayIndex} is invalid.`);

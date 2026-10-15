@@ -58,8 +58,14 @@ export function calibrationChoice(value, label) {
  * one. Options a printer doesn't offer are sent off, and "auto" is "on" where only on/off exist. The bool and the int
  * always come from the same choice.
  */
-export function studioPrintOptions(model, usedExtruders, requested = {}) {
+export function studioPrintOptions(model, usedExtruders, requested = {}, usedFilamentTypes = []) {
     const auto = AUTO_CAPABLE.has(model);
+    // Studio's blacklist prohibits automatic flow calibration with TPU on the H2D and H2D Pro (calib_mode auto_pa), so
+    // a TPU job there defaults to off, and an explicit "auto" is refused.
+    const tpuNoAutoFlow = ["h2d", "h2dpro"].includes(model) && usedFilamentTypes.some(type => type.trim().toUpperCase() === "TPU");
+    if (tpuNoAutoFlow && calibrationChoice(requested.flowCalibration, "flow_calibration") === "auto") {
+        throw new Error("Auto dynamic flow calibration is not supported for TPU filament (Bambu Studio's filament blacklist).");
+    }
     const pick = (value, label, offered, fallback) => {
         const choice = calibrationChoice(value, label);
         // Studio hides an option the printer doesn't offer; a request for it can't turn it on.
@@ -71,7 +77,7 @@ export function studioPrintOptions(model, usedExtruders, requested = {}) {
         return choice ?? fallback;
     };
     const bed = pick(requested.bedLeveling, "bed_leveling", true, auto ? "auto" : "on");
-    const flow = pick(requested.flowCalibration, "flow_calibration", FLOW_CALIBRATION.has(model), auto ? "auto" : "on");
+    const flow = pick(requested.flowCalibration, "flow_calibration", FLOW_CALIBRATION.has(model), tpuNoAutoFlow ? "off" : auto ? "auto" : "on");
     const offset = pick(requested.nozzleOffsetCalibration, "nozzle_offset_calibration", NOZZLE_OFFSET_CALIBRATION.has(model), usedExtruders >= 2 ? "auto" : "off");
     const toggle = (value, label, fallback) => {
         const choice = calibrationChoice(value, label);
@@ -86,6 +92,10 @@ export function studioPrintOptions(model, usedExtruders, requested = {}) {
         vibrationCalibration: toggle(requested.vibrationCalibration, "vibration_calibration", false),
         layerInspect: toggle(requested.layerInspect, "layer_inspect", true),
     };
+}
+/** The raw filament types of the plate's used filaments, for the per-material option rules. */
+export function usedFilamentTypes(inspection) {
+    return inspection.usedFilamentPositions.map(position => inspection.filamentTypes?.[position] ?? inspection.materials[position] ?? "");
 }
 /** Physical extruders the plate's used filaments run on (Studio _get_used_nozzle_idxes; filament_map defaults to 1). */
 export function usedExtruderCount(model, inspection) {

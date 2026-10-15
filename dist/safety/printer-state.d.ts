@@ -27,6 +27,8 @@ export interface PrinterStateRequirements {
     filamentMap?: number[];
     filamentTypes?: string[];
     filamentIds?: string[];
+    /** Per filament: the preset name (filament_settings_id without its " @..." machine suffix). */
+    filamentNames?: string[];
 }
 interface ReportedNozzle {
     index: number;

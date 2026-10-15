@@ -29,7 +29,13 @@ export declare function studioPrintOptions(model: string, usedExtruders: number,
     nozzleOffsetCalibration?: unknown;
     vibrationCalibration?: unknown;
     layerInspect?: unknown;
-}): StudioPrintOptions;
+}, usedFilamentTypes?: string[]): StudioPrintOptions;
+/** The raw filament types of the plate's used filaments, for the per-material option rules. */
+export declare function usedFilamentTypes(inspection: {
+    usedFilamentPositions: number[];
+    materials: string[];
+    filamentTypes?: string[];
+}): string[];
 /** Physical extruders the plate's used filaments run on (Studio _get_used_nozzle_idxes; filament_map defaults to 1). */
 export declare function usedExtruderCount(model: string, inspection: {
     usedFilamentPositions: number[];

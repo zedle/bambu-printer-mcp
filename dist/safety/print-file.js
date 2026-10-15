@@ -695,5 +695,6 @@ export async function inspectPrintFile(filePath, options) {
         ...(physicalMap ? { physicalExtruderMap: physicalMap } : {}),
         ...(perFilament('filament_ids') ? { filamentIds: perFilament('filament_ids') } : {}),
         ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {}),
-        ...(perFilament('filament_type') ? { filamentTypes: perFilament('filament_type') } : {}) };
+        ...(perFilament('filament_type') ? { filamentTypes: perFilament('filament_type') } : {}),
+        ...(perFilament('filament_settings_id') ? { filamentNames: perFilament('filament_settings_id').map(name => name.replace(/\s*@.*$/, '')) } : {}) };
 }

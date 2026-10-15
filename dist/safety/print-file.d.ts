@@ -21,6 +21,8 @@ export interface PrintFileInspection {
     filamentColours?: string[];
     /** Per filament, from the plate header: the raw filament_type (e.g. PLA-CF; materials holds the base family). */
     filamentTypes?: string[];
+    /** Per filament, from the plate header: the filament preset name (filament_settings_id without " @<machine>"). */
+    filamentNames?: string[];
 }
 /** Inspect the exact selected plate. This does not simulate firmware or arbitrary motion:
  * only declared object bounds are checked, never purge/homing/wipe travel coordinates.

@@ -20,7 +20,7 @@ import { BambuImplementation, assertDirectPrintSupported } from "./printers/bamb
 import { inspectPrintFile } from "./safety/print-file.js";
 import { validatePrinterState } from "./safety/printer-state.js";
 import { externalSpoolMapping, extruderCount } from "./safety/models.js";
-import { assertBedSupported, studioBedType, studioPrintOptions, usedExtruderCount } from "./printers/print-options.js";
+import { assertBedSupported, studioBedType, studioPrintOptions, usedExtruderCount, usedFilamentTypes } from "./printers/print-options.js";
 import { withPrinterOperation, withPrintSnapshot, uniquePrintName } from "./safety/artifact.js";
 import { detectProfilesRoot } from "./slicer/profile-flatten.js";
 dotenv.config();
@@ -1172,7 +1172,7 @@ class BambuPrinterMCPServer {
             const printOptions = studioPrintOptions(inspection.model, usedExtruderCount(inspection.model, inspection), {
                 bedLeveling: args?.bed_leveling, flowCalibration: args?.flow_calibration, nozzleOffsetCalibration: args?.nozzle_offset_calibration,
                 vibrationCalibration: args?.vibration_calibration, layerInspect: args?.layer_inspect,
-            });
+            }, usedFilamentTypes(inspection));
             let mapping = finalAmsMapping?.slice();
             if (finalAmsSlots) {
                 if (finalAmsSlots.length !== inspection.usedFilamentPositions.length)

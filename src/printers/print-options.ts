@@ -65,8 +65,14 @@ export interface StudioPrintOptions {
  */
 export function studioPrintOptions(model: string, usedExtruders: number, requested: {
   bedLeveling?: unknown; flowCalibration?: unknown; nozzleOffsetCalibration?: unknown; vibrationCalibration?: unknown; layerInspect?: unknown;
-} = {}): StudioPrintOptions {
+} = {}, usedFilamentTypes: string[] = []): StudioPrintOptions {
   const auto = AUTO_CAPABLE.has(model);
+  // Studio's blacklist prohibits automatic flow calibration with TPU on the H2D and H2D Pro (calib_mode auto_pa), so
+  // a TPU job there defaults to off, and an explicit "auto" is refused.
+  const tpuNoAutoFlow = ["h2d", "h2dpro"].includes(model) && usedFilamentTypes.some(type => type.trim().toUpperCase() === "TPU");
+  if (tpuNoAutoFlow && calibrationChoice(requested.flowCalibration, "flow_calibration") === "auto") {
+    throw new Error("Auto dynamic flow calibration is not supported for TPU filament (Bambu Studio's filament blacklist).");
+  }
   const pick = (value: unknown, label: string, offered: boolean, fallback: CalibrationChoice): CalibrationChoice => {
     const choice = calibrationChoice(value, label);
     // Studio hides an option the printer doesn't offer; a request for it can't turn it on.
@@ -76,7 +82,7 @@ export function studioPrintOptions(model: string, usedExtruders: number, request
     return choice ?? fallback;
   };
   const bed = pick(requested.bedLeveling, "bed_leveling", true, auto ? "auto" : "on");
-  const flow = pick(requested.flowCalibration, "flow_calibration", FLOW_CALIBRATION.has(model), auto ? "auto" : "on");
+  const flow = pick(requested.flowCalibration, "flow_calibration", FLOW_CALIBRATION.has(model), tpuNoAutoFlow ? "off" : auto ? "auto" : "on");
   const offset = pick(requested.nozzleOffsetCalibration, "nozzle_offset_calibration", NOZZLE_OFFSET_CALIBRATION.has(model), usedExtruders >= 2 ? "auto" : "off");
   const toggle = (value: unknown, label: string, fallback: boolean): boolean => {
     const choice = calibrationChoice(value, label);
@@ -90,6 +96,11 @@ export function studioPrintOptions(model: string, usedExtruders: number, request
     vibrationCalibration: toggle(requested.vibrationCalibration, "vibration_calibration", false),
     layerInspect: toggle(requested.layerInspect, "layer_inspect", true),
   };
+}
+
+/** The raw filament types of the plate's used filaments, for the per-material option rules. */
+export function usedFilamentTypes(inspection: { usedFilamentPositions: number[]; materials: string[]; filamentTypes?: string[] }): string[] {
+  return inspection.usedFilamentPositions.map(position => inspection.filamentTypes?.[position] ?? inspection.materials[position] ?? "");
 }
 
 /** Physical extruders the plate's used filaments run on (Studio _get_used_nozzle_idxes; filament_map defaults to 1). */
