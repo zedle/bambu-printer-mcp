@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFreshPrinterStatus, serialModel } from "../safety/printer-state.js";
 import { nextSequenceId } from "../sequence-id.js";
 import { lanPrinterReport, mergeReport, requestPushAll } from "../printer-report.js";
-import { assertCommandAccepted, commandReplyWaitMs, matchCommandReply, withCommandReply, withPrinterReplyField } from "../command-reply.js";
+import { assertCommandAccepted, commandReplyFailure, commandReplyWaitMs, commandSequenceId, matchCommandReply, printerReplyField, withCommandReply, withPrinterReplyField } from "../command-reply.js";
 import { assertAmsDryingSupported, buildAmsDryingCommand, hexFlagBit, normalizeAmsDryingRequest } from "../ams-drying.js";
 import fs from "node:fs/promises";
 import { readFileSync, existsSync } from "node:fs";
@@ -183,6 +183,21 @@ export function judgeDispatchReport(report, before, jobName) {
         return { kind: "started" };
     return undefined;
 }
+/**
+ * The printer's reply to a print command (project_file / gcode_file): a refusal ("fail", a non-zero err_code) means
+ * the job didn't start (Bambu Studio's "Failed to start printing job"); an accepted reply alone doesn't prove it did.
+ */
+export function dispatchReplyVerdict(reply) {
+    if (!commandReplyFailure(reply))
+        return undefined;
+    const code = reply.errCode !== undefined && reply.errCode !== 0 ? `, error ${(reply.errCode >>> 0).toString(16).toUpperCase().padStart(8, "0")}` : "";
+    const why = reply.reason && reply.reason.toLowerCase() !== String(reply.result ?? "").toLowerCase() ? `: ${reply.reason}` : "";
+    return { kind: "failed", message: `The printer refused to start the job (${reply.command ?? "print command"} replied ${reply.result ?? "with an error"}${why}${code}; Bambu Studio: "Failed to start printing job"). Nothing is printing; check get_printer_status before printing again.` };
+}
+/** The printer's reply to a print command, as print results carry it (`printerReply`), when one arrived. */
+export function dispatchReplyField(reply) {
+    return reply ? { printerReply: printerReplyField(reply) } : {};
+}
 /** How long to watch fresh reports after a print command (BAMBU_DISPATCH_CHECK_MS, 0 disables). */
 function dispatchCheckMs() {
     const raw = process.env.BAMBU_DISPATCH_CHECK_MS?.trim();
@@ -225,8 +240,8 @@ async function bambuNodeMessage(command) {
     return { ...message, [section]: { ...message[section], sequence_id: nextSequenceId() } };
 }
 /** Publish a command without waiting for its reply (print starts, whose outcome the dispatch watcher judges). */
-async function invokeWithoutAck(printer, command) {
-    await printer.publish(await bambuNodeMessage(command));
+async function publishWithoutAck(printer, message) {
+    await printer.publish(message);
     await sleep(COMMAND_SETTLE_MS);
 }
 /**
@@ -936,9 +951,10 @@ export class BambuImplementation {
         const printer = await this.getPrinter(host, serial, token);
         assertActive();
         if (legacyContainer) {
-            const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath);
+            const gcodeFileCmd = await bambuNodeMessage(new GCodeFileCommand({ fileName: remoteProjectPath }));
+            const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath, commandSequenceId(gcodeFileCmd));
             try {
-                await invokeWithoutAck(printer, new GCodeFileCommand({ fileName: remoteProjectPath }));
+                await publishWithoutAck(printer, gcodeFileCmd);
             }
             catch (error) {
                 watcher.dispose();
@@ -947,7 +963,7 @@ export class BambuImplementation {
             this.recordCheckedJob(host, serial, remoteProjectPath, requirements);
             const dispatch = await watcher.settled();
             return withHmsWarnings({
-                status: dispatchStatusLabel(dispatch), dispatch, remoteProjectPath,
+                status: dispatchStatusLabel(dispatch), dispatch, remoteProjectPath, ...dispatchReplyField(watcher.reply()),
                 message: dispatch === "started"
                     ? `The printer accepted and started the checked gcode.3mf print: ${options.projectName}`
                     : `Uploaded the checked gcode.3mf and sent the print command for ${options.projectName}; the printer has not reported starting yet. ` +
@@ -979,7 +995,7 @@ export class BambuImplementation {
             nozzleOffsetCali: printOptions.autoOffsetCalibration,
             extrudeCaliManualMode: usesH2ProjectFile ? 0 : -1,
         });
-        const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath);
+        const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath, commandSequenceId(projectFileCmd));
         try {
             await printer.publish(projectFileCmd);
         }
@@ -993,6 +1009,7 @@ export class BambuImplementation {
         return withHmsWarnings({
             status: dispatchStatusLabel(dispatch),
             dispatch,
+            ...dispatchReplyField(watcher.reply()),
             message: dispatch === "started"
                 ? `The printer accepted and started the checked 3MF print: ${options.projectName}`
                 : `Uploaded the checked 3MF and sent the print command for ${options.projectName}; the printer has not reported starting yet. ` +
@@ -1433,9 +1450,10 @@ export class BambuImplementation {
         this.assertBedClearance(dispatchStatus, bedClearance);
         const printer = await this.getPrinter(host, serial, token);
         assertActive();
-        const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remotePath);
+        const gcodeFileCmd = await bambuNodeMessage(new GCodeFileCommand({ fileName: remotePath }));
+        const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remotePath, commandSequenceId(gcodeFileCmd));
         try {
-            await invokeWithoutAck(printer, new GCodeFileCommand({ fileName: remotePath }));
+            await publishWithoutAck(printer, gcodeFileCmd);
         }
         catch (error) {
             watcher.dispose();
@@ -1444,7 +1462,7 @@ export class BambuImplementation {
         this.recordCheckedJob(host, serial, remotePath, requirements);
         const dispatch = await watcher.settled();
         return withHmsWarnings({
-            status: dispatchStatusLabel(dispatch), uploaded: true, printRequested: true, dispatch, remotePath,
+            status: dispatchStatusLabel(dispatch), uploaded: true, printRequested: true, dispatch, remotePath, ...dispatchReplyField(watcher.reply()),
             message: dispatch === "started"
                 ? `The printer accepted and started ${remotePath}.`
                 : `Sent the print command for ${remotePath}; the printer has not reported starting yet. Check get_printer_status before assuming it is printing.`,
@@ -1456,10 +1474,11 @@ export class BambuImplementation {
      * boards): a new command-verification HMS means the firmware refused the
      * command; PREPARE/SLICING/RUNNING for this job means it started. Attach before publishing.
      */
-    watchDispatch(printer, host, serial, token, before, assertActive, jobName) {
+    watchDispatch(printer, host, serial, token, before, assertActive, jobName, sequenceId) {
         const windowMs = dispatchCheckMs();
+        let reply;
         if (windowMs === 0)
-            return { settled: async () => { assertActive(); return "unconfirmed"; }, dispose: () => { } };
+            return { settled: async () => { assertActive(); return "unconfirmed"; }, dispose: () => { }, reply: () => undefined };
         let resolveOutcome;
         const outcome = new Promise((resolve) => { resolveOutcome = resolve; });
         const onRaw = (topic, payload) => {
@@ -1471,6 +1490,16 @@ export class BambuImplementation {
             }
             catch {
                 return;
+            }
+            // The printer's answer to this print command, matched by its sequence_id like any other command reply.
+            const answer = sequenceId ? matchCommandReply(parsed, sequenceId) : undefined;
+            if (answer) {
+                reply = answer;
+                const verdict = dispatchReplyVerdict(answer);
+                if (verdict) {
+                    resolveOutcome(verdict);
+                    return;
+                }
             }
             // Pushed reports are deltas: judge only what this one carries.
             const verdict = judgeDispatchReport(parsed?.print, before?.raw, jobName);
@@ -1497,6 +1526,7 @@ export class BambuImplementation {
         };
         return {
             dispose,
+            reply: () => reply,
             settled: async () => {
                 let verdict;
                 try {
@@ -1532,7 +1562,7 @@ export class BambuImplementation {
      * pushall interval, 3 s) for up to BAMBU_DISPATCH_CHECK_MS. "started" needs this job's name in the report or a
      * new task id with a printing state; a refusal or a failed start throws; otherwise "unconfirmed".
      */
-    async confirmDispatchedJob(host, serial, token, before, jobName, assertActive) {
+    async confirmDispatchedJob(host, serial, token, before, jobName, assertActive, replies) {
         const deadline = Date.now() + dispatchCheckMs();
         const cancelled = () => { try {
             assertActive();
@@ -1542,15 +1572,33 @@ export class BambuImplementation {
             return true;
         } };
         let verdict;
+        // The printer's project_file answer, relayed by the network plugin (Studio: "Failed to start printing job").
+        const checkReply = async () => {
+            if (!replies || replies.reply)
+                return;
+            try {
+                replies.reply = await replies.poll();
+            }
+            catch {
+                return;
+            }
+            if (replies.reply)
+                verdict = dispatchReplyVerdict(replies.reply);
+        };
         while (!verdict && !cancelled() && Date.now() < deadline) {
             await sleep(Math.min(3000, Math.max(0, deadline - Date.now())));
             if (cancelled())
+                break;
+            await checkReply();
+            if (verdict)
                 break;
             try {
                 verdict = judgeDispatchReport((await this.getSafetyStatus(host, serial, token))?.raw, before?.raw, jobName);
             }
             catch { /* try again until the deadline */ }
         }
+        if (!verdict && !cancelled())
+            await checkReply();
         return this.settleDispatch(host, serial, verdict, cancelled());
     }
     async startJob(host, serial, token, filename, bambuModel) {

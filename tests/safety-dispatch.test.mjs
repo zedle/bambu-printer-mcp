@@ -234,6 +234,48 @@ test("the LAN dispatch watch ignores another job's pushed report", async (t) => 
   assert.equal(result.status, "dispatched_unconfirmed");
 });
 
+test("the printer's answer to this project_file, matched by sequence id, decides a refused LAN print and is returned", async (t) => {
+  const file = await fixture(t);
+  const { EventEmitter } = await import("node:events");
+  process.env.BAMBU_DISPATCH_CHECK_MS = "500";
+  t.after(() => { process.env.BAMBU_DISPATCH_CHECK_MS = "0"; });
+  const lan = (answer) => {
+    const { printer, events } = isolatedPrinter();
+    const mqtt = new EventEmitter();
+    mqtt.publish = async payload => {
+      events.push({ action: "publish", payload });
+      const reply = (print) => setTimeout(() => mqtt.emit("rawMessage", `device/${serial}/report`, Buffer.from(JSON.stringify({ print }))), 20);
+      // Another client's refusal must not count; the reply to this command's sequence id does.
+      if (answer === "fail") { reply({ command: "project_file", sequence_id: "123", result: "success" }); reply({ command: "project_file", sequence_id: payload.print.sequence_id, result: "fail", reason: "file is damaged", err_code: 0x0500_4002 }); }
+      if (answer === "success") {
+        reply({ command: "project_file", sequence_id: payload.print.sequence_id, result: "success" });
+        setTimeout(() => mqtt.emit("rawMessage", `device/${serial}/report`, Buffer.from(JSON.stringify({ print: { command: "push_status", gcode_state: "PREPARE", subtask_name: payload.print.subtask_name } }))), 60);
+      }
+    };
+    printer.getPrinter = async () => mqtt;
+    return printer;
+  };
+  await assert.rejects(lan("fail").print3mf(host, serial, token, { projectName: "broken", filePath: file, bambuModel: "p1s", useAMS: false }),
+    /refused to start the job \(project_file replied fail: file is damaged, error 05004002; Bambu Studio: "Failed to start printing job"\)/);
+  const result = await lan("success").print3mf(host, serial, token, { projectName: "fine", filePath: file, bambuModel: "p1s", useAMS: false });
+  assert.equal(result.dispatch, "started");
+  assert.deepEqual(result.printerReply, { result: "success" });
+});
+
+test("a bridge print's project_file answer relayed by the plugin is part of the dispatch result", async () => {
+  const { printer } = isolatedPrinter(safetyStatus());
+  process.env.BAMBU_DISPATCH_CHECK_MS = "100";
+  try {
+    const refused = { poll: async () => ({ section: "print", command: "project_file", result: "fail", reason: "busy" }) };
+    await assert.rejects(printer.confirmDispatchedJob(host, serial, token, safetyStatus(), "job", () => {}, refused), /refused to start the job \(project_file replied fail: busy/);
+    const accepted = { poll: async () => ({ section: "print", command: "project_file", result: "success" }) };
+    assert.equal(await printer.confirmDispatchedJob(host, serial, token, safetyStatus(), "job", () => {}, accepted), "unconfirmed");
+    assert.deepEqual(accepted.reply, { section: "print", command: "project_file", result: "success" });
+    const silent = { poll: async () => { throw new Error("bridge gone"); } };
+    assert.equal(await printer.confirmDispatchedJob(host, serial, token, safetyStatus(), "job", () => {}, silent), "unconfirmed");
+  } finally { process.env.BAMBU_DISPATCH_CHECK_MS = "0"; }
+});
+
 const signedOnly = [["fun bit 29", { fun: "14023FF1AFFF9CB7" }], ["flag3 bit 4", { flag3: 31 }]];
 for (const [flag, raw] of signedOnly) {
   test(`unsigned LAN 3MF print refuses a printer whose ${flag} says signed-only before upload`, async (t) => {

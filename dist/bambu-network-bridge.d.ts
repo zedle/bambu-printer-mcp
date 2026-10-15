@@ -104,6 +104,12 @@ export declare class BambuNetworkBridge {
     private ingestEvents;
     /** The printer's state as restored from the plugin's pushes (empty until a full report arrives through it). */
     printerReport(devId: string): PrinterReport;
+    /**
+     * The printer's answer to a print the plugin sent (`project_file` with a result), received at or after `since`.
+     * The plugin numbers that command itself, so like Bambu Studio (DeviceManager.cpp "project_file") any project_file
+     * answer from this printer counts.
+     */
+    projectFileReply(devId: string, since: number, options?: BambuNetworkBridgeOptions): Promise<CommandReply | undefined>;
     private drainEvents;
     /** The printer's reply to `sequenceId` among the plugin's message events, polled until `waitMs` runs out. */
     awaitPrinterReply(devId: string, sequenceId: string, waitMs: number, options?: BambuNetworkBridgeOptions): Promise<CommandReply | undefined>;

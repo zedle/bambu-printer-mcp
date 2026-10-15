@@ -1,3 +1,4 @@
+import { printerReplyField, type CommandReply } from "../command-reply.js";
 import { inspectPrintFile } from "../safety/print-file.js";
 import { type PrinterStateRequirements } from "../safety/printer-state.js";
 import { type ControlCommand } from "./control-commands.js";
@@ -83,6 +84,15 @@ type DispatchVerdict = {
  *   report or pushed delta names no job) a printer that was idle before.
  */
 export declare function judgeDispatchReport(report: any, before: any, jobName: string | undefined): DispatchVerdict | undefined;
+/**
+ * The printer's reply to a print command (project_file / gcode_file): a refusal ("fail", a non-zero err_code) means
+ * the job didn't start (Bambu Studio's "Failed to start printing job"); an accepted reply alone doesn't prove it did.
+ */
+export declare function dispatchReplyVerdict(reply: CommandReply | undefined): DispatchVerdict | undefined;
+/** The printer's reply to a print command, as print results carry it (`printerReply`), when one arrived. */
+export declare function dispatchReplyField(reply: CommandReply | undefined): {
+    printerReply?: ReturnType<typeof printerReplyField>;
+};
 export declare function assertDirectPrintSupported(model: string | undefined, serial?: string): void;
 interface BambuPrintOptionsInternal {
     projectName: string;
@@ -189,12 +199,13 @@ export declare class BambuImplementation {
         printRequested: boolean;
         inspected: boolean;
     } | ({
+        message: string;
+        printerReply?: ReturnType<typeof printerReplyField>;
         status: "success" | "dispatched_unconfirmed";
         uploaded: boolean;
         printRequested: boolean;
         dispatch: "started" | "unconfirmed";
         remotePath: string;
-        message: string;
     } & {
         hmsWarnings?: string[];
     })>;
@@ -213,14 +224,18 @@ export declare class BambuImplementation {
      * pushall interval, 3 s) for up to BAMBU_DISPATCH_CHECK_MS. "started" needs this job's name in the report or a
      * new task id with a printing state; a refusal or a failed start throws; otherwise "unconfirmed".
      */
-    confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string, assertActive: () => void): Promise<"started" | "unconfirmed">;
+    confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string, assertActive: () => void, replies?: {
+        poll: () => Promise<CommandReply | undefined>;
+        reply?: CommandReply;
+    }): Promise<"started" | "unconfirmed">;
     startJob(host: string, serial: string, token: string, filename: string, bambuModel?: string): Promise<{
+        message: string;
+        printerReply?: ReturnType<typeof printerReplyField>;
         status: "success" | "dispatched_unconfirmed";
         uploaded: boolean;
         printRequested: boolean;
         dispatch: "started" | "unconfirmed";
         remotePath: string;
-        message: string;
     } & {
         hmsWarnings?: string[];
     }>;

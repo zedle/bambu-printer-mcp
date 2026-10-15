@@ -393,6 +393,28 @@ export class BambuNetworkBridge {
         }
         return report;
     }
+    /**
+     * The printer's answer to a print the plugin sent (`project_file` with a result), received at or after `since`.
+     * The plugin numbers that command itself, so like Bambu Studio (DeviceManager.cpp "project_file") any project_file
+     * answer from this printer counts.
+     */
+    async projectFileReply(devId, since, options = {}) {
+        try {
+            await this.pollEvents(options);
+        }
+        catch { /* use what has arrived */ }
+        for (const entry of this.recentReplies) {
+            if (entry.at < since || (entry.devId !== undefined && entry.devId !== devId))
+                continue;
+            const print = entry.message?.print;
+            if (!print || print.command !== "project_file" || print.sequence_id === undefined)
+                continue;
+            const reply = matchCommandReply(entry.message, String(print.sequence_id));
+            if (reply)
+                return reply;
+        }
+        return undefined;
+    }
     async drainEvents(options) {
         try {
             for (let round = 0; round < 50; round++) {
