@@ -13,14 +13,16 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import JSZip from "jszip";
-import { hasAmsMappingInput, normalizeAmsMappingObject } from "../dist/ams-mapping.js";
+import { bridgeAmsMapping2Entry, bridgeAmsMappingValue, externalTrayForNozzle, hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue } from "../dist/ams-mapping.js";
 import { buildBambuConnectImportUrl } from "../dist/bambu-connect.js";
 import {
   buildBambuNativeFanCommand,
   buildBambuNativeTemperatureCommand,
+  isBambuNativePlatform,
   uploadWithBambuNative,
   validateBambuNativeControlMessage,
 } from "../dist/bambu-native.js";
+import { UNPINNED_PLUGIN_ENV, createFakeNativeHome } from "./fixtures/native-home.mjs";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF } from "../dist/3mf_parser.js";
 import { BambuImplementation } from "../dist/printers/bambu.js";
 import { STLManipulator } from "../dist/stl/stl-manipulator.js";
@@ -53,6 +55,7 @@ async function writeSliced3mfFixture({
     `; filament_ids = ${projectFilamentIds.join(";")}`,
     `; filament_colour = ${projectFilamentColors.join(";")}`,
     `; filament_type = ${projectFilamentTypes.join(";")}`,
+    ...(nozzleDiameters.length === 2 ? [`; filament_map = ${projectFilamentTypes.map((_, i) => i === 1 ? 2 : 1).join(",")}`, "; physical_extruder_map = 1,0"] : []),
     "G1 X0 Y0",
     "",
   ].join("\n");
@@ -280,7 +283,7 @@ test("X2D native control accepts Studio device commands but rejects unrelated de
   );
 });
 
-test("X2D public task and AMS tools dispatch through the native helper, including AMS-HT id 128", { skip: process.platform !== "darwin" }, async (t) => {
+test("X2D public task and AMS tools dispatch through the native helper, including AMS-HT id 128", { skip: !isBambuNativePlatform() }, async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "bambu-native-control-"));
   const helperPath = path.join(tempDir, "fake-native-helper.mjs");
   fs.writeFileSync(
@@ -295,7 +298,7 @@ test("X2D public task and AMS tools dispatch through the native helper, includin
 
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: ["--import", `data:text/javascript,${encodeURIComponent(`import { BambuImplementation } from ${JSON.stringify(new URL("../dist/printers/bambu.js", import.meta.url).href)}; BambuImplementation.prototype.getStatus = async () => ({connected:true,status:"IDLE"});`)}`, SERVER_ENTRY],
+    args: ["--import", `data:text/javascript,${encodeURIComponent(`import { BambuImplementation } from ${JSON.stringify(new URL("../dist/printers/bambu.js", import.meta.url).href)}; BambuImplementation.prototype.getStatus = async () => ({connected:true,status:"IDLE"}); BambuImplementation.prototype.getSafetyStatus = async () => { const now = Date.now(); return {connected:true,serial:"TEST_SERIAL",model:"x2d",status:"IDLE",raw:{model:"X2D",cfg:"1",fun:"40029FD1B30F9CB7",aux:"0",stat:"0",gcode_state:"IDLE",print_error:0,hms:[],hw_switch_state:0,ams:{tray_now:"255",ams:[{id:"128",tray:[{id:"0"}]}]}},observation:{source:"mqtt",requestedAt:now-1,receivedAt:now,fullAt:now-1,identitySource:"report"}}; };`)}`, SERVER_ENTRY],
     env: {
       ...process.env,
       MCP_TRANSPORT: "stdio",
@@ -304,6 +307,8 @@ test("X2D public task and AMS tools dispatch through the native helper, includin
       BAMBU_TOKEN: "TEST_TOKEN",
       BAMBU_MODEL: "x2d",
       BAMBU_NATIVE_HELPER: helperPath,
+      BAMBU_NATIVE_HOME: createFakeNativeHome(tempDir),
+      ...UNPINNED_PLUGIN_ENV,
     },
     stderr: "pipe",
   });
@@ -321,14 +326,11 @@ test("X2D public task and AMS tools dispatch through the native helper, includin
   const fanOff = parseJsonResult(
     await client.callTool({ name: "set_fan_speed", arguments: { fan: "part", speed: 0, confirm_during_print: true } })
   );
-  const fanMessage = JSON.parse(fanOff.updates[0]).message.print;
-  assert.equal(fanOff.route, "bambu:///local");
-  assert.equal(fanOff.fan, "part");
-  assert.equal(fanOff.fan_index, 1);
+  // Bambu Studio's per-printer fan form, sent through the native route: this report has no airduct, so M106 P S0-255.
+  assert.equal(fanOff.status, "success");
+  assert.equal(fanOff.fan, 1);
   assert.equal(fanOff.speed, 0);
-  assert.equal(fanMessage.command, "set_fan");
-  assert.equal(fanMessage.fan_index, 1);
-  assert.equal(fanMessage.speed, 0);
+  assert.equal(fanOff.command, "M106 P1 S0");
 
   const amsSetting = {
     print: {
@@ -380,13 +382,14 @@ test("X2D public task and AMS tools dispatch through the native helper, includin
   const rfid = parseJsonResult(
     await client.callTool({ name: "reread_ams_rfid", arguments: { ams_id: 128, slot_id: 0 } })
   );
-  const rfidMessage = JSON.parse(rfid.updates[0]).message.print;
-  assert.equal(rfidMessage.command, "ams_get_rfid");
-  assert.equal(rfidMessage.ams_id, 128);
-  assert.equal(rfidMessage.slot_id, 0);
+  // Studio's new-protocol RFID command for this report, after its toolhead check.
+  assert.equal(rfid.status, "success");
+  assert.equal(rfid.command, "ams_get_rfid");
+  assert.equal(rfid.ams_id, 128);
+  assert.equal(rfid.slot_id, 0);
 });
 
-test("native upload forwards helper progress before returning the final result", { skip: process.platform !== "darwin" }, async (t) => {
+test("native upload forwards helper progress before returning the final result", { skip: !isBambuNativePlatform() }, async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "bambu-native-progress-"));
   const helperPath = path.join(tempDir, "fake-native-helper.mjs");
   fs.writeFileSync(
@@ -402,10 +405,16 @@ test("native upload forwards helper progress before returning the final result",
   fs.chmodSync(helperPath, 0o755);
 
   const previousHelper = process.env.BAMBU_NATIVE_HELPER;
+  const previousHome = process.env.BAMBU_NATIVE_HOME;
   process.env.BAMBU_NATIVE_HELPER = helperPath;
+  process.env.BAMBU_NATIVE_HOME = createFakeNativeHome(tempDir);
+  process.env.BAMBU_NATIVE_ALLOW_UNPINNED_PLUGIN = "1";
   t.after(() => {
+    delete process.env.BAMBU_NATIVE_ALLOW_UNPINNED_PLUGIN;
     if (previousHelper === undefined) delete process.env.BAMBU_NATIVE_HELPER;
     else process.env.BAMBU_NATIVE_HELPER = previousHelper;
+    if (previousHome === undefined) delete process.env.BAMBU_NATIVE_HOME;
+    else process.env.BAMBU_NATIVE_HOME = previousHome;
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -445,6 +454,8 @@ test("native upload forwards helper progress before returning the final result",
       BAMBU_TOKEN: "TEST_TOKEN",
       BAMBU_MODEL: "x2d",
       BAMBU_NATIVE_HELPER: helperPath,
+      BAMBU_NATIVE_HOME: createFakeNativeHome(tempDir),
+      ...UNPINNED_PLUGIN_ENV,
     },
     stderr: "pipe",
   });
@@ -1224,6 +1235,84 @@ test("ams_mapping object preserves filament-position order instead of tray sorti
   );
 });
 
+test("tray values admit both external holders, encoded as Bambu Studio sends them", () => {
+  assert.equal(normalizeBridgeAmsTrayValue(255, "ams_slots[0]", { dualNozzle: true }), 255);
+  assert.equal(normalizeBridgeAmsTrayValue("254", "ams_slots[0]", { dualNozzle: true }), 254);
+  // A single-nozzle printer's one holder: current firmware reports it as vir_slot 255 (the MCP's historical name is 254).
+  assert.equal(normalizeBridgeAmsTrayValue(255, "ams_slots[0]"), 255);
+  assert.throws(() => normalizeBridgeAmsTrayValue(256, "ams_slots[0]", { dualNozzle: true }), /255/);
+  assert.throws(() => normalizeBridgeAmsTrayValue(140, "ams_slots[0]"), /128-135/);
+  assert.deepEqual(normalizeAmsMappingObject({ 0: 255, 1: 0 }, "ams_mapping", { dualNozzle: true }), [255, 0]);
+  // Studio's SelectMachine get_ams_mapping_result: holders {254|255, 0} (a single-nozzle holder is 255), AMS-HT units
+  // {unit, 0}, unused {255, 255}; the flat v0 entry is -1 for any holder.
+  assert.deepEqual(bridgeAmsMapping2Entry(255, true), { ams_id: 255, slot_id: 0 });
+  assert.deepEqual(bridgeAmsMapping2Entry(254, false), { ams_id: 255, slot_id: 0 });
+  assert.deepEqual(bridgeAmsMapping2Entry(254, true), { ams_id: 254, slot_id: 0 });
+  assert.deepEqual(bridgeAmsMapping2Entry(-1, true), { ams_id: 255, slot_id: 255 });
+  assert.deepEqual(bridgeAmsMapping2Entry(131, true), { ams_id: 131, slot_id: 0 });
+  assert.deepEqual(bridgeAmsMapping2Entry(6, true), { ams_id: 1, slot_id: 2 });
+  assert.equal(bridgeAmsMappingValue(255, true), -1);
+  assert.equal(bridgeAmsMappingValue(254, false), -1);
+  assert.equal(bridgeAmsMappingValue(6, true), 6);
+  assert.equal(externalTrayForNozzle(0, true), 255);
+  assert.equal(externalTrayForNozzle(1, true), 254);
+  assert.equal(externalTrayForNozzle(undefined, false), 254);
+  assert.throws(() => externalTrayForNozzle(undefined, true), /filament_map/);
+});
+
+test("H2D project_file uses official virtual-spool wire mapping and validates nozzle binding", async () => {
+  const threeMfPath = await writeSliced3mfFixture({ name: "h2d-dual-external", bambuModel: "h2d", bedType: "Textured PEI Plate", projectFilamentTypes: ["PLA", "PLA", "PLA", "PLA"], plateFilamentIds: [0, 1] });
+  const bambu = new BambuImplementation(async () => true);
+  stubFreshSafetyStatus(bambu, "h2d");
+  const baseStatus = bambu.getSafetyStatus;
+  let virSlot = [{ id: "254", tray_type: "PLA" }, { id: "255", tray_type: "PLA" }];
+  bambu.getSafetyStatus = async (...args) => { const status = await baseStatus(...args); status.raw.vir_slot = virSlot; return status; };
+  let publishedPayload = null;
+  bambu.ftpUpload = async () => {};
+  bambu.getPrinter = async () => ({ publish: async (payload) => { publishedPayload = payload; } });
+  try {
+    await bambu.print3mf("127.0.0.1", "0948TEST0000000", "TEST_TOKEN", { projectName: "dual-external", bambuModel: "h2d", filePath: threeMfPath, plateIndex: 0, useAMS: true, amsMapping: [254, 255, -1, -1], bedType: "Textured PEI Plate" });
+    assert.deepEqual(publishedPayload.print.ams_mapping, [-1, -1, -1, -1]);
+    assert.deepEqual(publishedPayload.print.ams_mapping2, [
+      { ams_id: 254, slot_id: 0 },
+      { ams_id: 255, slot_id: 0 },
+      { ams_id: 255, slot_id: 255 },
+      { ams_id: 255, slot_id: 255 },
+    ]);
+    publishedPayload = null;
+    await bambu.print3mf("127.0.0.1", "0948TEST0000000", "TEST_TOKEN", { projectName: "dual-external-slots", bambuModel: "h2d", filePath: threeMfPath, plateIndex: 0, useAMS: true, amsSlots: [254, 255], bedType: "Textured PEI Plate" });
+    assert.deepEqual(publishedPayload.print.ams_mapping, [-1, -1, -1, -1]);
+    publishedPayload = null;
+    await assert.rejects(bambu.print3mf("127.0.0.1", "0948TEST0000000", "TEST_TOKEN", { projectName: "wrong-nozzle", bambuModel: "h2d", filePath: threeMfPath, plateIndex: 0, useAMS: false, amsSlots: [255, 254], bedType: "Textured PEI Plate" }), /nozzle|binding/i);
+    assert.equal(publishedPayload, null);
+    publishedPayload = null;
+    virSlot = [{ id: "254", tray_type: "PLA" }, { id: "255", tray_type: "PETG" }];
+    await assert.rejects(bambu.print3mf("127.0.0.1", "0948TEST0000000", "TEST_TOKEN", { projectName: "dual-external-bad", bambuModel: "h2d", filePath: threeMfPath, plateIndex: 0, useAMS: true, amsMapping: [254, 255, -1, -1], bedType: "Textured PEI Plate" }), /PETG|material/i);
+    assert.equal(publishedPayload, null, "a contradicted main external spool must not publish");
+    await assert.rejects(bambu.print3mf("127.0.0.1", "0948TEST0000000", "TEST_TOKEN", { projectName: "dual-external-range", bambuModel: "h2d", filePath: threeMfPath, plateIndex: 0, useAMS: true, amsMapping: [254, 256, -1, -1], bedType: "Textured PEI Plate" }), /255/);
+  } finally {
+    fs.rmSync(threeMfPath, { force: true });
+  }
+});
+
+test("single-nozzle H2S project_file sends tray 255 as its one external holder, like Bambu Studio", async () => {
+  // Current firmware reports a single-nozzle printer's holder as vir_slot 255; Studio encodes it as {255, 0}.
+  const threeMfPath = await writeSliced3mfFixture({ name: "h2s-255" });
+  const bambu = new BambuImplementation(async () => true);
+  stubFreshSafetyStatus(bambu, "h2s");
+  const published = [];
+  bambu.ftpUpload = async () => {};
+  bambu.getPrinter = async () => ({ publish: async message => { published.push(message); } });
+  try {
+    await bambu.print3mf("127.0.0.1", "0938TEST0000000", "TEST_TOKEN", { projectName: "h2s-255", bambuModel: "h2s", filePath: threeMfPath, plateIndex: 0, useAMS: false, amsMapping: [-1, 255, -1, -1], bedType: "supertack_plate" });
+    const print = published.find(message => message.print?.command === "project_file")?.print;
+    assert.equal(print.ams_mapping[1], -1);
+    assert.deepEqual(print.ams_mapping2[1], { ams_id: 255, slot_id: 0 });
+  } finally {
+    fs.rmSync(threeMfPath, { force: true });
+  }
+});
+
 test("ams_mapping input treats empty arrays and objects as absent", () => {
   assert.equal(hasAmsMappingInput(undefined), false);
   assert.equal(hasAmsMappingInput(null), false);
@@ -1883,7 +1972,7 @@ test("slice_stl writes the installed nozzle type into the machine preset so prin
       env: {
         ...process.env, MCP_TRANSPORT: "stdio", BAMBU_MODEL: "p1s", BAMBU_SERIAL: "", BAMBU_TOKEN: "",
         BAMBU_SLICER_PROFILE: "", BAMBU_TEMPLATE_3MF_PATH: "", BAMBU_PROFILES_ROOT: fakeSlicer.profilesRoot,
-        BAMBU_SLICER_PROFILE_DIRS: "", BAMBU_NOZZLE_TYPE: "", MCP_ALLOW_EXECUTABLE_ARG: "1", ...extraEnv,
+        BAMBU_SLICER_PROFILE_DIRS: "", BAMBU_NOZZLE_TYPE: "", BAMBU_NOZZLE_VOLUME_TYPE: "", MCP_ALLOW_EXECUTABLE_ARG: "1", ...extraEnv,
       },
       stderr: "pipe",
     });
@@ -1916,6 +2005,71 @@ test("slice_stl writes the installed nozzle type into the machine preset so prin
   result = await (await connect({ BAMBU_NOZZLE_TYPE: "hardened-steel" }))({});
   assert.equal(result.isError, undefined, JSON.stringify(result.content));
   assert.deepEqual(machine().nozzle_type, ["hardened_steel"]);
+});
+
+test("slice_stl slices for the installed nozzle flow type and refuses one the preset lacks", async (t) => {
+  const fakeSlicer = await createFakeBambuSlicer();
+  const writeMachine = (variants) => fs.writeFileSync(path.join(fakeSlicer.profilesRoot, "BBL", "machine", "Bambu Lab P1S 0.4 nozzle.json"), JSON.stringify({
+    name: "Bambu Lab P1S 0.4 nozzle", nozzle_diameter: ["0.4"], extruder_type: ["Direct Drive"], extruder_variant_list: [variants],
+    default_print_profile: "Behavior process", default_filament_profile: ["Behavior filament"], machine_start_gcode: "fixture start",
+  }));
+  writeMachine("Direct Drive Standard,Direct Drive High Flow");
+  const connect = async (extraEnv = {}) => {
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [SERVER_ENTRY],
+      env: {
+        ...process.env, MCP_TRANSPORT: "stdio", BAMBU_MODEL: "p1s", BAMBU_SERIAL: "", BAMBU_TOKEN: "",
+        BAMBU_SLICER_PROFILE: "", BAMBU_TEMPLATE_3MF_PATH: "", BAMBU_PROFILES_ROOT: fakeSlicer.profilesRoot,
+        BAMBU_SLICER_PROFILE_DIRS: "", BAMBU_NOZZLE_TYPE: "", BAMBU_NOZZLE_VOLUME_TYPE: "", MCP_ALLOW_EXECUTABLE_ARG: "1", ...extraEnv,
+      },
+      stderr: "pipe",
+    });
+    const client = createClient();
+    t.after(async () => { await closeTransport(transport); });
+    await client.connect(transport);
+    return (extra) => client.callTool({ name: "slice_stl", arguments: {
+      stl_path: SAMPLE_STL, bambu_model: "p1s", slicer_path: fakeSlicer.fakeSlicerPath, use_printer_filaments: false, ...extra,
+    } });
+  };
+  const machine = () => {
+    const slicerArgs = JSON.parse(fs.readFileSync(fakeSlicer.argsOutPath, "utf8"));
+    return JSON.parse(fs.readFileSync(slicerArgs[slicerArgs.indexOf("--load-settings") + 1].split(";")[0], "utf8"));
+  };
+  const slice = await connect();
+  let result = await slice({ nozzle_volume_type: "high_flow" });
+  assert.equal(result.isError, undefined, JSON.stringify(result.content));
+  assert.deepEqual(machine().nozzle_volume_type, ["High Flow"]);
+  // Without a choice the preset's Standard default is kept.
+  result = await slice({});
+  assert.equal(result.isError, undefined, JSON.stringify(result.content));
+  assert.deepEqual(machine().nozzle_volume_type, ["Standard"]);
+  // Invalid values stop before the slicer runs.
+  fs.rmSync(fakeSlicer.argsOutPath);
+  result = await slice({ nozzle_volume_type: "turbo" });
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result.content), /Invalid nozzle volume type/);
+  assert.equal(fs.existsSync(fakeSlicer.argsOutPath), false, "the slicer must not run");
+  // BAMBU_NOZZLE_VOLUME_TYPE supplies the default.
+  result = await (await connect({ BAMBU_NOZZLE_VOLUME_TYPE: "High Flow" }))({});
+  assert.equal(result.isError, undefined, JSON.stringify(result.content));
+  assert.deepEqual(machine().nozzle_volume_type, ["High Flow"]);
+  // A preset without High Flow values is refused rather than mislabelled.
+  writeMachine("Direct Drive Standard");
+  fs.rmSync(fakeSlicer.argsOutPath);
+  result = await slice({ nozzle_volume_type: "high_flow" });
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result.content), /declares no High Flow variant|has no \\"High Flow\\" nozzle/);
+  assert.equal(fs.existsSync(fakeSlicer.argsOutPath), false, "the slicer must not run");
+  // The shorthand fills nozzles[i].flow: an explicit flow must agree, and the printer's report can't be combined with it.
+  writeMachine("Direct Drive Standard,Direct Drive High Flow");
+  result = await slice({ nozzle_volume_type: "high_flow", nozzles: [{ flow: "Standard" }] });
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result.content), /contradicts nozzles\[0\]\.flow/);
+  result = await slice({ nozzle_volume_type: "high_flow", nozzles_from_printer: true });
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result.content), /nozzle_volume_type or nozzles_from_printer/);
+  assert.equal(fs.existsSync(fakeSlicer.argsOutPath), false, "the slicer must not run");
 });
 
 test("template_name resolves by source type for slicer profiles versus 3MF sources", async (t) => {

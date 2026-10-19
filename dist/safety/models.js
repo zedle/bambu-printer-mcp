@@ -72,9 +72,19 @@ export function externalSpoolMapping(model, job) {
             mapping[position] = EXTERNAL_DEPUTY_ID;
             continue;
         }
-        // Studio's PrintConfig default for filament_map is 1 (the left extruder).
-        const logical = job.filamentMap?.[position] ?? 1;
-        mapping[position] = externalHolderForExtruder(model, map[logical - 1]);
+        // The plate headers' composed nozzle binding, else the sliced filament_map through physical_extruder_map.
+        const logical = job.filamentMap?.[position];
+        const nozzle = job.filamentNozzleIndices?.[position] ?? (logical !== undefined ? map[logical - 1] : undefined);
+        if (nozzle !== undefined) {
+            mapping[position] = externalHolderForExtruder(model, nozzle);
+            continue;
+        }
+        // Without a binding only a printer with one usable holder (the H2C's 254) can be chosen for.
+        const holders = externalHolders(model);
+        if (holders.length !== 1) {
+            throw new Error(`The external spool for filament ${position + 1} is ambiguous on the ${model.toUpperCase()}: the job has no filament_map and physical_extruder_map binding to choose holder 254 (left) or 255 (right). Pass ams_slots or re-slice with a filament map.`);
+        }
+        mapping[position] = holders[0];
     }
     return mapping;
 }

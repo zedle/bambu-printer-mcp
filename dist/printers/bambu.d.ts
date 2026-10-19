@@ -141,6 +141,14 @@ interface BambuPrintOptionsInternal {
 /** Publish a query and resolve with the first report `match` accepts within `waitMs`, or undefined. */
 export declare function queryLanPrinter<T>(printer: any, message: Record<string, unknown>, match: (message: unknown) => T | undefined, waitMs: number): Promise<T | undefined>;
 export declare function uniqueModules(modules: unknown[]): unknown[];
+/** What confirmPrintPreflight showed (and, with BAMBU_REQUIRE_CONFIRMATION=1, a person confirmed), checked again before dispatch. */
+export type PrintPreflight = {
+    finishedJob?: string;
+    serial: string;
+    model: string;
+    notices: string[];
+    confirmed: boolean;
+};
 export declare class BambuImplementation {
     private readonly confirm?;
     private printerStore;
@@ -149,8 +157,17 @@ export declare class BambuImplementation {
     constructor(confirm?: ((message: string) => Promise<boolean>) | undefined);
     confirmHardwareAction(message: string, _physicalCheck?: boolean): Promise<void>;
     private finishedJobIdentity;
-    confirmPrintPreflight(serial: string, status: any, inspection: Awaited<ReturnType<typeof inspectPrintFile>>): Promise<string | undefined>;
-    assertBedClearance(status: any, confirmedFinishedJob: string | undefined): void;
+    /**
+     * The print confirmation. Its result goes to assertBedClearance at every later state check of the same print, which
+     * stops the print if the situation confirmed has changed.
+     */
+    confirmPrintPreflight(serial: string, status: any, inspection: Awaited<ReturnType<typeof inspectPrintFile>>): Promise<PrintPreflight>;
+    /**
+     * Stop a print whose confirmed situation changed: a newly finished job, or (when a person confirmed the print) a
+     * hidden HMS notice the confirmation did not name. Unattended prints pass hidden notices like any serious or common
+     * entry, as warnings.
+     */
+    assertBedClearance(status: any, preflight: PrintPreflight): void;
     private getPrinter;
     /** Internal handoff from a successful inspected transport; never exposed as an MCP tool. */
     recordCheckedJob(host: string, serial: string, remotePath: string, requirements: PrinterStateRequirements): void;
@@ -164,6 +181,15 @@ export declare class BambuImplementation {
     print3mf(host: string, serial: string, token: string, options: BambuPrintOptionsInternal): Promise<any>;
     private print3mfPrepared;
     cancelJob(host: string, serial: string, token: string, dispatch?: () => Promise<any>): Promise<any>;
+    /**
+     * Publish an emergency command without waiting for a reply. With a signal, an abort that races the publish
+     * force-closes the transport, so a publish queued inside MQTT.js can't go out after a later reconnect.
+     */
+    private publishEmergencyCommand;
+    /** Raw MQTT stop for routes that already ran the shared cancellation steps (Linux X2D's dual-route stop). */
+    sendStopOverMqtt(host: string, serial: string, token: string, signal?: AbortSignal): Promise<any>;
+    /** Raw MQTT copy of a prepared control command (Linux X2D's dual-route heater-off, in Studio's per-printer form). */
+    sendControlOverMqtt(host: string, serial: string, token: string, command: ControlCommand, signal?: AbortSignal): Promise<any>;
     pauseJob(host: string, serial: string, token: string, dispatch?: () => Promise<any>): Promise<any>;
     resumeJob(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: {
         print: Record<string, unknown>;

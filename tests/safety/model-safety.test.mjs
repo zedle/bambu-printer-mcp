@@ -25,13 +25,16 @@ test('single-nozzle printers on current firmware report their one external holde
 test('dual-nozzle printers pick the holder the filament is mapped to', () => {
   // H2D with PLA on the left holder (254) and TPU on the right one (255).
   const status = mockStatus('H2DEXTSPOOLACTIVE');
-  assert.doesNotThrow(() => validatePrinterState(status, external('h2d', { amsMapping: [254] })));
+  const left = { filamentMap: [1] };
+  assert.doesNotThrow(() => validatePrinterState(status, external('h2d', { amsMapping: [254], ...left })));
+  // With two usable holders an external spool needs the job's nozzle binding.
+  assert.throws(() => validatePrinterState(status, external('h2d', { amsMapping: [254] })), /verified physical nozzle binding/);
   const right = { filamentMap: [2] };
   assert.throws(() => validatePrinterState(status, external('h2d', { amsMapping: [255], ...right })), /TPU in slot 255 contradicts/);
   assert.doesNotThrow(() => validatePrinterState(status, external('h2d', { materials: ['TPU'], amsMapping: [255], ...right })));
   for (const [name, model] of [['H2D', 'h2d'], ['X2D', 'x2d']]) {
     assert.doesNotThrow(() => validatePrinterState(mockStatus(name), external(model, { amsMapping: [255], ...right })), name);
-    assert.doesNotThrow(() => validatePrinterState(mockStatus(name), external(model, { amsMapping: [254] })), name);
+    assert.doesNotThrow(() => validatePrinterState(mockStatus(name), external(model, { amsMapping: [254], ...left })), name);
   }
   // The H2D Pro mock has TPU on its right holder.
   assert.doesNotThrow(() => validatePrinterState(mockStatus('H2DPRO'), external('h2dpro', { materials: ['TPU'], amsMapping: [255], ...right })));
@@ -49,8 +52,11 @@ test('external-spool jobs map each filament to its nozzle\'s holder', () => {
   assert.deepEqual(models.externalSpoolMapping('p1s', job), [254, 254, -1]);
   assert.throws(() => models.externalSpoolMapping('h2c', job), /right nozzle has no external spool holder/);
   assert.deepEqual(models.externalSpoolMapping('h2c', { ...job, usedFilamentPositions: [0, 2] }), [254, -1, 254]);
-  // Without filament_map Studio's default puts every filament on the left extruder.
-  assert.deepEqual(models.externalSpoolMapping('h2d', { ...job, filamentMap: undefined }), [254, 254, -1]);
+  // Without a nozzle binding a printer with two usable holders can't choose; the H2C has one (254).
+  assert.throws(() => models.externalSpoolMapping('h2d', { ...job, filamentMap: undefined }), /ambiguous/);
+  assert.deepEqual(models.externalSpoolMapping('h2c', { ...job, filamentMap: undefined, usedFilamentPositions: [0, 2] }), [254, -1, 254]);
+  // The plate headers' composed binding wins.
+  assert.deepEqual(models.externalSpoolMapping('x2d', { ...job, filamentMap: undefined, filamentNozzleIndices: [0, 1, 0] }), [255, 254, -1]);
 });
 
 test('tray values accept both external holders and only real AMS-HT units', () => {

@@ -1,5 +1,6 @@
 import { BambuClient } from "bambu-node";
 import type { SliceNozzlePlan } from "./slice-info.js";
+export declare const SERIAL_MODELS: Record<string, string>;
 /** The model a serial prefix belongs to (Studio's sn_prefix). Identity evidence only together with a fresh report. */
 export declare function serialModel(serial: string): string | undefined;
 /**
@@ -30,6 +31,8 @@ export interface PrinterStateRequirements {
     nozzleFlows?: string[];
     /** Sliced (logical, left first) extruder to physical extruder id; Studio's default for dual-nozzle printers is [1,0]. */
     physicalExtruderMap?: number[];
+    /** Per filament: the physical nozzle (0 right/main, 1 left/deputy) from the plate headers' filament_map and physical_extruder_map. */
+    filamentNozzleIndices?: number[];
     /** Per filament: sliced extruder (1 = left, 2 = right), raw filament_type (e.g. PLA-CF) and Bambu filament id. */
     filamentMap?: number[];
     filamentTypes?: string[];
@@ -69,6 +72,14 @@ export interface ValidatedPrinterState {
 }
 /** Mounted nozzles (ids 0-15) by firmware id; with rack, the H2C hotend-rack nozzles (ids 16-31) instead. */
 export declare function reportedNozzles(raw: Record<string, any>, rack?: boolean): ReportedNozzle[];
+/** The one key format for a reported entry, shared by the gate and clear_hms_errors. */
+export declare function reportedHmsKey(entry: unknown): string;
+/** Bambu's display form of a cleared-code key such as "hms:83887616:131184"; other keys unchanged. */
+export declare function describeHmsKey(key: string): string;
+/** Labels of reported entries that pass only because Bambu hides them for this printer. */
+export declare function hiddenHmsNotices(raw: unknown, serial: string, model: string): string[];
+/** Cleared-code keys of reported hidden entries; clearing never removes them, so they are not re-acknowledged. */
+export declare function hiddenHmsKeys(raw: unknown, serial: string, model: string): string[];
 /** Verifies reported configuration, not a physical nozzle/spool inspection. */
 export declare function validatePrinterState(status: any, requirements: PrinterStateRequirements): ValidatedPrinterState;
 /**

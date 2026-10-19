@@ -26,6 +26,8 @@ export interface PrintFileInspection {
     filamentNames?: string[];
     /** The plate's nozzle plan from slice_info.config / filament_sequence.json (the nozzles used, each filament's). */
     nozzlePlan?: SliceNozzlePlan;
+    /** Physical nozzle index (0 right/main, 1 left/deputy) for each declared filament, composed from the selected plate headers. */
+    filamentNozzleIndices?: number[];
 }
 /** Inspect the exact selected plate. This does not simulate firmware or arbitrary motion:
  * only declared object bounds are checked, never purge/homing/wipe travel coordinates.

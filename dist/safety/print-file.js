@@ -69,6 +69,11 @@ function stripComments(line) {
 /** A deliberately narrow parameter lexer for commands affecting heat/material selection.
  * Unknown nonthermal vendor commands do not require a global G-code allowlist.
  */
+/** True when the parameter is present, finite and within [low, high]. */
+function inRange(args, key, low, high) {
+    const value = args.get(key);
+    return value !== undefined && Number.isFinite(value) && value >= low && value <= high;
+}
 function parameters(text, flags = '') {
     const result = new Map();
     let rest = text.trim();
@@ -384,6 +389,25 @@ export async function inspectPrintFile(filePath, options) {
             return fail(`unknown or malformed ${field} metadata`);
         return [...table, ...metadataValues(headers, [key])];
     };
+    // GCode.cpp uses 1-based filament_map logical extruders and then indexes
+    // physical_extruder_map to select the physical nozzle. Only this selected
+    // plate's headers establish that binding; unsliced project defaults do not.
+    const headerMap = (key, count, low, high) => {
+        const values = metadataValues(headers, [key]);
+        if (!values.length)
+            return undefined;
+        return consistent(values, value => {
+            const entries = list(value);
+            return entries.length === count && entries.every(v => NUMBER.test(v) && Number.isInteger(Number(v)) && Number(v) >= low && Number(v) <= high)
+                ? entries.map(Number) : undefined;
+        }, key.replace(/_/g, ' '));
+    };
+    const dualNozzle = extruderCount(model) === 2;
+    const headerPhysicalMap = headerMap('physical_extruder_map', nozzleDiameters.length, 0, dualNozzle ? Math.min(nozzleDiameters.length, 2) - 1 : nozzleDiameters.length - 1);
+    if (headerPhysicalMap && new Set(headerPhysicalMap).size !== headerPhysicalMap.length)
+        fail('physical extruder map must be a complete permutation');
+    const headerFilamentMap = headerMap('filament_map', materials.length, 1, nozzleDiameters.length);
+    const filamentNozzleIndices = headerFilamentMap && headerPhysicalMap ? headerFilamentMap.map(logical => headerPhysicalMap[logical - 1]) : undefined;
     const bedValues = metadataValues([...metadata, plate], ['curr_bed_type', 'bed_type']);
     const bedType = bedValues.length ? consistent(bedValues, normalizeBed, 'bed type') : undefined;
     if (options.bedType && (!bedType || normalizeBed(options.bedType) !== bedType))
@@ -447,6 +471,9 @@ export async function inspectPrintFile(filePath, options) {
             if (!line || line === '%')
                 continue;
             // The official H2C template emits this literal separator without a semicolon.
+            // The X2D change_filament_gcode template emits this literal banner without a semicolon, throughout a print.
+            if (line === '======== X2D filament_change gcode ==========' && model === 'x2d')
+                continue;
             if (line === '========== record data ==========' && h2cStartup(index))
                 continue;
             line = line.replace(/^N\d+\s*/i, '').replace(/\*\d+\s*$/, '');
@@ -473,13 +500,31 @@ export async function inspectPrintFile(filePath, options) {
             const code = command[1].toUpperCase() + String(Number(base)) + (subcode === undefined ? '' : '.' + subcode);
             const argumentsText = line.slice(command[0].length).trim();
             commandCount++;
-            // Timelapse capture (time_lapse_gcode on H2D, H2D Pro, H2C and X2D, GCode.cpp): M9711 M<timelapse type>
-            // E<extruder> [X Y | U V] Z S C O T. Its M is a parameter, not a second command; it sets no heater target.
-            const timelapseCapture = code === 'M9711' && ['h2d', 'h2dpro', 'h2c', 'x2d'].includes(model);
-            if (timelapseCapture) {
-                const args = parameters(argumentsText);
-                if ([...args.keys()].some(key => !'MEXYUVZSCOT'.includes(key)))
-                    fail('unsupported timelapse capture parameters');
+            if (code === 'M9711') {
+                // Timelapse capture (time_lapse_gcode on H2D, H2D Pro, H2C and X2D in Bambu Studio and OrcaSlicer, GCode.cpp),
+                // emitted on every layer: M<timelapse type> E<physical extruder> [X Y | U V] Z S11 C10 O0 T<duration>. M is a
+                // parameter, not a second command; T is a duration, not a heater. It sets no temperature. Positions stay inside
+                // the machine volume.
+                const invalid = () => fail('unsupported M9711 time-lapse parameters');
+                if (!['h2d', 'h2dpro', 'h2c', 'x2d'].includes(model))
+                    invalid();
+                let args;
+                try {
+                    args = parameters(argumentsText);
+                }
+                catch {
+                    return invalid();
+                }
+                const [width, depth, height] = MACHINE_LIMITS[model].volume;
+                const position = ['X', 'Y', 'U', 'V'].filter(key => args.has(key)).join('');
+                const limit = { X: width, U: width, Y: depth, V: depth };
+                if ([...args.keys()].some(key => !'MEXYUVZSCOT'.includes(key)) ||
+                    // Every printer that captures this way has two physical extruders, whatever the file declares.
+                    ![0, 1].includes(args.get('M')) || !Number.isInteger(args.get('E')) || !inRange(args, 'E', 0, Math.min(nozzleDiameters.length, 2) - 1) ||
+                    args.get('S') !== 11 || args.get('C') !== 10 || args.get('O') !== 0 || !inRange(args, 'T', 0, 600000) ||
+                    !inRange(args, 'Z', 0, height) ||
+                    !['', 'XY', 'UV'].includes(position) || [...position].some(key => !inRange(args, key, 0, limit[key])))
+                    invalid();
                 continue;
             }
             if (!['M117', 'M118', 'M1002', 'M1006', 'M900', 'M970', 'M983.1', 'G383'].includes(code) && /[GM]\s*\d/i.test(argumentsText))
@@ -550,7 +595,9 @@ export async function inspectPrintFile(filePath, options) {
                 const component = ['M104', 'M109'].includes(code) ? 'nozzle' : ['M140', 'M190'].includes(code) ? 'bed' : 'chamber';
                 // Heater T is a physical nozzle, unlike standalone remapped T filament selection.
                 // Without a verified per-filament nozzle map, apply all possible materials.
-                if (args.has('T') && (!Number.isInteger(args.get('T')) || args.get('T') < 0 || args.get('T') >= nozzleDiameters.length))
+                // Two-nozzle printers have two physical heaters, whatever the file declares.
+                const heaters = extruderCount(model) === 2 ? Math.min(nozzleDiameters.length, 2) : nozzleDiameters.length;
+                if (args.has('T') && (!Number.isInteger(args.get('T')) || args.get('T') < 0 || args.get('T') >= heaters))
                     fail('physical heater target has no declared nozzle');
                 const position = args.has('T') ? undefined : active;
                 const commonFlush = code === 'M109' && args.size === 1 && args.get('S') === 290 && model === 'x1e' && !depositionStarted && !commonFlushUsed && boundedX1ePurge(lines, index);
@@ -675,7 +722,21 @@ export async function inspectPrintFile(filePath, options) {
                 for (const key of args.keys())
                     if (!'SLT'.includes(key))
                         fail(`unsupported M620.17 parameter ${key}`);
-                heat('nozzle', args.get('S'), requirePosition(args.get('L')));
+                if (args.get('L') === -1 && model === 'x2d') {
+                    // OrcaSlicer's X2D start G-code preheats a nozzle with no assigned
+                    // filament (L-1) for toolhead-offset calibration; Bambu Studio writes
+                    // L0 there. No project filament is selected, so check the target
+                    // against the hardware limit and every declared material, like other
+                    // heater commands without a verified filament. That is never looser
+                    // than an accepted L<position> form. Material left in the nozzle from
+                    // an earlier job is live state that no file can declare. T names one
+                    // of the two physical nozzles, whatever the file declares.
+                    if (args.get('T') > 1)
+                        fail('unsupported M620.17 nozzle/material temperature mapping');
+                    heat('nozzle', args.get('S'), undefined, true);
+                }
+                else
+                    heat('nozzle', args.get('S'), requirePosition(args.get('L')));
             }
             else if ((/^M620\./.test(code) && !['M620.3', 'M620.6', 'M620.11'].includes(code)) || /^M621\./.test(code)) {
                 fail(`unsupported thermal-affecting filament command ${code}`);
@@ -715,7 +776,9 @@ export async function inspectPrintFile(filePath, options) {
     const filamentMap = perFilament('filament_map')?.map(Number);
     // Studio compares sliced extruder i with physical extruder physical_extruder_map[i] (["1","0"] on every dual-nozzle
     // Bambu profile). A declared map must describe this model's extruders; a missing one falls back to Studio's.
-    const declaredExtruderMap = metadataValues(metadata, ['physical_extruder_map']);
+    // The selected plate's header is the sliced binding; the project's value (an unsliced default) only fills in.
+    const plateExtruderMap = metadataValues(headers, ['physical_extruder_map']);
+    const declaredExtruderMap = plateExtruderMap.length ? plateExtruderMap : metadataValues(metadata, ['physical_extruder_map']);
     const extruderMap = declaredExtruderMap.length ? consistent(declaredExtruderMap, value => {
         const values = list(value);
         return values.length && values.every(v => /^\d+$/.test(v)) ? values.map(Number) : undefined;
@@ -749,5 +812,6 @@ export async function inspectPrintFile(filePath, options) {
         ...(perFilament('filament_colour') ? { filamentColours: perFilament('filament_colour') } : {}),
         ...(perFilament('filament_type') ? { filamentTypes: perFilament('filament_type') } : {}),
         ...(perFilament('filament_settings_id') ? { filamentNames: perFilament('filament_settings_id').map(name => name.replace(/\s*@.*$/, '')) } : {}),
-        ...(nozzlePlan ? { nozzlePlan } : {}) };
+        ...(nozzlePlan ? { nozzlePlan } : {}),
+        ...(filamentNozzleIndices ? { filamentNozzleIndices } : {}) };
 }

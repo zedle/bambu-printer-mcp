@@ -29,7 +29,7 @@ These preflight changes have automated regression coverage with intercepted prin
 | Single-colour BambuStudio CLI slicing | MCP slices via CLI with automatic BBL profile resolution | ✅ Works (verified H2S, H2D, X1C, P1S on 02.06.01.55). H2C requires Bambu Studio 2.4.0+ and `BAMBU_MODEL=h2c`. |
 | FULU/Orca CLI preparation (1.1.11+) | Same exact-machine gate and BBL dependency resolution | Regression-tested preparation and failure handling; live slicer/version validation remains separate. |
 | Multi-color BambuStudio CLI slicing | MCP prepares every filament slot's colour and a fallback tower position | Contributor-verified on Windows BambuStudio 02.08.02.60, including four-colour X2D slicing. See version limits below. |
-| X2D status and slicing | `BAMBU_MODEL=x2d` with an installed X2D preset | Available. Native printing additionally requires macOS and the optional helper; legacy FTPS remains unsupported. |
+| X2D status and slicing | `BAMBU_MODEL=x2d` with an installed X2D preset | Available. Native printing additionally requires macOS or x86-64 Linux and the optional helper; legacy FTPS remains unsupported. |
 | Pre-sliced `.gcode.3mf` → printer | MCP `print_3mf` | ✅ Works (verified live on Kingpin H2D) |
 | Other slicing combinations | Pre-slice in the GUI, then use `print_3mf` for a supported printer | Inspect the preview and use the printer's supported transport. |
 
@@ -162,11 +162,12 @@ on an exported multi-colour project. These were filed in
 The colour fix does not establish that every older-version or multi-material
 failure is resolved. Use a GUI-sliced project when a CLI combination fails.
 
-X2D has its own preset, status identification, and slicing support. On macOS,
-`print_3mf` uses the optional native helper and installed Bambu Studio networking
+X2D has its own preset, status identification, and slicing support. On macOS and
+x86-64 Linux, `print_3mf` uses the optional native helper and Bambu's networking
 plug-in for the internal eMMC transport, after the shared print safety checks.
-See [native setup](../README.md#x2d-native-transport-macos). Other operating
-systems reject native print requests before slicing or connecting. Legacy
+See native setup for [macOS](../README.md#x2d-native-transport-macos) and
+[Linux](../README.md#x2d-native-transport-linux). Other operating systems, and
+Linux without the helper, reject native print requests before slicing or connecting. Legacy
 FTPS/remote-file starts remain unsupported; do not choose H2D as a substitute
 model. Existing H2S/H2D print routes remain unchanged.
 
@@ -189,7 +190,7 @@ Before BambuStudio, FULU, or Orca CLI slicing, the MCP:
 3. Sets `from: "User"`, `inherits: <leaf machine name>`, and
    `printer_settings_id` / `print_settings_id` / `filament_settings_id`
    so the CLI's compatibility check passes.
-4. Derives nozzle settings from the selected machine profile and nozzle configuration. Use the exact model preset; a successful slice for another model does not validate the target printer.
+4. Derives nozzle settings from the selected machine profile and nozzle configuration. Each extruder's flow (`nozzles[i].flow`, or `nozzle_volume_type` for all of them) sets the machine's `nozzle_volume_type`, which selects each profile's Standard or High Flow values; a flow type the preset does not declare in `extruder_variant_list` is refused. Use the exact model preset; a successful slice for another model does not validate the target printer.
 5. Auto-extends `compatible_printers` to include the chosen machine
    when the user picked a non-default printer/process combo.
 6. Removes every key the resolved machine preset defines, other than profile
@@ -210,6 +211,69 @@ slot list to replace.
 
 Implementation: [`src/slicer/profile-flatten.ts`](../src/slicer/profile-flatten.ts).
 Optional installed-slicer smoke test: `node scripts/test-cli-slice.mjs --model h2s` (substitute the supported target model). This slices a fixture; it does not print.
+
+## Remote Orca slicing
+
+Set `SLICER_TYPE=orca-slicer-api` to use a separately hosted
+[AFKFelix/orca-slicer-api](https://github.com/AFKFelix/orca-slicer-api) service.
+The MCP host does not need an Orca executable or `SLICER_PATH`. It still needs a
+read-only copy or mount of the **matching remote Orca installation's**
+`resources/profiles` tree, including `BBL/cli_config.json` and the exact
+model/nozzle machine preset:
+
+```dotenv
+SLICER_TYPE=orca-slicer-api
+SLICER_API_URL=http://orcaslicer:3000
+BAMBU_PROFILES_ROOT=/mnt/orca/resources/profiles
+SLICER_API_MODE=sync
+SLICER_API_TIMEOUT_MS=600000
+```
+
+`SLICER_API_URL` is trusted server configuration, never a tool argument. A proxy
+path prefix is supported. Use HTTPS when the connection needs transport
+protection. The URL cannot contain credentials, a query, or a fragment. For
+reverse-proxy authentication, set `SLICER_API_TOKEN`; the default header is
+`Authorization: Bearer <token>`. Set `SLICER_API_TOKEN_HEADER=X-API-Key` to send the
+raw token through a custom header. Redirects are rejected, returned job URLs are
+ignored, and remote errors do not echo response bodies or authentication values.
+
+The backend targets the upstream API contract at
+[`a9a28f0a7b0c6f51b9be158509e9e9677532b868`](https://github.com/AFKFelix/orca-slicer-api/tree/a9a28f0a7b0c6f51b9be158509e9e9677532b868).
+`sync` submits multipart data to `/slice`. `async` submits once to `/slice-async`,
+polls `/slice-async/{requestId}`, downloads its `/result`, and deletes the finished
+job. The timeout covers submission, polling and downloading (default ten minutes;
+accepted range 1–3600000 ms). Timeout or cancellation does not cancel an active
+upstream job: the API has no active-job cancellation endpoint. The client reports
+that work may continue and never retries submission automatically.
+
+Before HTTP submission, the same local Orca preparation resolves `inherits` and
+`include` recursively, validates the exact bundled machine and its CLI config,
+preserves custom process/filament overrides, and prepares colour and nozzle
+settings. The client uploads those complete machine, process and filament JSON
+files with `resolveProfileInheritance=false`; their retained leaf identity
+metadata serves the CLI compatibility check. The service cannot substitute its
+default profiles for missing local machine provenance.
+
+The supported subset is STL or 3MF input with **exactly one filament slot** and
+one positive, one-based `slice_plate` (default `1`). Uploaded profiles preserve
+custom settings and a single explicit/project/profile filament colour. Bed type,
+nozzle type and nozzle flow settings use the existing validated profile overlays.
+`arrange=true` and `orient=true` are supported. Explicit `false` for either is
+rejected because the pinned upstream multipart implementation treats nonempty
+strings as true. Requests for all plates (`slice_plate=0`), multiple filament
+slots, object/filament-ID remapping, repetitions, transforms, and CLI-only flags
+such as `ensure_on_bed`, `uptodate`, `min_save`, `skip_modified_gcodes`,
+`enable_timelapse`, and `allow_mix_temp` are rejected rather than dropped. Use a
+local backend when those controls are required.
+
+Downloads are capped at 100 MB, saved under a unique private output name, and
+independently inspected as a sliced 3MF before being returned. The selected plate
+must retain its original `Metadata/plate_N.gcode` identity; renumbered results
+are rejected. The file must match the prepared model, nozzle diameters and
+material, and its commands must pass the existing independent safety inspection.
+Printing still performs its own fresh live-printer preflight. HTTP fixture tests
+verify the transport and failure boundaries; they do not establish a real Orca
+slice or physical print.
 
 ## Why the sliced file matters
 
@@ -260,7 +324,7 @@ For the default direct LAN path, the MCP selects the upload location and command
 | Full-size A1 | SD root `/<file>` | `project_file`, `file:///sdcard/<file>` |
 | P2S | `/cache/<file>` | `project_file`, `ftp:///cache/<file>` |
 | H2S / H2D / H2C | SD root `/<file>` | `project_file`, `ftp:///<file>` |
-| X2D | Native eMMC on macOS | `print_3mf` uses a locally built helper and installed plug-in; legacy FTPS/remote-file starts are rejected |
+| X2D | Native eMMC on macOS or Linux | `print_3mf` uses a locally built helper and installed plug-in; legacy FTPS/remote-file starts are rejected |
 
 The filename suffix is significant for the legacy route: the code recognizes `.gcode.3mf` for `gcode_file`, while other `.3mf` names use project-file handling. Keep the slicer's sliced-file export name when using the legacy path. Do not rename unsliced content to force routing.
 

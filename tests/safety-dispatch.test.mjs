@@ -25,17 +25,17 @@ const token = "TEST_TOKEN";
 function safetyStatus({ model = "p1s", nozzle = "0.4", state = "IDLE", ...raw } = {}) {
   return {
     connected: true, model, status: state, serial,
-    raw: { model, gcode_state: state, nozzle_diameter: nozzle, print_error: 0, hms: [], ...raw },
+    raw: { model, ...(["h2d","h2dpro","h2c","x2d"].includes(model) ? {vir_slot:[{id:254,tray_type:"PLA"},{id:255,tray_type:"PLA"}]} : {}), gcode_state: state, nozzle_diameter: nozzle, print_error: 0, hms: [], ...raw },
     observation: { source: "mqtt", receivedAt: Date.now(), requestedAt: Date.now() - 1, fullAt: Date.now() - 1, identitySource: "report" },
   };
 }
 
-async function fixture(t, { model = "p1s", nozzle = "0.4", nozzleDiameters, material = "PLA", gcode = "M104 S220\nM140 S60\nG1 X10 Y10 Z1\n", raw = false } = {}) {
+async function fixture(t, { model = "p1s", nozzle = "0.4", nozzleDiameters, material = "PLA", gcode = "M104 S220\nM140 S60\nG1 X10 Y10 Z1\n", raw = false, filamentMap } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bambu-safety-dispatch-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const file = path.join(dir, raw ? "job.gcode" : "job.gcode.3mf");
   const nozzles = (nozzleDiameters ?? [nozzle]).map(String);
-  const content = `; printer_model = Bambu Lab ${model === "a1mini" ? "A1 mini" : model.toUpperCase()}\n; nozzle_diameter = ${nozzles.join(";")}\n; filament_type = ${material}\n; filament_colour = #FFFFFF\n; curr_bed_type = Textured PEI Plate\n${gcode}`;
+  const content = `; printer_model = Bambu Lab ${model === "a1mini" ? "A1 mini" : model.toUpperCase()}\n; nozzle_diameter = ${nozzles.join(";")}\n; filament_type = ${material}\n${nozzles.length === 2 ? `; filament_map = ${(filamentMap ?? material.split(";").map(() => 1)).join(",")}\n; physical_extruder_map = 1,0\n` : ""}; filament_colour = #FFFFFF\n; curr_bed_type = Textured PEI Plate\n${gcode}`;
   if (raw) await fs.writeFile(file, content);
   else {
     const zip = new JSZip();
@@ -507,7 +507,7 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
       const now = Date.now();
       const reported={...(fs.existsSync(${JSON.stringify(statusPath)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(statusPath)},'utf8')) : {}), ...(printSent ? ${JSON.stringify(afterPrint ?? {})} : {})};
       return {connected:true, model:${JSON.stringify(model)}, status:reported.gcode_state??'IDLE', serial:${JSON.stringify(serial)},
-        raw:{model:${JSON.stringify(model)},gcode_state:'IDLE',nozzle_diameter:${JSON.stringify(String(nozzleDiameters[0]))},device:{nozzle:{info:${JSON.stringify(nozzleDiameters.map((diameter, id) => ({ id, diameter, type: "HH01", stat: 0 })))}}},print_error:0,hms:[],...${JSON.stringify(ams ? { ams } : {})},...reported},
+        raw:{model:${JSON.stringify(model)},...${JSON.stringify(['h2d','h2dpro','h2c','x2d'].includes(model) ? {vir_slot:[{id:254,tray_type:'PLA'},{id:255,tray_type:'PLA'}]} : {})},gcode_state:'IDLE',nozzle_diameter:${JSON.stringify(String(nozzleDiameters[0]))},device:{nozzle:{info:${JSON.stringify(nozzleDiameters.map((diameter, id) => ({ id, diameter, type: "HH01", stat: 0 })))}}},print_error:0,hms:[],...${JSON.stringify(ams ? { ams } : {})},...reported},
         observation:{source:'mqtt',requestedAt:now,receivedAt:now,fullAt:now,identitySource:'report'}};
     };
     BambuNetworkBridge.prototype.ensurePrinterChannel = async (devId) => { log({ action: 'bridge-channel', devId }); };
@@ -672,7 +672,9 @@ test("verified public direct and bridge prints reach their intended transport", 
   assert.notEqual(print.payload.params.filename, file, "bridge must consume the checked private copy");
   assert.match(print.payload.params.dst_file, /^checked-[a-f0-9-]+-job\.gcode\.3mf$/);
   assert.equal(print.payload.params.task_use_ams, false);
-  assert.equal(print.payload.params.ams_mapping, "[254]");
+  // Studio's mapping encoding for the external spool: -1 in ams_mapping, the holder in ams_mapping2 (a P1S's one holder is 255).
+  assert.equal(print.payload.params.ams_mapping, "[-1]");
+  assert.equal(print.payload.params.ams_mapping2, JSON.stringify([{ ams_id: 255, slot_id: 0 }]));
   // Studio's bed string and P1S options: leveling on (1), no flow calibration, vibration off, first-layer inspection on.
   const { task_bed_type, task_bed_leveling, auto_bed_leveling, task_flow_cali, auto_flow_cali, auto_offset_cali, task_vibration_cali, task_layer_inspect } = print.payload.params;
   assert.deepEqual({ task_bed_type, task_bed_leveling, auto_bed_leveling, task_flow_cali, auto_flow_cali, auto_offset_cali, task_vibration_cali, task_layer_inspect },
@@ -757,7 +759,14 @@ for (const tool of ["print_3mf", "print_3mf_bambu_network"]) {
       const file = await fixture(t, { model: "h2d", nozzleDiameters: [0.4, 0.6] });
       const result = await client.callTool({ name: tool, arguments: { three_mf_path: file, bambu_model: "h2d", bed_type: "textured_plate", use_ams: false, ...nozzleArgs } });
       assert.notEqual(result.isError, true, result.content?.[0]?.text);
-      const events = (await fs.readFile(eventsPath, "utf8")).trim().split("\n").map(JSON.parse);
+      const beforeWrongSpool = await fs.readFile(eventsPath, "utf8");
+      for (const mapping of [{ams_mapping:[255]}, {ams_slots:[255]}]) {
+        const wrong = await client.callTool({name:tool,arguments:{three_mf_path:file,bambu_model:"h2d",bed_type:"textured_plate",use_ams:false,...nozzleArgs,...mapping}});
+        assert.equal(wrong.isError,true,'wrong-nozzle explicit spool must not be replaced');
+        assert.match(wrong.content?.[0]?.text ?? '',/nozzle|binding|spool/i);
+        assert.equal(await fs.readFile(eventsPath,"utf8"),beforeWrongSpool,'rejected mapping must not upload or dispatch');
+      }
+      const events = beforeWrongSpool.trim().split("\n").map(JSON.parse);
       if (tool === "print_3mf") {
         assert.deepEqual(events.map(event => event.action), ["upload", "publish"]);
         assert.equal(events[1].payload.print.command, "project_file");
@@ -800,7 +809,8 @@ for (const tool of ["print_3mf", "print_3mf_bambu_network"]) {
 
   test(`${tool} rejects a mixed H2D file when the live second nozzle differs`, async (t) => {
     const { client, eventsPath } = await interceptedMcp(t, { model: "h2d", nozzleDiameters: [0.8, 0.4], realBridgeRequest: true });
-    const file = await fixture(t, { model: "h2d", nozzleDiameters: [0.4, 0.6] });
+    // Studio checks the nozzles the plate's filaments use: here the right one (filament_map 2).
+    const file = await fixture(t, { model: "h2d", nozzleDiameters: [0.4, 0.6], filamentMap: [2] });
     const result = await client.callTool({ name: tool, arguments: { three_mf_path: file, bambu_model: "h2d", nozzle_diameters: [0.4, 0.6], bed_type: "textured_plate", use_ams: false } });
     assert.equal(result.isError, true);
     assert.match(result.content?.[0]?.text ?? "", /nozzle.*1.*diameter|nozzle.*match/i);
@@ -1051,7 +1061,7 @@ test("hardware errors cannot be cleared without human confirmation", async () =>
   const prompts = [];
   printer.confirm = async message => { prompts.push(message); return false; };
   await assert.rejects(printer.clearHmsErrors(host, serial, token), /confirmation.*declined/i);
-  assert.match(prompts[0], /print_error:123.*hms:1:131073|hms:1:131073.*print_error:123/);
+  assert.match(prompts[0], /print_error:123.*HMS 0000-0001-0002-0001|HMS 0000-0001-0002-0001.*print_error:123/);
   assertNoDispatch(events);
 });
 
@@ -1091,6 +1101,72 @@ test("clearing a print error also closes its dialog like Bambu Studio (uiop), af
   const viaBridge = await signed.printer.clearHmsErrors(host, serial, token, async (_active, beforeDispatch, command) => { await beforeDispatch(); dispatched.push(command); return { status: "success" }; });
   assert.deepEqual(dispatched.map(command => Object.keys(command)[0] + "." + Object.values(command)[0].command), ["print.clean_print_error", "system.uiop"]);
   assert.equal(viaBridge.closedErrorDialog, "0500400E");
+});
+
+test("the print preflight names hidden HMS notices that do not block printing", async () => {
+  const prompts = [];
+  const printer = new BambuImplementation(async message => { prompts.push(message); return true; });
+  const inspection = { model: "x2d", nozzleDiameters: [0.4, 0.4], materials: ["PETG"], maxNozzleTemperature: 270, maxBedTemperature: 70, maxChamberTemperature: 0, sha256: "a".repeat(64) };
+  await printer.confirmPrintPreflight("20PTEST", { raw: { serial: "20PTEST", gcode_state: "IDLE", hms: [{ attr: 83887616, code: 131184 }] } }, inspection);
+  assert.match(prompts[0], /The printer also reports HMS 0500-0600-0002-0070, which Bambu lists for this model without text and never shows as a fault; it does not block printing/);
+  await printer.confirmPrintPreflight("20PTEST", { raw: { gcode_state: "IDLE", hms: [] } }, inspection);
+  assert.doesNotMatch(prompts[1], /also reports/);
+});
+
+for (const [stage, appearsOnRead] of [["confirmation recheck", 2], ["dispatch recheck", 3]]) {
+  test(`a hidden notice that first appears at the ${stage} stops the print until it is confirmed`, async (t) => {
+    // Only a confirmed print names its hidden notices; unattended prints pass them as warnings.
+    const previous = process.env.BAMBU_REQUIRE_CONFIRMATION;
+    process.env.BAMBU_REQUIRE_CONFIRMATION = "1";
+    t.after(() => { if (previous === undefined) delete process.env.BAMBU_REQUIRE_CONFIRMATION; else process.env.BAMBU_REQUIRE_CONFIRMATION = previous; });
+    // H2D (serial prefix 094) lists 0500-0100-0002-0003 without text.
+    const notice = { attr: 0x05000100, code: 0x00020003 };
+    const h2d = hms => ({ ...safetyStatus({ model: "h2d", nozzle: ["0.4", "0.4"], hms, sn: "094TESTSAFETY" }), serial: "094TESTSAFETY" });
+    const file = await fixture(t, { model: "h2d", nozzleDiameters: [0.4, 0.4] });
+    const { printer, events } = isolatedPrinter();
+    let reads = 0;
+    printer.getSafetyStatus = async () => h2d(++reads >= appearsOnRead ? [notice] : []);
+    const prompts = [];
+    printer.confirm = async message => { prompts.push(message); return true; };
+    const options = { projectName: "late-notice", filePath: file, bambuModel: "h2d", useAMS: false };
+    await assert.rejects(printer.print3mf(host, "094TESTSAFETY", token, options),
+      /reported HMS 0500-0100-0002-0003 after the print confirmation.*start the print again/);
+    assert.doesNotMatch(prompts[0], /also reports/);
+    assert.equal(events.some(({ action }) => action === "publish"), false, "an unnamed notice must stop the print before it is sent");
+
+    // The retry names the notice, and the print goes out.
+    printer.getSafetyStatus = async () => h2d([notice]);
+    await printer.print3mf(host, "094TESTSAFETY", token, options);
+    assert.match(prompts[1], /The printer also reports HMS 0500-0100-0002-0003/);
+    assert.equal(events.filter(({ action }) => action === "publish").length, 1);
+  });
+}
+
+test("an unattended print passes a hidden notice that appears after its preflight, as a warning", async (t) => {
+  const previous = process.env.BAMBU_REQUIRE_CONFIRMATION;
+  delete process.env.BAMBU_REQUIRE_CONFIRMATION;
+  t.after(() => { if (previous !== undefined) process.env.BAMBU_REQUIRE_CONFIRMATION = previous; });
+  const notice = { attr: 0x05000100, code: 0x00020003 };
+  const h2d = hms => ({ ...safetyStatus({ model: "h2d", nozzle: ["0.4", "0.4"], hms, sn: "094TESTSAFETY" }), serial: "094TESTSAFETY" });
+  const file = await fixture(t, { model: "h2d", nozzleDiameters: [0.4, 0.4] });
+  const { printer, events } = isolatedPrinter();
+  let reads = 0;
+  printer.getSafetyStatus = async () => h2d(++reads >= 2 ? [notice] : []);
+  const result = await printer.print3mf(host, "094TESTSAFETY", token, { projectName: "late-notice-unattended", filePath: file, bambuModel: "h2d", useAMS: false });
+  assert.equal(events.filter(({ action }) => action === "publish").length, 1);
+  assert.match(JSON.stringify(result.hmsWarnings ?? []), /0500-0100-0002-0003 \(Bambu lists it for this printer without text/);
+});
+
+test("clearing never records a hidden notice, and clear prompts show Bambu's HMS form", async () => {
+  const x2d = raw => ({ ...safetyStatus({ model: "x2d", nozzle: ["0.4", "0.4"], ...raw, sn: "20PTEST" }), serial: "20PTEST" });
+  const prompts = [];
+  const printer = new BambuImplementation(async message => { prompts.push(message); return true; });
+  printer.getSafetyStatus = async () => x2d({ hms: [{ attr: 83887616, code: 131184 }, { attr: 1, code: 0x20001 }] });
+  printer.getPrinter = async () => ({ publish: async () => {} });
+  const cleared = await printer.clearHmsErrors(host, "20PTEST", token);
+  assert.deepEqual(cleared.cleared_codes, ["hms:1:131073", "print_error:0"], "the hidden camera entry is not an error to clear");
+  assert.match(prompts[0], /HMS 0000-0001-0002-0001, print_error:0\?/);
+  assert.doesNotMatch(prompts[0], /0500-0600-0002-0070|83887616/);
 });
 
 test("changed hardware codes during confirmation are not cleared", async () => {

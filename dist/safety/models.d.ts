@@ -41,6 +41,7 @@ export declare function externalSpoolMapping(model: string, job: {
     usedFilamentPositions: number[];
     filamentMap?: number[];
     physicalExtruderMap?: number[];
+    filamentNozzleIndices?: number[];
 }): number[];
 /** Studio printer_type codes (resources/printers/<code>.json) and the serial prefixes they use. */
 export declare const PRINTER_TYPES: Readonly<Record<string, string>>;

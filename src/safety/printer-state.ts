@@ -1,3 +1,4 @@
+import { HIDDEN_HMS } from "./hidden-hms.js";
 import { BambuClient, GetVersionCommand } from "bambu-node";
 import { PUSHINFO_TIMEOUT_MS, lanPrinterReport, lastPushAllAt, notePushAll, pushAllMessage, pushAllMinIntervalMs } from "../printer-report.js";
 import { nextSequenceId } from "../sequence-id.js";
@@ -5,11 +6,11 @@ import { normalizeMaterial, normalizeModel } from "./limits.js";
 import { filamentProhibition } from "./filament-rules.js";
 import type { SliceNozzlePlan } from "./slice-info.js";
 import { printStartGates } from "./state-gates.js";
-import { DEPUTY_EXTRUDER_ID, DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, printerTypeModel, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
+import { DEPUTY_EXTRUDER_ID, DUAL_EXTRUDER_MODELS, MAIN_EXTRUDER_ID, NOZZLE_RACK_MODELS, printerTypeModel, externalHolderForExtruder, externalHolders, extruderCount, isExternalTray, physicalExtruderMap } from "./models.js";
 
 /** A safety check must run within this long of asking the printer for its state (Studio's PUSHINFO_TIMEOUT). */
 const MAX_REPORT_AGE_MS = PUSHINFO_TIMEOUT_MS;
-const SERIAL_MODELS: Record<string, string> = {
+export const SERIAL_MODELS: Record<string, string> = {
   "093": "H2S", "094": "H2D", "31B": "H2C", "239": "H2D Pro", "20P": "X2D",
   "00M": "X1C", "00W": "X1", "03W": "X1E", "01S": "P1P", "01P": "P1S", "22E": "P2S", "039": "A1", "030": "A1 Mini",
 };
@@ -145,6 +146,8 @@ export interface PrinterStateRequirements {
   nozzleFlows?: string[];
   /** Sliced (logical, left first) extruder to physical extruder id; Studio's default for dual-nozzle printers is [1,0]. */
   physicalExtruderMap?: number[];
+  /** Per filament: the physical nozzle (0 right/main, 1 left/deputy) from the plate headers' filament_map and physical_extruder_map. */
+  filamentNozzleIndices?: number[];
   /** Per filament: sliced extruder (1 = left, 2 = right), raw filament_type (e.g. PLA-CF) and Bambu filament id. */
   filamentMap?: number[];
   filamentTypes?: string[];
@@ -271,7 +274,83 @@ const hexCode = (value: number) => value.toString(16).toUpperCase().padStart(8, 
 // printer can't print. Every other fatal entry still blocks.
 const NON_FAULT_FATAL_HMS = new Set(["0500-0500-0001-0007"]);
 
-function validateErrors(raw: Record<string,any>, requireIdle: boolean, uploadOnly = false, resumableError?: number): string[] {
+const hiddenHmsSets = new Map(Object.entries(HIDDEN_HMS).map(([prefix, codes]) => [prefix, new Set(codes)]));
+
+type HmsEntry = { attr: number; code: number; severity: number; hex: string };
+function hmsCode(entry: any): HmsEntry | undefined {
+  const code = finiteNumber(entry?.code);
+  const attr = finiteNumber(entry?.attr);
+  const valid = (value: number | undefined): value is number => value !== undefined && Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
+  if (!valid(code) || !valid(attr)) return undefined;
+  // BambuStudio DevHMS.cpp: code >> 16; DevHMS.h: 1=fatal,2=serious,3=common,4=info.
+  return { attr, code, severity: Math.floor(code / 65536), hex: (attr.toString(16).padStart(8, "0") + code.toString(16).padStart(8, "0")).toUpperCase() };
+}
+
+const hmsLabel = (hex: string) => `HMS ${hex.slice(0, 4)}-${hex.slice(4, 8)}-${hex.slice(8, 12)}-${hex.slice(12)}`;
+const hmsKey = (entry: HmsEntry) => `hms:${entry.attr}:${entry.code}`;
+
+/** The one key format for a reported entry, shared by the gate and clear_hms_errors. */
+export function reportedHmsKey(entry: unknown): string {
+  const parsed = hmsCode(entry);
+  return parsed ? hmsKey(parsed) : `hms:${(entry as any)?.attr}:${(entry as any)?.code}`;
+}
+
+/** Bambu's display form of a cleared-code key such as "hms:83887616:131184"; other keys unchanged. */
+export function describeHmsKey(key: string): string {
+  const match = /^hms:(\d+):(\d+)$/.exec(key);
+  const entry = match ? hmsCode({ attr: Number(match[1]), code: Number(match[2]) }) : undefined;
+  return entry ? hmsLabel(entry.hex) : key;
+}
+
+/**
+ * A serious or common entry that Bambu lists for this serial prefix with empty
+ * text: Bambu Studio, Bambu Handy and the printer screen never show it, and
+ * the printer keeps printing with it (an X2D raises 0500-0600-0002-0070 at
+ * every boot). Bambu Studio selects the table by serial prefix, so this does
+ * too, but only when that prefix belongs to the verified model: a sparse report
+ * without a serial must not let a misconfigured serial pick another model's
+ * table. Fatal, invalid-level and unlisted entries never qualify.
+ */
+function isHiddenNotice(serial: string, model: string, entry: HmsEntry): boolean {
+  if (entry.severity !== 2 && entry.severity !== 3) return false;
+  const prefix = serial.trim().toUpperCase().slice(0, 3);
+  const normalized = normalizeModel(model);
+  if (!normalized || normalizeModel(SERIAL_MODELS[prefix] ?? "") !== normalized) return false;
+  return hiddenHmsSets.get(prefix)?.has(entry.hex) === true;
+}
+
+function hiddenHmsEntries(raw: unknown, serial: string, model: string): HmsEntry[] {
+  if (!object(raw)) return [];
+  const identity = observedIdentity(raw, serial);
+  if (!identity.observedSerial || identity.model !== normalizeModel(model)) return [];
+  const entries = Array.isArray(raw.hms) ? raw.hms : [];
+  const seen = new Set<string>();
+  return entries.map(hmsCode).filter((entry): entry is HmsEntry =>
+    !!entry && isHiddenNotice(identity.observedSerial, model, entry) && !seen.has(entry.hex) && !!seen.add(entry.hex));
+}
+
+/** Labels of reported entries that pass only because Bambu hides them for this printer. */
+export function hiddenHmsNotices(raw: unknown, serial: string, model: string): string[] {
+  return hiddenHmsEntries(raw, serial, model).map(entry => hmsLabel(entry.hex));
+}
+
+/** Cleared-code keys of reported hidden entries; clearing never removes them, so they are not re-acknowledged. */
+export function hiddenHmsKeys(raw: unknown, serial: string, model: string): string[] {
+  return hiddenHmsEntries(raw, serial, model).map(hmsKey);
+}
+
+const loggedHiddenNotices = new Set<string>();
+/** Name each hidden entry a check passed once per printer on stderr, so headless runs still record it. */
+function logHiddenNotices(raw: Record<string, any>, serial: string, model: string): void {
+  for (const entry of hiddenHmsEntries(raw, serial, model)) {
+    const key = `${serial}:${entry.hex}`;
+    if (loggedHiddenNotices.has(key)) continue;
+    loggedHiddenNotices.add(key);
+    console.error(`Printer ${serial} reports ${hmsLabel(entry.hex)}, which Bambu lists for it without text and never shows as a fault; it does not block operations.`);
+  }
+}
+
+function validateErrors(raw: Record<string,any>, requireIdle: boolean, uploadOnly = false, resumableError?: number, serial = "", model = ""): string[] {
   const state = typeof raw.gcode_state === "string" ? raw.gcode_state.toUpperCase() : "UNKNOWN";
   // FAILED is how Bambu firmware reports a stopped or failed job; the printer is idle and takes a new job (as from
   // Bambu Studio). Like FINISH it may leave a part on the bed, so it goes through the same bed-clearance check.
@@ -299,11 +378,14 @@ function validateErrors(raw: Record<string,any>, requireIdle: boolean, uploadOnl
     const label = wellFormed ? `HMS ${hex(attr!).slice(0, 4)}-${hex(attr!).slice(4)}-${hex(code!).slice(0, 4)}-${hex(code!).slice(4)}` : "";
     if (wellFormed && isMaintenanceReminder(attr!, code!)) { warnings.push(`${label} (maintenance reminder)`); continue; }
     if (wellFormed && NON_FAULT_FATAL_HMS.has(label.slice(4))) { warnings.push(`${label} (a refused unsigned command, not a printer fault)`); continue; }
+    const parsed = hmsCode(entry);
+    if (parsed && isHiddenNotice(serial, model, parsed)) { warnings.push(`${label} (Bambu lists it for this printer without text and never shows it; not a fault)`); continue; }
     const severity = wellFormed ? Math.floor(code! / 65536) : 0;
     if (severity === 2 || severity === 3) { warnings.push(`${label} (${severity === 2 ? "serious" : "common"})`); continue; }
     if (severity === 4) continue;
     throw new Error(`Printer reports ${severity === 1 ? "a fatal" : "an unknown or malformed"} HMS error${label ? ` (${label})` : ""}; inspect and resolve it before proceeding.`);
   }
+  logHiddenNotices(raw, serial, model);
   return warnings;
 }
 function trayRange(value: unknown, label: string): number | undefined {
@@ -335,9 +417,13 @@ function externalTray(raw: Record<string,any>, model: string, trayIndex: number)
     if (!selected) throw new Error(`External spool holder ${trayIndex} is not present in the fresh printer report.`);
     return selected;
   }
+  // A legacy vt_tray names one holder; it can't show which nozzle's holder it is, so a dual-nozzle printer must report
+  // its per-nozzle vir_slot list (as current firmware does).
+  if (dual) {
+    throw new Error(`Dual-nozzle external spool ${trayIndex} requires a fresh per-nozzle vir_slot report; legacy vt_tray can't verify the selected nozzle.`);
+  }
   if (!object(raw.vt_tray)) return undefined;
-  // A legacy vt_tray names one holder; on a dual-nozzle printer it says nothing about the other one.
-  return !dual || raw.vt_tray.id === undefined || Number(raw.vt_tray.id) === trayIndex ? raw.vt_tray : undefined;
+  return raw.vt_tray;
 }
 function mappedTray(raw: Record<string,any>, index: number): Record<string,any> {
   // BambuStudio DevFilaSystem::GetTrayIndexMap: AMS units 0-3 hold four trays each (index unit * 4 + slot); an AMS-HT
@@ -416,7 +502,7 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
   const identity = observedIdentity(raw, String(status.serial ?? ""));
   const model = normalizeModel(requirements.model);
   if (!model || !identity.model || model !== identity.model) throw new Error(`Printer model identity mismatch: requested ${requirements.model}, observed ${identity.model ?? "unknown"}.`);
-  const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false, requirements.uploadOnly === true, requirements.resumableError);
+  const hmsWarnings = validateErrors(raw, requirements.requireIdle !== false, requirements.uploadOnly === true, requirements.resumableError, identity.observedSerial ?? "", model);
   if (requirements.printStart && requirements.requireIdle !== false && !requirements.uploadOnly) {
     const positions = requirements.usedFilamentPositions ?? (requirements.materials ?? []).map((_, index) => index);
     hmsWarnings.push(...printStartGates(raw, {
@@ -543,14 +629,44 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
     const materials = requirements.materials ?? [];
     const positions = requirements.usedFilamentPositions ?? materials.map((_, index) => index);
     if (!positions.length) throw new Error("A declared material is required for each used filament or external spool.");
+    const dual = DUAL_EXTRUDER_MODELS.has(model);
+    // The physical nozzle a filament prints on: the plate headers' composed binding, else the sliced filament_map
+    // through physical_extruder_map. Both describe the same file, so they must agree.
+    const boundNozzle = (position: number): number | undefined => {
+      const composed = requirements.filamentNozzleIndices?.[position];
+      const logical = requirements.filamentMap?.[position];
+      const mapped = logical !== undefined ? physicalExtruderMap(model, requirements.physicalExtruderMap)[logical - 1] : undefined;
+      if (composed !== undefined && mapped !== undefined && composed !== mapped) {
+        throw new Error(`Filament ${position + 1}'s nozzle bindings disagree (plate headers: physical nozzle ${composed}, filament_map: ${mapped}); re-slice the job.`);
+      }
+      return composed ?? mapped;
+    };
     for (const position of positions) {
       const material = normalizeMaterial(materials[position]);
       if (!Number.isInteger(position) || position < 0 || !material) throw new Error(`A known declared material is required for filament position ${position}.`);
-      const trayIndex = requirements.useAMS ? requirements.amsMapping?.[position] : (requirements.amsMapping?.[position] ?? 254);
+      let trayIndex = requirements.amsMapping?.[position];
+      if (!requirements.useAMS && trayIndex === undefined) {
+        // External-only: the holder that feeds the filament's nozzle. A dual-nozzle printer with two usable holders
+        // needs the inspected binding to choose one; the H2C has one usable holder (254).
+        const holders = externalHolders(model);
+        const nozzle = dual ? boundNozzle(position) : undefined;
+        if (!dual) trayIndex = 254;
+        else if (nozzle !== undefined) trayIndex = externalHolderForExtruder(model, nozzle);
+        else if (holders.length === 1) trayIndex = holders[0];
+        else throw new Error(`The external spool for filament ${position + 1} is ambiguous on the ${model.toUpperCase()}: the job has no filament_map and physical_extruder_map binding to choose holder 254 (left) or 255 (right). Pass ams_slots or re-slice with a filament map.`);
+      }
       if (trayIndex === undefined || !Number.isInteger(trayIndex) || trayIndex < 0 || trayIndex > 255) throw new Error(`Complete AMS mapping is required for filament position ${position}.`);
-      if (!requirements.useAMS && !isExternalTray(trayIndex)) throw new Error(`Filament position ${position} must map to an external spool holder when AMS is off.`);
+      if (!requirements.useAMS && !isExternalTray(trayIndex)) throw new Error(`Filament position ${position} must map to an external spool holder when AMS is off (AMS trays require use_ams:true).`);
       const tray = isExternalTray(trayIndex) ? externalTray(raw,model,trayIndex) : mappedTray(raw,trayIndex);
-      if (DUAL_EXTRUDER_MODELS.has(model) && !requirements.usedNozzleIndices) assertFeedsExtruder(raw, model, trayIndex, physicalExtruderMap(model, requirements.physicalExtruderMap)[(requirements.filamentMap?.[position] ?? 1) - 1], position);
+      if (dual && !requirements.usedNozzleIndices) {
+        const nozzle = boundNozzle(position);
+        // An external holder feeds one nozzle; with two usable holders, picking one needs the job's binding.
+        if (nozzle === undefined && isExternalTray(trayIndex) && externalHolders(model).length > 1) {
+          throw new Error(`External spool ${trayIndex} for filament ${position + 1} needs a verified physical nozzle binding (the job's filament_map and physical_extruder_map); re-slice the job or map an AMS tray.`);
+        }
+        // Otherwise Studio's default filament_map (1, the left extruder) applies.
+        assertFeedsExtruder(raw, model, trayIndex, nozzle ?? physicalExtruderMap(model, requirements.physicalExtruderMap)[0], position);
+      }
       const reportedType = typeof tray?.tray_type === "string" ? tray.tray_type.trim() : "";
       if (reportedType && normalizeMaterial(reportedType) !== material) throw new Error(`Reported material ${reportedType} in slot ${trayIndex} contradicts declared ${materials[position]}.`);
       // A present tray whose type was never set (no RFID tag, nothing entered): Studio shows it as unset, so the

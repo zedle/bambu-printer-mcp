@@ -1,4 +1,15 @@
-export function normalizeBridgeAmsTrayValue(value: unknown, label: string): number {
+/**
+ * Tray-value options. `dualNozzle` names a printer with one external holder per nozzle (254 left/deputy, 255
+ * right/main, Bambu Studio's VIRTUAL_TRAY_DEPUTY_ID / VIRTUAL_TRAY_MAIN_ID). Single-nozzle printers have one holder,
+ * which current firmware reports as 255 and the MCP has historically called 254, so both values are accepted there too.
+ */
+export interface AmsTrayValueOptions { dualNozzle?: boolean }
+
+export function describeAmsTrayRange(_options: AmsTrayValueOptions = {}): string {
+  return "[-1, 15] (absolute tray), 128-135 (AMS-HT) or 254/255 (external spool)";
+}
+
+export function normalizeBridgeAmsTrayValue(value: unknown, label: string, options: AmsTrayValueOptions = {}): number {
   let numeric: number;
   if (typeof value === "number") {
     numeric = value;
@@ -18,7 +29,7 @@ export function normalizeBridgeAmsTrayValue(value: unknown, label: string): numb
     numeric > 255
   ) {
     throw new Error(
-      `${label} must be an integer in [-1, 15] (absolute tray), 128-135 (AMS-HT) or 254/255 (external spool); got ${JSON.stringify(value)}`
+      `${label} must be an integer in ${describeAmsTrayRange(options)}; got ${JSON.stringify(value)}`
     );
   }
 
@@ -30,7 +41,7 @@ function isNumericMappingKey(key: string): boolean {
   return Number.isInteger(numeric) && numeric >= 0;
 }
 
-export function normalizeAmsMappingObject(mapping: Record<string, unknown>, label = "ams_mapping"): number[] {
+export function normalizeAmsMappingObject(mapping: Record<string, unknown>, label = "ams_mapping", options: AmsTrayValueOptions = {}): number[] {
   return Object.entries(mapping)
     .sort(([leftKey], [rightKey]) => {
       const leftNumeric = isNumericMappingKey(leftKey);
@@ -40,7 +51,7 @@ export function normalizeAmsMappingObject(mapping: Record<string, unknown>, labe
       if (rightNumeric) return 1;
       return 0;
     })
-    .map(([key, value]) => normalizeBridgeAmsTrayValue(value, `${label}[${key}]`));
+    .map(([key, value]) => normalizeBridgeAmsTrayValue(value, `${label}[${key}]`, options));
 }
 
 export function hasAmsMappingInput(value: unknown): boolean {
@@ -59,13 +70,36 @@ export function hasAmsMappingInput(value: unknown): boolean {
  * so the MCP's 254 for it is encoded as 255 there.
  */
 export function studioTrayMapping(mapping: number[], singleExtruder: boolean): { v0: number[]; v1: { ams_id: number; slot_id: number }[]; trays: number[] } {
-  const trays = mapping.map(tray => (singleExtruder && (tray === 254 || tray === 255) ? 255 : tray));
-  const v0 = trays.map(tray => (tray === 254 || tray === 255 ? -1 : tray));
-  const v1 = trays.map(tray => {
-    if (tray < 0) return { ams_id: 255, slot_id: 255 };
-    if (tray === 254 || tray === 255) return { ams_id: tray, slot_id: 0 };
-    if (tray >= 128) return { ams_id: tray, slot_id: 0 };
-    return { ams_id: Math.floor(tray / 4), slot_id: tray % 4 };
-  });
-  return { v0, v1, trays };
+  const trays = mapping.map(tray => studioTray(tray, !singleExtruder));
+  return { v0: trays.map(tray => bridgeAmsMappingValue(tray, !singleExtruder)), v1: trays.map(tray => bridgeAmsMapping2Entry(tray, !singleExtruder)), trays };
+}
+
+/** The tray id Studio uses: a single-nozzle printer's one external holder is 255. */
+function studioTray(tray: number, dualNozzle: boolean): number {
+  return !dualNozzle && (tray === 254 || tray === 255) ? 255 : tray;
+}
+
+/** One v0 (flat ams_mapping) entry: external holders and unused filaments are -1. */
+export function bridgeAmsMappingValue(value: number, dualNozzle = false): number {
+  const tray = studioTray(value, dualNozzle);
+  return tray === 254 || tray === 255 ? -1 : tray;
+}
+
+/** One v1 (ams_mapping2) entry: {tray / 4, tray % 4}, an AMS-HT unit as {unit, 0}, a holder as {254|255, 0}, unused {255, 255}. */
+export function bridgeAmsMapping2Entry(value: number, dualNozzle = false): { ams_id: number; slot_id: number } {
+  const tray = studioTray(value, dualNozzle);
+  if (tray < 0) return { ams_id: 255, slot_id: 255 };
+  if (tray === 254 || tray === 255 || tray >= 128) return { ams_id: tray, slot_id: 0 };
+  return { ams_id: Math.floor(tray / 4), slot_id: tray % 4 };
+}
+
+/**
+ * The external holder that feeds a physical nozzle (0 right/main: 255, 1 left/deputy: 254). Dual-nozzle printers need
+ * the inspected nozzle binding; single-nozzle printers have one holder (the MCP's 254).
+ */
+export function externalTrayForNozzle(nozzle: number | undefined, dualNozzle = false): number {
+  if (!dualNozzle) return 254;
+  if (nozzle === 0) return 255;
+  if (nozzle === 1) return 254;
+  throw new Error("External-spool printing requires inspected filament_map and physical_extruder_map nozzle bindings.");
 }
