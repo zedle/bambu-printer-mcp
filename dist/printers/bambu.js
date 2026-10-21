@@ -170,8 +170,9 @@ const jobStem = (value) => typeof value === "string" ? path.posix.basename(value
  * - rejected: a new HMS 0500-0500-0001-0007 (an unsigned command refused);
  * - failed: the printer's project_file reply says "fail" (Studio: "Failed to start printing job"), or this job is
  *   reported FAILED, or a new print_error appeared;
- * - started: a printing state for this job: its name as subtask_name or gcode_file, a new task id, or (when the
- *   report or pushed delta names no job) a printer that was idle before.
+ * - started: a printing state for this job: one of its names as subtask_name or gcode_file (a cloud job is reported by
+ *   its project name, not the uploaded file), a new task id, or (when the report or pushed delta names no job) a
+ *   printer that was idle before.
  */
 export function judgeDispatchReport(report, before, jobName) {
     if (!report || typeof report !== "object")
@@ -186,8 +187,8 @@ export function judgeDispatchReport(report, before, jobName) {
         return { kind: "failed", message: `The printer refused to start the job ("Failed to start printing job"${report.reason ? `: ${String(report.reason)}` : ""}). Nothing is printing; check get_printer_status before printing again.` };
     }
     const names = [report.subtask_name, report.gcode_file].map(jobStem).filter((name) => !!name);
-    const wanted = jobStem(jobName);
-    const ours = wanted ? names.includes(wanted) : false;
+    const wanted = [jobName ?? []].flat().map(jobStem).filter((name) => !!name);
+    const ours = names.some(name => wanted.includes(name));
     const namesOther = names.length > 0 && !ours;
     const newTask = ["task_id", "subtask_id"].some(key => report[key] !== undefined && before?.[key] !== undefined && String(report[key]) !== String(before[key]) && String(report[key]) !== "0");
     const state = String(report.gcode_state ?? "").toUpperCase();

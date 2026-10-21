@@ -213,10 +213,11 @@ const jobStem = (value: unknown) => typeof value === "string" ? path.posix.basen
  * - rejected: a new HMS 0500-0500-0001-0007 (an unsigned command refused);
  * - failed: the printer's project_file reply says "fail" (Studio: "Failed to start printing job"), or this job is
  *   reported FAILED, or a new print_error appeared;
- * - started: a printing state for this job: its name as subtask_name or gcode_file, a new task id, or (when the
- *   report or pushed delta names no job) a printer that was idle before.
+ * - started: a printing state for this job: one of its names as subtask_name or gcode_file (a cloud job is reported by
+ *   its project name, not the uploaded file), a new task id, or (when the report or pushed delta names no job) a
+ *   printer that was idle before.
  */
-export function judgeDispatchReport(report: any, before: any, jobName: string | undefined): DispatchVerdict | undefined {
+export function judgeDispatchReport(report: any, before: any, jobName: string | string[] | undefined): DispatchVerdict | undefined {
   if (!report || typeof report !== "object") return undefined;
   const hmsKey = (entry: any) => `${Number(entry?.attr)}:${Number(entry?.code)}:${entry?.timestamp ?? ""}`;
   const known = new Set((Array.isArray(before?.hms) ? before.hms : []).map(hmsKey));
@@ -227,8 +228,8 @@ export function judgeDispatchReport(report: any, before: any, jobName: string | 
     return { kind: "failed", message: `The printer refused to start the job ("Failed to start printing job"${report.reason ? `: ${String(report.reason)}` : ""}). Nothing is printing; check get_printer_status before printing again.` };
   }
   const names = [report.subtask_name, report.gcode_file].map(jobStem).filter((name): name is string => !!name);
-  const wanted = jobStem(jobName);
-  const ours = wanted ? names.includes(wanted) : false;
+  const wanted = [jobName ?? []].flat().map(jobStem).filter((name): name is string => !!name);
+  const ours = names.some(name => wanted.includes(name));
   const namesOther = names.length > 0 && !ours;
   const newTask = ["task_id", "subtask_id"].some(key => report[key] !== undefined && before?.[key] !== undefined && String(report[key]) !== String(before[key]) && String(report[key]) !== "0");
   const state = String(report.gcode_state ?? "").toUpperCase();
@@ -1939,7 +1940,7 @@ export class BambuImplementation {
    * boards): a new command-verification HMS means the firmware refused the
    * command; PREPARE/SLICING/RUNNING for this job means it started. Attach before publishing.
    */
-  private watchDispatch(printer: any, host: string, serial: string, token: string, before: any, assertActive: () => void, jobName?: string, sequenceId?: string):
+  private watchDispatch(printer: any, host: string, serial: string, token: string, before: any, assertActive: () => void, jobName?: string | string[], sequenceId?: string):
     { settled: () => Promise<"started" | "unconfirmed">; dispose: () => void; reply: () => CommandReply | undefined } {
     const windowMs = dispatchCheckMs();
     let reply: CommandReply | undefined;
@@ -2003,7 +2004,7 @@ export class BambuImplementation {
    * pushall interval, 3 s) for up to BAMBU_DISPATCH_CHECK_MS. "started" needs this job's name in the report or a
    * new task id with a printing state; a refusal or a failed start throws; otherwise "unconfirmed".
    */
-  async confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string, assertActive: () => void,
+  async confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string | string[], assertActive: () => void,
     replies?: { poll: () => Promise<CommandReply | undefined>; reply?: CommandReply }): Promise<"started" | "unconfirmed"> {
     const deadline = Date.now() + dispatchCheckMs();
     const cancelled = () => { try { assertActive(); return false; } catch { return true; } };

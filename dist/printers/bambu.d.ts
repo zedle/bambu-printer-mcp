@@ -97,10 +97,11 @@ type DispatchVerdict = {
  * - rejected: a new HMS 0500-0500-0001-0007 (an unsigned command refused);
  * - failed: the printer's project_file reply says "fail" (Studio: "Failed to start printing job"), or this job is
  *   reported FAILED, or a new print_error appeared;
- * - started: a printing state for this job: its name as subtask_name or gcode_file, a new task id, or (when the
- *   report or pushed delta names no job) a printer that was idle before.
+ * - started: a printing state for this job: one of its names as subtask_name or gcode_file (a cloud job is reported by
+ *   its project name, not the uploaded file), a new task id, or (when the report or pushed delta names no job) a
+ *   printer that was idle before.
  */
-export declare function judgeDispatchReport(report: any, before: any, jobName: string | undefined): DispatchVerdict | undefined;
+export declare function judgeDispatchReport(report: any, before: any, jobName: string | string[] | undefined): DispatchVerdict | undefined;
 /**
  * The printer's reply to a print command (project_file / gcode_file): a refusal ("fail", a non-zero err_code) means
  * the job didn't start (Bambu Studio's "Failed to start printing job"); an accepted reply alone doesn't prove it did.
@@ -277,7 +278,7 @@ export declare class BambuImplementation {
      * pushall interval, 3 s) for up to BAMBU_DISPATCH_CHECK_MS. "started" needs this job's name in the report or a
      * new task id with a printing state; a refusal or a failed start throws; otherwise "unconfirmed".
      */
-    confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string, assertActive: () => void, replies?: {
+    confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string | string[], assertActive: () => void, replies?: {
         poll: () => Promise<CommandReply | undefined>;
         reply?: CommandReply;
     }): Promise<"started" | "unconfirmed">;

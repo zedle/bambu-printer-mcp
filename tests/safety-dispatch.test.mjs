@@ -581,6 +581,8 @@ test("with the bridge as default, print_3mf lan_mqtt_ftps goes through the signe
 
 for (const [name, afterPrint, status, dispatch] of [
   ["the printer reports the job running", { gcode_state: "RUNNING" }, "success", "started"],
+  // A cloud job is reported by its project name and the plate inside the project, with no new task id in the report.
+  ["the printer reports the cloud job running by its project name", { gcode_state: "RUNNING", subtask_name: "job.gcode", gcode_file: "/data/Metadata/plate_1.gcode" }, "success", "started"],
   ["the printer runs a different job", { gcode_state: "RUNNING", subtask_name: "someone else's part" }, "dispatched_unconfirmed", "unconfirmed"],
   ["the printer stays idle", {}, "dispatched_unconfirmed", "unconfirmed"],
 ]) test(`a bridge print returning 0 is confirmed from the printer: ${name}`, async (t) => {
