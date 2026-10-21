@@ -6,7 +6,7 @@ import { lanPrinterReport, mergeReport, requestPushAll } from "../printer-report
 import { assertCommandAccepted, commandReplyFailure, commandReplyWaitMs, commandSequenceId, matchCommandReply, printerReplyField, withCommandReply, withPrinterReplyField, type CommandReply } from "../command-reply.js";
 import { assertAmsDryingSupported, buildAmsDryingCommand, hexFlagBit, normalizeAmsDryingRequest } from "../ams-drying.js";
 import fs from "node:fs/promises";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { Readable } from "node:stream";
@@ -803,9 +803,28 @@ class BambuClientStore {
 /** What confirmPrintPreflight showed (and, with BAMBU_REQUIRE_CONFIRMATION=1, a person confirmed), checked again before dispatch. */
 export type PrintPreflight = { finishedJob?: string; serial: string; model: string; notices: string[]; confirmed: boolean };
 
+/** A job this server inspected and started: every name the printer may report it by, and what it was checked against. */
+type CheckedJob = { names: string[]; requirements: PrinterStateRequirements };
+
+/** Checked jobs live in a private state file, so a restarted (or second) server can still resume the jobs it started. */
+function checkedJobsPath(): string {
+  const dir = process.env.BAMBU_STATE_DIR || path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "bambu-printer-mcp");
+  return path.join(dir, "checked-jobs.json");
+}
+
+function readCheckedJobs(): Record<string, CheckedJob> {
+  let saved: any;
+  try { saved = JSON.parse(readFileSync(checkedJobsPath(), "utf8")); } catch { return {}; }
+  if (!saved || typeof saved !== "object") return {};
+  return Object.fromEntries(Object.entries(saved).filter(([, job]: [string, any]) =>
+    Array.isArray(job?.names) && job.names.length > 0 && job.names.every((name: unknown) => typeof name === "string") &&
+    job.requirements && typeof job.requirements === "object")) as Record<string, CheckedJob>;
+}
+
 export class BambuImplementation {
   private printerStore: BambuClientStore;
-  private checkedJobs = new Map<string, { remotePath: string; requirements: PrinterStateRequirements }>();
+  // Only for records the state file could not take; the file is read on every use, so other servers' changes show.
+  private unsavedJobs = new Map<string, CheckedJob>();
   private clearedErrors = new Map<string, string[]>();
 
   constructor(private readonly confirm?: (message: string) => Promise<boolean>) {
@@ -870,9 +889,36 @@ export class BambuImplementation {
   }
 
   /** Internal handoff from a successful inspected transport; never exposed as an MCP tool. */
-  recordCheckedJob(host: string, serial: string, remotePath: string, requirements: PrinterStateRequirements): void {
-    this.checkedJobs.set(`${host}\n${serial}`, { remotePath, requirements: structuredClone(requirements) });
+  recordCheckedJob(host: string, serial: string, remotePath: string, requirements: PrinterStateRequirements, reportedNames: string[] = []): void {
+    // A cloud job is reported by its project name (subtask_name), not by the uploaded file.
+    const names = [...new Set([remotePath, ...reportedNames].filter(name => typeof name === "string" && jobStem(name)))];
+    this.saveCheckedJob(`${host}\n${serial}`, { names, requirements: structuredClone(requirements) });
     this.clearedErrors.delete(serial);
+  }
+
+  private checkedJob(host: string, serial: string): CheckedJob | undefined {
+    const key = `${host}\n${serial}`;
+    return readCheckedJobs()[key] ?? this.unsavedJobs.get(key);
+  }
+
+  private forgetCheckedJob(host: string, serial: string): void {
+    this.saveCheckedJob(`${host}\n${serial}`, undefined);
+  }
+
+  private saveCheckedJob(key: string, job: CheckedJob | undefined): void {
+    const file = checkedJobsPath();
+    const jobs = readCheckedJobs();
+    if (job) jobs[key] = job; else delete jobs[key];
+    try {
+      mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+      const temporary = `${file}.${process.pid}.tmp`;
+      writeFileSync(temporary, JSON.stringify(jobs), { mode: 0o600 });
+      renameSync(temporary, file);
+      this.unsavedJobs.delete(key);
+    } catch (error) {
+      console.error(`Could not save the checked-job record to ${file}; only this server can resume it: ${(error as Error).message}`);
+      if (job) this.unsavedJobs.set(key, job); else this.unsavedJobs.delete(key);
+    }
   }
 
   private validateLoadedGcodeState(status: any, inspection: Awaited<ReturnType<typeof inspectPrintFile>>): { requirements: PrinterStateRequirements; hmsWarnings: string[] } {
@@ -1230,7 +1276,7 @@ export class BambuImplementation {
       const gcodeFileCmd = await bambuNodeMessage(new GCodeFileCommand({ fileName: remoteProjectPath }));
       const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath, commandSequenceId(gcodeFileCmd));
       try { await publishWithoutAck(printer, gcodeFileCmd); } catch (error) { watcher.dispose(); throw error; }
-      this.recordCheckedJob(host, serial, remoteProjectPath, requirements);
+      this.recordCheckedJob(host, serial, remoteProjectPath, requirements, [options.projectName]);
       const dispatch = await watcher.settled();
       return withHmsWarnings({
         status: dispatchStatusLabel(dispatch), dispatch, remoteProjectPath, ...dispatchReplyField(watcher.reply()),
@@ -1270,7 +1316,7 @@ export class BambuImplementation {
 
     const watcher = this.watchDispatch(printer, host, serial, token, dispatchStatus, assertActive, remoteProjectPath, commandSequenceId(projectFileCmd));
     try { await printer.publish(projectFileCmd); } catch (error) { watcher.dispose(); throw error; }
-    this.recordCheckedJob(host, serial, remoteProjectPath, requirements);
+    this.recordCheckedJob(host, serial, remoteProjectPath, requirements, [options.projectName]);
     await new Promise((resolve) => setTimeout(resolve, 300));
     const dispatch = await watcher.settled();
 
@@ -1293,13 +1339,13 @@ export class BambuImplementation {
 
   async cancelJob(host: string, serial: string, token: string, dispatch?: () => Promise<any>): Promise<any> {
     cancelPendingPrinterOperations(host, serial);
-    this.checkedJobs.delete(`${host}\n${serial}`);
+    this.forgetCheckedJob(host, serial);
     const printer = dispatch ? undefined : await this.getPrinter(host, serial, token);
 
     try {
       if (dispatch) return await dispatch();
       const sent = await sendCommand(printer!, new UpdateStateCommand({ state: "stop" }), 1);
-      this.checkedJobs.delete(`${host}\n${serial}`);
+      this.forgetCheckedJob(host, serial);
       return withCommandReply({ status: "success", message: "Cancel command sent successfully." }, sent.reply, sent.waitedMs);
     } catch (error) {
       throw new Error(`Failed to cancel print: ${(error as Error).message}`);
@@ -1370,8 +1416,8 @@ export class BambuImplementation {
 
   async resumeJob(host: string, serial: string, token: string, dispatch?: (assertActive: () => void, beforeDispatch: () => Promise<void>, command: { print: Record<string, unknown> }) => Promise<any>): Promise<any> {
     return withPrinterOperation(host, serial, async assertActive => {
-      const checked = this.checkedJobs.get(`${host}\n${serial}`);
-      if (!checked) throw new Error("Resume requires a job inspected and started by this server instance. Verify other jobs on the printer before resuming them there.");
+      const checked = this.checkedJob(host, serial);
+      if (!checked) throw new Error("Resume requires a job inspected and started by this server. Verify other jobs on the printer before resuming them there.");
       let command: { print: Record<string, unknown> } | undefined;
       const beforeDispatch = async () => {
         assertActive();
@@ -1381,6 +1427,10 @@ export class BambuImplementation {
         // Resume for that code (hms_action list); a plain resume is for a pause the person made.
         const resumable = Number.isInteger(printError) && printError > 0 && printErrorResumable(serial, printError) ? printError : undefined;
         validatePrinterState(status, { ...checked.requirements, requireIdle: false, resumableError: resumable });
+        const names = [status.raw.gcode_file, status.raw.subtask_name].map(jobStem).filter((name): name is string => !!name);
+        const ours = names.some(name => checked.names.some(known => jobStem(known) === name));
+        // The record ends with its job: a printer that finished or went idle, or a report naming another job.
+        if (["IDLE", "FINISH", "FAILED"].includes(String(status.raw.gcode_state)) || (names.length && !ours)) this.forgetCheckedJob(host, serial);
         if (status.raw.gcode_state !== "PAUSE") throw new Error("Resume requires a freshly reported paused job.");
         // MachineObject::check_resume_condition: job_attr bits 4-7 above 1 is a processing task (laser, cutting).
         const jobAttr = Number(status.raw.job_attr);
@@ -1388,9 +1438,7 @@ export class BambuImplementation {
         const next = buildResumeCommand(status.raw, command?.print.sequence_id as string | undefined);
         if (command && JSON.stringify(command) !== JSON.stringify(next)) throw new Error("The printer's error state changed before resuming. Check get_printer_status and retry.");
         command = next;
-        const stem = (value: string) => path.posix.basename(value).replace(/(?:\.gcode)?\.3mf$|\.gcode$/i, "");
-        const names = [status.raw.gcode_file, status.raw.subtask_name].filter(value => typeof value === "string");
-        if (!names.some(value => stem(value) === stem(checked.remotePath))) throw new Error("Paused job identity does not match this server's inspected artifact.");
+        if (!ours) throw new Error("Paused job identity does not match this server's inspected artifact.");
         assertActive();
       };
       await beforeDispatch();
@@ -1942,7 +1990,7 @@ export class BambuImplementation {
   private settleDispatch(host: string, serial: string, verdict: DispatchVerdict | undefined, cancelled: boolean): "started" | "unconfirmed" {
     if (verdict?.kind === "rejected" || verdict?.kind === "failed") {
       // Nothing started, so there is no checked job to resume or clear later.
-      this.checkedJobs.delete(`${host}\n${serial}`);
+      this.forgetCheckedJob(host, serial);
       throw new Error(verdict.kind === "rejected" ? COMMAND_REJECTED_MESSAGE : verdict.message);
     }
     if (verdict?.kind === "cancelled" || cancelled) throw new Error(DISPATCH_CANCELLED_MESSAGE);

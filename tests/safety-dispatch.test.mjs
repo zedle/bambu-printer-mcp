@@ -403,7 +403,11 @@ test("remote start uploads and starts a uniquely named copy of the inspected dow
   assert.match(JSON.stringify(events.find(({ action }) => action === "publish").payload), new RegExp(path.posix.basename(upload.remote).replaceAll(".", "\\.")));
 });
 
-test("resume refuses a job this server has not inspected before connecting", async () => {
+test("resume refuses a job this server has not inspected before connecting", async (t) => {
+  const previous = process.env.BAMBU_STATE_DIR;
+  const empty = await fs.mkdtemp(path.join(os.tmpdir(), "bambu-state-empty-"));
+  process.env.BAMBU_STATE_DIR = empty;
+  t.after(() => { process.env.BAMBU_STATE_DIR = previous; return fs.rm(empty, { recursive: true, force: true }); });
   const { printer, events } = isolatedPrinter(safetyStatus({ state: "PAUSE" }));
   await assert.rejects(printer.resumeJob(host, serial, token), /inspect|server instance|verified/i);
   assert.deepEqual(events, []);
@@ -535,12 +539,12 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
       return ${JSON.stringify(bridgeResponse)};
     };`}
   `);
-  const transport = new StdioClientTransport({ command: process.execPath, args: ["--import", preload, path.join(root, "dist/index.js")], cwd: dir, stderr: "pipe", env: { ...process.env, MCP_TRANSPORT: "stdio", BAMBU_MODEL: "", BAMBU_PRINTER_MODEL: "", BAMBU_PRINTER_HOST: host, BAMBU_PRINTER_SERIAL: serial, BAMBU_SERIAL: serial, BAMBU_PRINTER_ACCESS_TOKEN: token, BAMBU_TOKEN: token, BAMBU_DEV_ID: serial, BAMBU_NETWORK_BRIDGE_COMMAND: "", BAMBU_DEFAULT_CONNECTION_MODE: "", ...env } });
+  const transport = new StdioClientTransport({ command: process.execPath, args: ["--import", preload, path.join(root, "dist/index.js")], cwd: dir, stderr: "pipe", env: { ...process.env, MCP_TRANSPORT: "stdio", BAMBU_MODEL: "", BAMBU_PRINTER_MODEL: "", BAMBU_PRINTER_HOST: host, BAMBU_PRINTER_SERIAL: serial, BAMBU_SERIAL: serial, BAMBU_PRINTER_ACCESS_TOKEN: token, BAMBU_TOKEN: token, BAMBU_DEV_ID: serial, BAMBU_NETWORK_BRIDGE_COMMAND: "", BAMBU_DEFAULT_CONNECTION_MODE: "", BAMBU_STATE_DIR: dir, ...env } });
   const client = new Client({ name: "safety-dispatch-tests", version: "1" }, { capabilities: { elicitation: { form: {} } } });
   client.setRequestHandler(ElicitRequestSchema, async () => ({ action: "accept", content: { confirmed: true } }));
   t.after(() => client.close());
   await client.connect(transport);
-  return { client, eventsPath, releaseAgent: () => fs.writeFile(releasePath, "release"), setReportedStatus: reported => fs.writeFile(statusPath, JSON.stringify(reported)) };
+  return { client, eventsPath, stateDir: env.BAMBU_STATE_DIR ?? dir, releaseAgent: () => fs.writeFile(releasePath, "release"), setReportedStatus: reported => fs.writeFile(statusPath, JSON.stringify(reported)) };
 }
 
 const bridgeMode = { BAMBU_DEFAULT_CONNECTION_MODE: "bambu_network", BAMBU_NETWORK_BRIDGE_COMMAND: "fake-bridge" };
@@ -725,6 +729,53 @@ for (const [description, changedReport, expected] of [
     assert.equal(await fs.readFile(server.eventsPath, "utf8"), "", "a failed resume must not publish or dispatch");
   });
 }
+
+async function resumeOnServer(server, reported) {
+  await server.setReportedStatus({ gcode_state: "PAUSE", ...reported });
+  await fs.writeFile(server.eventsPath, "");
+  const resumed = await server.client.callTool({ name: "resume_print", arguments: {} });
+  return { resumed, events: await readEvents(server.eventsPath) };
+}
+
+// A cloud job is reported by its project name and the plate inside the project, not by the uploaded file.
+const cloudReport = { subtask_name: "job.gcode", gcode_file: "/data/Metadata/plate_1.gcode" };
+
+test("a verified cloud bridge job reported by its project name resumes", async (t) => {
+  const server = await startBridgeJob(t);
+  assert.notEqual(server.result.isError, true, server.result.content?.[0]?.text);
+  const { resumed, events } = await resumeOnServer(server, cloudReport);
+  assert.notEqual(resumed.isError, true, resumed.content?.[0]?.text);
+  assert.deepEqual(events.map(event => event.action), ["publish"]);
+  assert.equal(events[0].payload.print.command, "resume");
+});
+
+test("a restarted server resumes the paused job the previous server started", async (t) => {
+  const first = await startBridgeJob(t);
+  assert.notEqual(first.result.isError, true, first.result.content?.[0]?.text);
+  await first.client.close();
+  const record = path.join(first.stateDir, "checked-jobs.json");
+  assert.equal((await fs.stat(record)).mode & 0o777, 0o600, "the checked-job record is private");
+  const restarted = await interceptedMcp(t, { env: { BAMBU_STATE_DIR: first.stateDir } });
+  const { resumed, events } = await resumeOnServer(restarted, cloudReport);
+  assert.notEqual(resumed.isError, true, resumed.content?.[0]?.text);
+  assert.deepEqual(events.map(event => event.action), ["publish"]);
+});
+
+test("a restarted server refuses a different paused job and forgets the ended record", async (t) => {
+  const first = await startBridgeJob(t);
+  assert.notEqual(first.result.isError, true, first.result.content?.[0]?.text);
+  await first.client.close();
+  const restarted = await interceptedMcp(t, { env: { BAMBU_STATE_DIR: first.stateDir } });
+  const other = await resumeOnServer(restarted, { subtask_name: "someone else's part.gcode", gcode_file: "/data/Metadata/plate_1.gcode" });
+  assert.equal(other.resumed.isError, true);
+  assert.match(other.resumed.content?.[0]?.text ?? "", /identity|artifact|match/i);
+  assert.deepEqual(other.events, [], "a refused resume must not publish");
+  // The printer moved on to another job, so the old record no longer authorizes anything.
+  const again = await resumeOnServer(restarted, cloudReport);
+  assert.equal(again.resumed.isError, true);
+  assert.match(again.resumed.content?.[0]?.text ?? "", /inspected and started/i);
+  assert.deepEqual(again.events, []);
+});
 
 test("a rejected bridge start cannot authorize a later resume", async (t) => {
   const server = await startBridgeJob(t, { bridgeResponse: { ok: true, value: -1 } });

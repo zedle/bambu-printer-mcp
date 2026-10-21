@@ -152,7 +152,7 @@ export type PrintPreflight = {
 export declare class BambuImplementation {
     private readonly confirm?;
     private printerStore;
-    private checkedJobs;
+    private unsavedJobs;
     private clearedErrors;
     constructor(confirm?: ((message: string) => Promise<boolean>) | undefined);
     confirmHardwareAction(message: string, _physicalCheck?: boolean): Promise<void>;
@@ -170,7 +170,10 @@ export declare class BambuImplementation {
     assertBedClearance(status: any, preflight: PrintPreflight): void;
     private getPrinter;
     /** Internal handoff from a successful inspected transport; never exposed as an MCP tool. */
-    recordCheckedJob(host: string, serial: string, remotePath: string, requirements: PrinterStateRequirements): void;
+    recordCheckedJob(host: string, serial: string, remotePath: string, requirements: PrinterStateRequirements, reportedNames?: string[]): void;
+    private checkedJob;
+    private forgetCheckedJob;
+    private saveCheckedJob;
     private validateLoadedGcodeState;
     /** Validate a fresh report for a print: loaded-filament checks for a legacy gcode_file job, the mapped checks otherwise. */
     private validatePrintState;

@@ -116,7 +116,7 @@ console.log('native_print result=0');
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: ["--import", `data:text/javascript,${encodeURIComponent(preload)}`, entry], cwd: dir,
-    env: { ...process.env, MCP_TRANSPORT: "stdio", BAMBU_MODEL: model, BAMBU_PRINTER_MODEL: "",
+    env: { ...process.env, BAMBU_STATE_DIR: dir, MCP_TRANSPORT: "stdio", BAMBU_MODEL: model, BAMBU_PRINTER_MODEL: "",
       BAMBU_PRINTER_HOST: "127.0.0.1", BAMBU_PRINTER_SERIAL: "20PTEST", BAMBU_PRINTER_ACCESS_TOKEN: "DUMMY",
       // An empty private home keeps a developer's real Linux setup out of the test.
       BAMBU_NATIVE_HELPER: installedHelper ? helper : "",

@@ -1461,7 +1461,7 @@ class BambuPrinterMCPServer {
                         assertActive();
                     } });
                 assertActive();
-                this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
+                this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements, [String(params.task_name), projectName]);
                 return withHmsWarnings({ ...nativeResult, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping }, hmsWarnings);
             }
             // Open the plugin's channel to the printer first, as Studio does. Cloud jobs (start_print, and the cloud record
@@ -1502,7 +1502,7 @@ class BambuPrinterMCPServer {
                 if (!(error instanceof BridgeDispatchUncertainError))
                     throw error;
                 // Never resend: the job may still start. Look at the printer instead.
-                this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
+                this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements, [String(params.task_name), projectName]);
                 if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive, replies) === "started") {
                     return withHmsWarnings({ status: "success", dispatch: "started", message: `Bambu's network plugin did not answer, but the printer reports ${threeMfFilename} printing. It was not sent again.`, ...dispatchReplyField(replies.reply), bridgeMethod, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params), ...(nozzleMapping ? { nozzleMapping: { mapping: nozzleMapping.mapping, hotends: nozzleMapping.assignments } } : {}) }, [...hmsWarnings, ...mappingWarnings]);
                 }
@@ -1518,7 +1518,7 @@ class BambuPrinterMCPServer {
                 const value = bridgeResult.value;
                 if (BRIDGE_PRINT_MAYBE_STARTED.has(value)) {
                     // The cloud task exists but the printer's ack didn't arrive in time: it may still start.
-                    this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
+                    this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements, [String(params.task_name), projectName]);
                     if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive, replies) === "started") {
                         return withHmsWarnings({ status: "success", dispatch: "started", message: `The plugin reported ${value} (${bridgePrintErrorText(value)}), but the printer reports ${threeMfFilename} printing. It was not sent again.`, ...dispatchReplyField(replies.reply), bridgeMethod, bridgeResult, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params), ...(nozzleMapping ? { nozzleMapping: { mapping: nozzleMapping.mapping, hotends: nozzleMapping.assignments } } : {}) }, [...hmsWarnings, ...mappingWarnings]);
                     }
@@ -1527,7 +1527,7 @@ class BambuPrinterMCPServer {
                 throw new Error(`FULU BambuNetwork bridge method ${bridgeMethod} returned ${value}${bridgePrintErrorText(value) ? ` (${bridgePrintErrorText(value)})` : ""}; the printer was not asked to print.`);
             }
             assertActive();
-            this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements);
+            this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements, [String(params.task_name), projectName]);
             // A 0 from the plugin isn't proof (start_local_print returns ~3 s after publishing, with no printer ack):
             // confirm the job from the printer's own reports.
             const dispatch = await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, remoteFileName, assertActive, replies);
