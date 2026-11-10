@@ -96,8 +96,14 @@ function resolveCertDir() {
         trimEnv(process.env.BAMBU_NETWORK_CERT_DIR),
         trimEnv(process.env.BAMBU_PROFILES_ROOT) ? path.join(path.dirname(trimEnv(process.env.BAMBU_PROFILES_ROOT)), "cert") : undefined,
         trimEnv(process.env.PJARCZAK_BAMBU_PLUGIN_DIR),
+        process.platform === "darwin" ? "/Applications/BambuStudio.app/Contents/Resources/cert" : undefined,
     ];
     return candidates.find(dir => !!dir && fs.existsSync(path.join(dir, "slicer_base64.cer")));
+}
+/** FULU's native macOS host (tools/pjarczak_bambu_linux_host/build_macos_host.sh), which loads Bambu Studio's own plug-in without a VM. */
+export function macNativeHostPath() {
+    return trimEnv(process.env.PJARCZAK_MAC_NATIVE_HOST) ||
+        path.join(os.homedir(), "Library", "Application Support", "OrcaSlicer", "macos-bridge", "pjarczak_bambu_mac_host");
 }
 function assertBridgeOk(value, method) {
     if (isBridgeFailure(value)) {
@@ -174,7 +180,12 @@ export class BambuNetworkBridge {
             "verify_runtime_macos.sh",
         ];
         let suggestedMacCommand;
-        if (macosPluginDir) {
+        const macosNativeHost = macNativeHostPath();
+        const macosNativeHostExists = process.platform === "darwin" && fileExists(macosNativeHost);
+        if (macosNativeHostExists) {
+            suggestedMacCommand = shellQuote(macosNativeHost);
+        }
+        else if (macosPluginDir) {
             const wrapper = path.join(macosPluginDir, "pjarczak-bambu-linux-host-wrapper");
             const host = path.join(macosRuntimeDir, "pjarczak_bambu_linux_host");
             suggestedMacCommand =
@@ -193,6 +204,8 @@ export class BambuNetworkBridge {
             lastStderr: this.lastStderr,
             recentLogs: this.recentLogs.slice(-10),
             runtime: {
+                macosNativeHost,
+                macosNativeHostExists,
                 macosRuntimeDir,
                 macosRuntimeDirExists: fileExists(macosRuntimeDir),
                 macosPluginDir,
@@ -203,7 +216,9 @@ export class BambuNetworkBridge {
             },
             note: command
                 ? undefined
-                : "Set BAMBU_NETWORK_BRIDGE_COMMAND to the FULU OrcaSlicer-bambulab Linux host or macOS/WSL wrapper command.",
+                : macosNativeHostExists
+                    ? "FULU's native macOS host is installed: set BAMBU_NETWORK_BRIDGE_COMMAND to runtime.suggestedMacCommand."
+                    : "Set BAMBU_NETWORK_BRIDGE_COMMAND to the FULU OrcaSlicer-bambulab Linux host, native macOS host, or macOS/WSL wrapper command.",
         };
     }
     async request(method, payload = {}, options = {}) {

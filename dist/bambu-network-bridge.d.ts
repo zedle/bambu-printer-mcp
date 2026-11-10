@@ -34,6 +34,8 @@ export type BambuNetworkBridgeStatus = {
     lastStderr: string;
     recentLogs: string[];
     runtime: {
+        macosNativeHost: string;
+        macosNativeHostExists: boolean;
         macosRuntimeDir: string;
         macosRuntimeDirExists: boolean;
         macosPluginDir?: string;
@@ -45,6 +47,8 @@ export type BambuNetworkBridgeStatus = {
     note?: string;
 };
 export declare function defaultBambuNetworkConfigDir(): string;
+/** FULU's native macOS host (tools/pjarczak_bambu_linux_host/build_macos_host.sh), which loads Bambu Studio's own plug-in without a VM. */
+export declare function macNativeHostPath(): string;
 export declare class BambuNetworkBridge {
     private child?;
     private commandLine?;

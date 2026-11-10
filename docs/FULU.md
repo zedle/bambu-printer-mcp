@@ -114,6 +114,26 @@ A native Windows MCP calling `wsl.exe` only for the bridge needs a wrapper that 
 
 ### macOS
 
+#### Native host (no VM)
+
+FULU's bridge host also builds natively on macOS (branch `macos-native-bridge-host` of the FULU fork). It runs the same RPC host directly against Bambu Studio's own `libbambu_networking.dylib`, so no Lima VM or Linux payload is needed. It only loads a plug-in signed by Bambu Lab (Apple team `T3UBR9Y3B2`) and refuses a plug-in whose version differs from the one it was built for (Bambu Studio 02.09.01.xx); rebuild it when Studio updates its plug-in.
+
+Requirements: Bambu Studio installed, Xcode command-line tools, and Homebrew `cmake`, `boost` and `openssl@3`. In the FULU checkout:
+
+```bash
+PJARCZAK_CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" sh tools/pjarczak_bambu_linux_host/build_macos_host.sh
+```
+
+This installs `~/Library/Application Support/OrcaSlicer/macos-bridge/pjarczak_bambu_mac_host` (signing is optional; with a signature it uses the hardened runtime and the `disable-library-validation` entitlement so it can load Bambu's plug-in). `bambu_network_bridge_status` then reports `runtime.macosNativeHostExists: true` and suggests the command. Configure:
+
+```bash
+BAMBU_NETWORK_BRIDGE_COMMAND="'$HOME/Library/Application Support/OrcaSlicer/macos-bridge/pjarczak_bambu_mac_host'"
+```
+
+The certificate folder defaults to Bambu Studio's (`/Applications/BambuStudio.app/Contents/Resources/cert`). For cloud sign-in, copy a signed-in Bambu Studio's `~/Library/Application Support/BambuStudio/BambuNetworkEngine.conf` into the bridge config directory (default `~/.config/bambu-printer-mcp/bambu-network`, keep it mode 600), then check `net.is_user_login` as described below.
+
+#### Lima VM wrapper
+
 As checked on **2026-09-27**, FULU's [upstream README](https://github.com/FULU-Foundation/OrcaSlicer-bambulab#macos) still labels macOS a work in progress. The MCP has runtime discovery hints, but it does not provide a turnkey macOS installer.
 
 Start with `bambu_network_bridge_status` and `{}`. It inspects these conventional locations without launching a process:
