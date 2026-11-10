@@ -92,6 +92,17 @@ function bridgeValueAsNumber(value, method) {
     throw new Error(`FULU BambuNetwork bridge method ${method} did not return a numeric value.`);
 }
 /** Folder holding Bambu's slicer_base64.cer client certificate for the network plugin. */
+/** The OS the loaded plug-in is built for, which Bambu's cloud expects in X-BBL-OS-Type: the MCP's own platform unless
+ * BAMBU_NETWORK_OS_TYPE says otherwise (a Linux host in Docker or a VM on macOS runs Bambu's Linux plug-in). */
+export function bridgeOsType(env = process.env, platform = process.platform) {
+    const configured = trimEnv(env.BAMBU_NETWORK_OS_TYPE)?.toLowerCase();
+    if (configured) {
+        if (!["linux", "macos", "windows"].includes(configured))
+            throw new Error("BAMBU_NETWORK_OS_TYPE must be linux, macos or windows.");
+        return configured;
+    }
+    return platform === "darwin" ? "macos" : platform === "win32" ? "windows" : "linux";
+}
 function resolveCertDir() {
     const candidates = [
         trimEnv(process.env.BAMBU_NETWORK_CERT_DIR),
@@ -320,7 +331,7 @@ export class BambuNetworkBridge {
             ? this.handshake.network_actual_abi_version : "02.08.02.54";
         await withAgent("net.set_extra_http_header", { headers: {
                 "X-BBL-Client-Type": "slicer", "X-BBL-Client-Name": "BambuStudio", "X-BBL-Client-Version": clientVersion,
-                "X-BBL-OS-Type": process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux", "X-BBL-Language": "en",
+                "X-BBL-OS-Type": bridgeOsType(), "X-BBL-Language": "en",
             } }, false);
         await withAgent("net.start");
         await withAgent("net.connect_server", {}, false);
@@ -557,13 +568,25 @@ export class BambuNetworkBridge {
             assertBridgeOk(await this.callWithAgent("net.set_user_selected_machine", { dev_id: devId }, options), "net.set_user_selected_machine");
             assertBridgeOk(await this.callWithAgent("net.start_subscribe", { module: "app" }, options), "net.start_subscribe");
             assertBridgeOk(await this.callWithAgent("net.add_subscribe", { devs: [devId] }, options), "net.add_subscribe");
+            // Studio's on-connect sequence (GUI_App.cpp): on on_printer_connected, request a full push and the version; the
+            // plugin uses the printer's replies when it installs the device certificate. An idle printer sends nothing until
+            // asked, so the hello must not wait for the printer's first message.
+            const sayHello = async () => {
+                for (const hello of [{ pushing: { command: "pushall", sequence_id: nextSequenceId(), version: 1, push_target: 1 } }, { info: { command: "get_version", sequence_id: nextSequenceId() } }]) {
+                    assertBridgeOk(await this.callWithAgent("net.send_message", { dev_id: devId, msg: JSON.stringify(hello), qos: 0, flag: 0 }, options), "net.send_message");
+                }
+            };
             let printerConnected = false;
+            let greeted = false;
             for (let attempt = 0; attempt < 30 && !printerConnected; attempt++) {
                 const polled = await this.request("bridge.poll_events", { limit: 256 }, options);
                 for (const event of this.ingestEvents(polled?.events ?? [])) {
                     if (event.name === "on_subscribe_failure")
                         throw new Error(`Bambu's cloud refused the subscription to printer ${devId}; is it bound to the signed-in account?`);
-                    // on_printer_connected comes first, but send_message only works once the printer's own messages flow.
+                    if (event.name === "on_printer_connected" && !greeted) {
+                        greeted = true;
+                        await sayHello();
+                    }
                     if (event.name === "on_message" && event.payload?.dev_id === devId)
                         printerConnected = true;
                 }
@@ -571,15 +594,12 @@ export class BambuNetworkBridge {
                     await new Promise(resolve => setTimeout(resolve, 500));
             }
             if (!printerConnected)
-                throw new Error(`Bambu's cloud did not connect to printer ${devId} within 15 seconds; nothing was sent.`);
+                throw new Error(`Bambu's cloud did not connect to printer ${devId} within 15 seconds${greeted ? " (it was asked for a report but never answered)" : ""}; nothing was sent.`);
+            if (!greeted)
+                await sayHello();
             // Firmware 01.08.05+ only takes signed `print`-section commands (pause, resume, stop, clean_print_error, ...).
             // The plugin signs them once it holds the account's certificate (update_cert) and the printer's
             // (install_device_cert, as Studio does on connect); before that send_message refuses them with -2.
-            // Studio's on-connect sequence (GUI_App.cpp): request a full push and the version first; the plugin uses the
-            // printer's replies when it installs the device certificate.
-            for (const hello of [{ pushing: { command: "pushall", sequence_id: nextSequenceId(), version: 1, push_target: 1 } }, { info: { command: "get_version", sequence_id: nextSequenceId() } }]) {
-                assertBridgeOk(await this.callWithAgent("net.send_message", { dev_id: devId, msg: JSON.stringify(hello), qos: 0, flag: 0 }, options), "net.send_message");
-            }
             assertBridgeOk(await this.callWithAgent("net.update_cert", {}, options), "net.update_cert");
             await new Promise(resolve => setTimeout(resolve, 3000));
             assertBridgeOk(await this.callWithAgent("net.install_device_cert", { dev_id: devId, lan_only: false }, options), "net.install_device_cert");

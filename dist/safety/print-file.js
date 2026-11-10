@@ -550,7 +550,8 @@ export async function inspectPrintFile(filePath, options) {
                 continue;
             }
             if (['M104', 'M109', 'M140', 'M190', 'M141', 'M191'].includes(code)) {
-                const args = parameters(argumentsText, 'A');
+                // C and W are only ever bare idle-hotend markers (below); with a value they are refused.
+                const args = parameters(argumentsText, code === 'M104' && extruderCount(model) === 2 ? 'ACW' : 'A');
                 // Official A1 and A1 mini start G-code waits with M109 S<target> H<limit>
                 // (S25 H140, S100 H170, S220 H300). H is not a heater target: S stays the
                 // checked target, so H is accepted only within those vendor bounds.
@@ -582,11 +583,14 @@ export async function inspectPrintFile(filePath, options) {
                 const vendorWait = code === 'M109' && ['a1', 'a1mini'].includes(model);
                 // Dual-extruder pre-cooling/pre-heating/tower reheat of the idle hotend (Bambu Studio's G-code writer emits it on
                 // every two-nozzle printer): M104 T<physical extruder> S<target> N0. S stays the checked target (all materials).
+                // Bambu Studio 02.09.01.70 marks the wipe-tower forms with a bare flag: C (nozzle-change pre-cooling) or
+                // W (reheat before wipe), e.g. M104 T<n> S<target> N0 C.
                 const idleHotend = code === 'M104' && extruderCount(model) === 2 && args.has('N');
-                if (idleHotend && (args.get('N') !== 0 || !args.has('T') || !args.has('S') || args.size !== 3))
+                const markers = idleHotend ? ['C', 'W'].filter(key => args.has(key)) : [];
+                if (idleHotend && (args.get('N') !== 0 || !args.has('T') || !args.has('S') || args.size !== 3 + markers.length || markers.some(key => !Number.isNaN(args.get(key)))))
                     fail('unsupported idle-hotend M104 parameters');
                 for (const key of args.keys())
-                    if (!'SRTA'.includes(key) && !(key === 'H' && vendorWait) && !(key === 'N' && idleHotend))
+                    if (!'SRTA'.includes(key) && !(key === 'H' && vendorWait) && !(key === 'N' && idleHotend) && !markers.includes(key))
                         fail(`unsupported ${code} temperature parameter ${key}`);
                 if (args.has('H') && (!Number.isFinite(args.get('H')) || args.get('H') < 0 || args.get('H') > 300))
                     fail(`unsupported ${code} wait parameter H`);

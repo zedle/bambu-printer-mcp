@@ -568,13 +568,16 @@ function applyExtruderSetup(
     }
     const rows = machineFlat["nozzle_type"];
     const owners = machineFlat["printer_extruder_id"];
-    if (Array.isArray(rows) && Array.isArray(owners) && owners.length === rows.length) {
-      machineFlat["nozzle_type"] = rows.map((row, r) => {
-        const extruder = Number(owners[r]) - 1;
+    // Bambu Studio 02.09.01.70+ presets no longer carry nozzle_type: the rows are then built from printer_extruder_id.
+    if (Array.isArray(owners) && owners.length > 0 && (Array.isArray(rows) ? owners.length === rows.length : rows === undefined)) {
+      machineFlat["nozzle_type"] = owners.map((owner, r) => {
+        const extruder = Number(owner) - 1;
         if (!Number.isInteger(extruder) || extruder < 0 || extruder >= count) {
           throw new Error(`Malformed printer_extruder_id ${JSON.stringify(owners)} in "${preset}".`);
         }
-        return nozzles[extruder].type ?? row;
+        const type = nozzles[extruder].type ?? (Array.isArray(rows) ? rows[r] : undefined);
+        if (type === undefined) throw new Error(`"${preset}" declares no nozzle_type; give the ${extruderLabel(extruder, count)}'s nozzle type.`);
+        return type;
       });
     } else if (count === 1) {
       const type = nozzles[0].type!;

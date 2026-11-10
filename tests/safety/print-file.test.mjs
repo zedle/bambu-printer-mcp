@@ -564,9 +564,12 @@ test('the idle-hotend M104 T S N0 form passes on every dual-nozzle model and now
   // Bambu Studio's G-code writer pre-cools/pre-heats the idle hotend this way on any two-nozzle printer.
   for(const model of ['H2D','H2D Pro','X2D','H2C']) {
     const id=model.toLowerCase().replace(' ','');
-    const r=await inspect(t,header(model,'PLA;PLA','0.4;0.4')+'M104 S220\nM104 T1 S25 N0\nM104 T0 S220 N0\nG1 X10 Y10 E1\n',{model:id});
+    // Bambu Studio 02.09.01.70 wipe-tower forms carry a bare C (pre-cooling) or W (reheat before wipe).
+    const r=await inspect(t,header(model,'PLA;PLA','0.4;0.4')+'M104 S220\nM104 T1 S25 N0\nM104 T0 S180 N0 C ;Wipe tower nozzle change pre cooling\n'+
+      'M104 T0 S220 N0 W ;Wipe tower reheat before wipe\nM104 T0 S220 N0\nG1 X10 Y10 E1\n',{model:id});
     assert.equal(r.maxNozzleTemperature,220,model);
-    for(const bad of ['M104 T1 S400 N0','M104 T1 S200 N1','M104 S200 N0','M104 T1 S200 R300 N0','M104 T2 S200 N0'])
+    for(const bad of ['M104 T1 S400 N0','M104 T1 S200 N1','M104 S200 N0','M104 T1 S200 R300 N0','M104 T2 S200 N0',
+      'M104 T0 S400 N0 C','M104 T0 S400 N0 W','M104 T0 S180 N0 C5','M104 T0 S180 N0 W1','M104 T0 S180 C','M104 T0 S180 W','M104 S180 N0 C','M104 C','M104 W'])
       await assert.rejects(inspect(t,header(model,'PLA;PLA','0.4;0.4')+bad+'\n',{model:id}),/unsupported|parameter|temperature|limit|nozzle/i,`${model} ${bad}`);
   }
   for(const model of ['P1S','X1C','H2S','A1']) await assert.rejects(inspect(t,header(model,'PLA','0.4')+'M104 T0 S220 N0\n',{model:model.toLowerCase()}),/unsupported|parameter/i,model);

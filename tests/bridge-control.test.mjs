@@ -42,6 +42,26 @@ test("cloud control signs in, waits for the server, subscribes once and sends ms
   assert.deepEqual(calls.map(call => call.method), ["net.is_user_login", "net.is_server_connected", "net.send_message"], "subscription is reused");
 });
 
+// An idle printer stays silent after on_printer_connected until it is asked for a report.
+test("cloud control asks an idle printer for a report as soon as the cloud connects it", async () => {
+  const { bridge, calls } = fakeBridge();
+  let asked = false;
+  const baseCall = bridge.callWithAgent;
+  bridge.callWithAgent = async (method, payload = {}) => {
+    if (method === "net.send_message" && payload.msg?.includes("pushall")) asked = true;
+    return baseCall(method, payload);
+  };
+  bridge.request = async (method) => {
+    calls.push({ method });
+    if (method !== "bridge.poll_events") return { ok: true };
+    return { ok: true, events: asked ? [{ name: "on_message", payload: { dev_id: "31BTEST", msg: "{}" } }] : [{ name: "on_printer_connected", payload: { topic_str: "31BTEST" } }] };
+  };
+  assert.equal(await bridge.sendPrinterMessage("31BTEST", "{}"), 0);
+  const methods = calls.map(call => call.method);
+  assert.deepEqual(methods.slice(methods.indexOf("net.add_subscribe")), ["net.add_subscribe", "bridge.poll_events", "net.send_message", "net.send_message",
+    "bridge.poll_events", "net.update_cert", "net.install_device_cert", "net.send_message"]);
+});
+
 test("cloud control refuses without a signed-in account, and reports a plugin refusal", async () => {
   const signedOut = fakeBridge({ login: false });
   await assert.rejects(signedOut.bridge.sendPrinterMessage("31BTEST", "{}"), /not signed in/i);
@@ -135,4 +155,14 @@ test("the printer's project_file answer for a plugin-sent print is found by comm
   queue.push(msg("31BOTHER", { print: { command: "project_file", sequence_id: "20001", result: "fail" } }),
     msg("31BTEST", { print: { command: "project_file", sequence_id: "20002", result: "fail", reason: "sdcard error" } }));
   assert.deepEqual(await bridge.projectFileReply("31BTEST", since), { section: "print", command: "project_file", result: "fail", reason: "sdcard error" });
+});
+
+test("the cloud OS header follows BAMBU_NETWORK_OS_TYPE, else the MCP's platform", async () => {
+  const { bridgeOsType } = await import("../dist/bambu-network-bridge.js");
+  assert.equal(bridgeOsType({}, "darwin"), "macos");
+  assert.equal(bridgeOsType({}, "win32"), "windows");
+  assert.equal(bridgeOsType({}, "linux"), "linux");
+  // A Linux host in Docker on macOS runs Bambu's Linux plug-in.
+  assert.equal(bridgeOsType({ BAMBU_NETWORK_OS_TYPE: " Linux " }, "darwin"), "linux");
+  assert.throws(() => bridgeOsType({ BAMBU_NETWORK_OS_TYPE: "linux\r\nX-Other: 1" }, "darwin"), /must be linux, macos or windows/);
 });

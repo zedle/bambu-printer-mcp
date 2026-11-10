@@ -462,7 +462,10 @@ test("real Bambu Studio CLI slices a two-colour H2C job on mixed nozzles", { tim
   const zip = await JSZip.loadAsync(await fs.readFile(output));
   const settings = JSON.parse(await zip.file("Metadata/project_settings.config").async("string"));
   assert.deepEqual(settings.nozzle_volume_type, ["High Flow", "Standard"]);
-  assert.deepEqual(settings.nozzle_type, ["tungsten_carbide", "tungsten_carbide", "tungsten_carbide", "hardened_steel", "hardened_steel"]);
+  // Bambu Studio 02.09.01.70+ no longer records the hotend material in a sliced project.
+  if (settings.nozzle_type !== undefined) {
+    assert.deepEqual(settings.nozzle_type, ["tungsten_carbide", "tungsten_carbide", "tungsten_carbide", "hardened_steel", "hardened_steel"]);
+  }
   assert.deepEqual(settings.filament_map, ["2", "1"]);
   // The H2C's rack makes the CLI take a manual map in Nozzle Manual mode (from the command line).
   assert.equal(settings.filament_map_mode, "Nozzle Manual");
@@ -477,7 +480,7 @@ test("real Bambu Studio CLI slices a two-colour H2C job on mixed nozzles", { tim
   // The print gate reads the same per-extruder setup back from the file.
   const inspection = await inspectPrintFile(output, { model: "h2c", nozzleDiameters: [0.4, 0.4], bedType: "engineering_plate" });
   assert.deepEqual(inspection.nozzleFlows, ["high_flow", "standard"]);
-  assert.deepEqual(inspection.nozzleTypes, ["tungsten_carbide", "hardened_steel"]);
+  if (settings.nozzle_type !== undefined) assert.deepEqual(inspection.nozzleTypes, ["tungsten_carbide", "hardened_steel"]);
   assert.deepEqual(inspection.filamentMap, [2, 1]);
   assert.deepEqual(inspection.usedFilamentPositions, [0, 1]);
 });

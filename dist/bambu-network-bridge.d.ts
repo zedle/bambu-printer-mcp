@@ -47,6 +47,10 @@ export type BambuNetworkBridgeStatus = {
     note?: string;
 };
 export declare function defaultBambuNetworkConfigDir(): string;
+/** Folder holding Bambu's slicer_base64.cer client certificate for the network plugin. */
+/** The OS the loaded plug-in is built for, which Bambu's cloud expects in X-BBL-OS-Type: the MCP's own platform unless
+ * BAMBU_NETWORK_OS_TYPE says otherwise (a Linux host in Docker or a VM on macOS runs Bambu's Linux plug-in). */
+export declare function bridgeOsType(env?: NodeJS.ProcessEnv, platform?: NodeJS.Platform): string;
 /** FULU's native macOS host (tools/pjarczak_bambu_linux_host/build_macos_host.sh), which loads Bambu Studio's own plug-in without a VM. */
 export declare function macNativeHostPath(): string;
 export declare class BambuNetworkBridge {

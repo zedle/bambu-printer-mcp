@@ -82,6 +82,7 @@ This is an optional, advanced connection path. The MCP implements the framed std
 | `BAMBU_DEV_ID` | Fallback device ID if no printer serial is resolved. An explicit tool `dev_id` takes priority over the serial and this setting; use it when several printers are configured. |
 | `BAMBU_NETWORK_CONFIG_DIR` | Persistent writable agent config/log directory. Default: `~/.config/bambu-printer-mcp/bambu-network`. |
 | `BAMBU_NETWORK_COUNTRY_CODE` | Region/country passed to the runtime, default `US`; use the appropriate setting for your account. |
+| `BAMBU_NETWORK_OS_TYPE` | OS of the loaded plug-in sent to Bambu's cloud (`linux`, `macos`, `windows`); defaults to the MCP's platform. Set `linux` when a Linux host in Docker or a VM runs on macOS or Windows. |
 | `BAMBU_NETWORK_USER_INFO` | Optional sensitive JSON passed to `net.change_user`; see [cloud authentication](#cloud-authentication). |
 | `PJARCZAK_BAMBU_PLUGIN_DIR` | Upstream runtime's library directory, containing the matching network/source libraries. |
 
@@ -131,6 +132,20 @@ BAMBU_NETWORK_BRIDGE_COMMAND="'$HOME/Library/Application Support/OrcaSlicer/maco
 ```
 
 The certificate folder defaults to Bambu Studio's (`/Applications/BambuStudio.app/Contents/Resources/cert`). For cloud sign-in, copy a signed-in Bambu Studio's `~/Library/Application Support/BambuStudio/BambuNetworkEngine.conf` into the bridge config directory (default `~/.config/bambu-printer-mcp/bambu-network`, keep it mode 600), then check `net.is_user_login` as described below.
+
+The native host can't start cloud prints. Bambu's macOS plug-in only signs print commands inside an app signed by Bambu Lab, so `net.start_print` from the native host returns `-26` (signing failed). Use it for sign-in, status and probes, or run the Linux host in Docker (below) for cloud printing.
+
+#### Linux host in Docker (cloud printing)
+
+Bambu's Linux plug-in has no such signing restriction. The FULU fork's `tools/pjarczak_bambu_linux_host/docker/` builds an image holding the Linux host and Bambu's pinned plug-in (02.08.02.54, checksummed). Bambu publishes that plug-in for x86-64 only, and it crashes under Docker Desktop's Rosetta, so on Apple silicon the image runs it through a bundled QEMU and leaves Docker's settings alone. `run-host.sh` mounts the bridge config folder and the system temp folder at the same paths, because the MCP passes file paths unchanged. Build it with `tools/pjarczak_bambu_linux_host/docker/build.sh`, copy the image's `/opt/bambu/cert/slicer_base64.cer` and `printer.cer` into a folder of your own, then configure:
+
+```bash
+BAMBU_NETWORK_BRIDGE_COMMAND="'/path/to/OrcaSlicer-bambulab/tools/pjarczak_bambu_linux_host/docker/run-host.sh'"
+BAMBU_NETWORK_CERT_DIR=/path/to/that/cert/folder
+BAMBU_NETWORK_OS_TYPE=linux
+```
+
+The same copied `BambuNetworkEngine.conf` signs the Linux plug-in in. A first headless H2C cloud print through this host was started on 2026-11-10. Rebuild the image, and recheck the plug-in's `PrintParams` layout, when the pinned plug-in changes.
 
 #### Lima VM wrapper
 

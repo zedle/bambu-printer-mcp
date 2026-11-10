@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Cloud bridge control and status ask the printer for a full report (`pushall` and `get_version`) as soon as Bambu's cloud reports it connected, as Bambu Studio does. An idle printer sends nothing until asked, so cloud status and prints previously timed out with "did not connect to printer within 15 seconds".
+- Bambu Studio 02.09.01.70 presets no longer carry `nozzle_type`; slicing with per-extruder nozzle types (including `nozzles_from_printer`) builds those rows from `printer_extruder_id` instead of refusing with "has no printer_extruder_id rows".
+- `BAMBU_NETWORK_OS_TYPE` (`linux`, `macos`, `windows`) sets the plug-in OS the bridge reports to Bambu's cloud, for a Linux host running in Docker or a VM on macOS or Windows; it defaults to the MCP's platform.
+- docs/FULU.md: the native macOS host can't start cloud prints (`-26`, Bambu's macOS plug-in only signs inside Bambu-signed apps); cloud printing on macOS goes through the Linux host in Docker.
+- The print-file check accepts Bambu Studio 02.09.01.70's wipe-tower idle-hotend forms on two-nozzle printers, `M104 T<n> S<target> N0` with a bare `C` (nozzle-change pre-cooling) or `W` (reheat before wipe). The target is still checked, and `C`/`W` with a value or outside that form are refused.
+
 ### Merged from upstream 1.1.28–1.1.31
 - Dependency fixes: basic-ftp 6.2.3, mqtt 5.16.1, proxy-addr 2.0.8.
 - X2D native printing and controls on x86-64 Linux (`bambu-printer-mcp-native-setup`). Linux X2D stop and heater-off also go out over MQTT at once, bounded by `BAMBU_EMERGENCY_MQTT_TIMEOUT_MS`; heater-off there is the same Studio-form command the native route sends. Printers behind the FULU bridge never get this unsigned LAN copy, since they refuse it.
