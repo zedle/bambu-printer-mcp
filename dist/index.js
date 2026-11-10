@@ -1017,6 +1017,10 @@ class BambuPrinterMCPServer {
             }
         });
         this.bambuNetwork = new BambuNetworkBridge();
+        // A printer that takes no LAN traffic: every status and safety read comes from its cloud-relayed reports.
+        if (process.env.BAMBU_STATUS_SOURCE?.trim().toLowerCase() === "cloud") {
+            this.bambu.useCloudStatus(serial => this.bambuNetwork.readFreshCloudStatus(serial));
+        }
         this.stlManipulator = new STLManipulator(TEMP_DIR);
         this.setupHandlers();
         this.setupErrorHandling();

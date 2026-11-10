@@ -155,7 +155,11 @@ export declare class BambuImplementation {
     private printerStore;
     private unsavedJobs;
     private clearedErrors;
+    /** Set for a printer that takes no LAN traffic: state comes from its reports relayed by Bambu's cloud. */
+    private cloudStatusReader?;
     constructor(confirm?: ((message: string) => Promise<boolean>) | undefined);
+    /** Read every safety and display status through `reader` (BAMBU_STATUS_SOURCE=cloud) instead of LAN MQTT. */
+    useCloudStatus(reader: (serial: string) => Promise<any>): void;
     confirmHardwareAction(message: string, _physicalCheck?: boolean): Promise<void>;
     private finishedJobIdentity;
     /**

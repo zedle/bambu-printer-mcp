@@ -822,14 +822,73 @@ function readCheckedJobs(): Record<string, CheckedJob> {
     job.requirements && typeof job.requirements === "object")) as Record<string, CheckedJob>;
 }
 
+/** The display summary of a printer report (get_printer_status), read over LAN or through the cloud. */
+function displayStatus(data: Record<string, any>, serial: string) {
+  const ctcTemperature = data.device?.ctc?.info?.temp;
+  // CTC packs the current temperature in the low 16 bits and the target in the high 16 bits.
+  const chamberTemperature =
+    typeof ctcTemperature === "number" && Number.isInteger(ctcTemperature) && ctcTemperature >= 0 && ctcTemperature <= 0xffffffff
+      ? ctcTemperature & 0xffff
+      : data.chamber_temper || data.frame_temper || 0;
+
+  // New-protocol printers pack temperatures as current (low 16 bits) and target (high 16 bits) per extruder and for
+  // the bed (BambuStudio ExtderSystemParser::ParseV2_0, DevBed::ParseV2_0); the legacy fields may be absent there.
+  const packed = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xffffffff
+    ? { actual: value & 0xffff, target: value >>> 16 } : undefined;
+  const extruderInfo: any[] = Array.isArray(data.device?.extruder?.info) ? data.device.extruder.info : [];
+  const extruders = extruderInfo.flatMap((entry: any) => {
+    const temperature = packed(entry?.temp);
+    const id = Number(entry?.id);
+    if (!temperature || !Number.isInteger(id)) return [];
+    return [{ id, ...(extruderInfo.length === 2 ? { side: id === 0 ? "right" : "left" } : {}), ...temperature }];
+  });
+  const packedBed = packed(data.device?.bed?.info?.temp);
+  const mainExtruder = extruders.find(entry => entry.id === 0);
+
+  return {
+    status: data.gcode_state || "UNKNOWN",
+    connected: true,
+    temperatures: {
+      nozzle: {
+        actual: data.nozzle_temper ?? mainExtruder?.actual ?? 0,
+        target: data.nozzle_target_temper ?? mainExtruder?.target ?? 0,
+      },
+      ...(extruders.length === 2 ? { nozzles: extruders } : {}),
+      bed: {
+        actual: data.bed_temper ?? packedBed?.actual ?? 0,
+        target: data.bed_target_temper ?? packedBed?.target ?? 0,
+      },
+      chamber: chamberTemperature,
+    },
+    print: {
+      filename: data.subtask_name || data.gcode_file || "None",
+      progress: data.mc_percent || 0,
+      timeRemaining: data.mc_remaining_time || 0,
+      currentLayer: data.layer_num || 0,
+      totalLayers: data.total_layer_num || 0,
+    },
+    ams: data.ams || null,
+    model: resolveModelName(data),
+    serial,
+    raw: data,
+  };
+}
+
 export class BambuImplementation {
   private printerStore: BambuClientStore;
   // Only for records the state file could not take; the file is read on every use, so other servers' changes show.
   private unsavedJobs = new Map<string, CheckedJob>();
   private clearedErrors = new Map<string, string[]>();
+  /** Set for a printer that takes no LAN traffic: state comes from its reports relayed by Bambu's cloud. */
+  private cloudStatusReader?: (serial: string) => Promise<any>;
 
   constructor(private readonly confirm?: (message: string) => Promise<boolean>) {
     this.printerStore = new BambuClientStore();
+  }
+
+  /** Read every safety and display status through `reader` (BAMBU_STATUS_SOURCE=cloud) instead of LAN MQTT. */
+  useCloudStatus(reader: (serial: string) => Promise<any>): void {
+    this.cloudStatusReader = reader;
   }
 
   // Agent-first: hardware actions run without prompts unless BAMBU_REQUIRE_CONFIRMATION=1 asks a person for
@@ -1009,11 +1068,13 @@ export class BambuImplementation {
 
   /** Safety reads never use the display cache or configured-serial model inference. */
   async getSafetyStatus(host: string, serial: string, token: string): Promise<any> {
+    if (this.cloudStatusReader) return this.cloudStatusReader(serial);
     return readFreshPrinterStatus(await this.getPrinter(host, serial, token), serial);
   }
 
   async getStatus(host: string, serial: string, token: string): Promise<any> {
     try {
+      if (this.cloudStatusReader) return displayStatus((await this.cloudStatusReader(serial)).raw, serial);
       const printer = await this.getPrinter(host, serial, token);
 
       try {
@@ -1028,54 +1089,7 @@ export class BambuImplementation {
         cachedData && Object.keys(cachedData).length > 0
           ? cachedData
           : printer.data;
-      const ctcTemperature = data.device?.ctc?.info?.temp;
-      // CTC packs the current temperature in the low 16 bits and the target in the high 16 bits.
-      const chamberTemperature =
-        typeof ctcTemperature === "number" && Number.isInteger(ctcTemperature) && ctcTemperature >= 0 && ctcTemperature <= 0xffffffff
-          ? ctcTemperature & 0xffff
-          : data.chamber_temper || data.frame_temper || 0;
-
-      // New-protocol printers pack temperatures as current (low 16 bits) and target (high 16 bits) per extruder and for
-      // the bed (BambuStudio ExtderSystemParser::ParseV2_0, DevBed::ParseV2_0); the legacy fields may be absent there.
-      const packed = (value: unknown) => typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= 0xffffffff
-        ? { actual: value & 0xffff, target: value >>> 16 } : undefined;
-      const extruderInfo: any[] = Array.isArray(data.device?.extruder?.info) ? data.device.extruder.info : [];
-      const extruders = extruderInfo.flatMap((entry: any) => {
-        const temperature = packed(entry?.temp);
-        const id = Number(entry?.id);
-        if (!temperature || !Number.isInteger(id)) return [];
-        return [{ id, ...(extruderInfo.length === 2 ? { side: id === 0 ? "right" : "left" } : {}), ...temperature }];
-      });
-      const packedBed = packed(data.device?.bed?.info?.temp);
-      const mainExtruder = extruders.find(entry => entry.id === 0);
-
-      return {
-        status: data.gcode_state || "UNKNOWN",
-        connected: true,
-        temperatures: {
-          nozzle: {
-            actual: data.nozzle_temper ?? mainExtruder?.actual ?? 0,
-            target: data.nozzle_target_temper ?? mainExtruder?.target ?? 0,
-          },
-          ...(extruders.length === 2 ? { nozzles: extruders } : {}),
-          bed: {
-            actual: data.bed_temper ?? packedBed?.actual ?? 0,
-            target: data.bed_target_temper ?? packedBed?.target ?? 0,
-          },
-          chamber: chamberTemperature,
-        },
-        print: {
-          filename: data.subtask_name || data.gcode_file || "None",
-          progress: data.mc_percent || 0,
-          timeRemaining: data.mc_remaining_time || 0,
-          currentLayer: data.layer_num || 0,
-          totalLayers: data.total_layer_num || 0,
-        },
-        ams: data.ams || null,
-        model: resolveModelName(data),
-        serial,
-        raw: data,
-      };
+      return displayStatus(data, serial);
     } catch (error) {
       console.error(`Failed to get Bambu status for ${serial}:`, error);
       return { status: "error", connected: false, error: (error as Error).message };
