@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { nextSequenceId } from "./sequence-id.js";
 import { assertCommandAccepted, commandReplyWaitMs, commandSequenceId, matchCommandReply, type CommandReply } from "./command-reply.js";
-import { PrinterReport } from "./printer-report.js";
+import { PrinterReport, pushAllMessage, pushAllMinIntervalMs } from "./printer-report.js";
+import { freshReportStatus } from "./safety/printer-state.js";
 
 const FRAME_MAGIC = 0x52424a50;
 const FRAME_HEADER_SIZE = 16;
@@ -199,6 +200,8 @@ export class BambuNetworkBridge {
   private recentReplies: Array<{ devId?: string; at: number; n: number; message: unknown }> = [];
   /** Numbers the buffered replies, so a query only sees those that arrived after it sent. */
   private replyCount = 0;
+  /** When each printer was last asked for a full push over the cloud (Studio sends at most one per 3 s). */
+  private lastCloudPushAll = new Map<string, number>();
 
   resolveBridgeCommand(override?: string): string {
     return (
@@ -427,6 +430,7 @@ export class BambuNetworkBridge {
     this.localChannels.clear();
     this.printerReports.clear();
     this.recentReplies = [];
+    this.lastCloudPushAll.clear();
     this.agentId = agent;
     this.agentKey = key;
     return { agent, handshake: this.handshake };
@@ -566,6 +570,33 @@ export class BambuNetworkBridge {
       const left = deadline - Date.now();
       if (left <= 0) return undefined;
       await new Promise(resolve => setTimeout(resolve, Math.min(250, left)));
+    }
+  }
+
+  /**
+   * A fresh safety report read through Bambu's cloud, for printers that take no LAN traffic: the same rules as the
+   * LAN read (safety/printer-state.ts freshReportStatus), fed by the printer's own pushes that the plug-in relays.
+   * Opens the cloud channel, asks for a full push and the version (Studio's command_request_push_all, get_version),
+   * and waits for a full report newer than the request. Cached state never authorizes an operation.
+   */
+  async readFreshCloudStatus(devId: string, options: BambuNetworkBridgeOptions = {}, timeoutMs = 10_000): Promise<any> {
+    await this.ensurePrinterChannel(devId, options);
+    const last = this.lastCloudPushAll.get(devId);
+    const wait = last === undefined ? 0 : Math.max(0, last + pushAllMinIntervalMs() - Date.now());
+    if (wait) await new Promise(resolve => setTimeout(resolve, wait));
+    const requestedAt = Date.now();
+    this.lastCloudPushAll.set(devId, requestedAt);
+    await this.sendPrinterMessage(devId, JSON.stringify(pushAllMessage(nextSequenceId())), { ...options, qos: 0 });
+    await this.sendPrinterMessage(devId, JSON.stringify({ info: { command: "get_version", sequence_id: nextSequenceId() } }), { ...options, qos: 0 });
+    const report = this.printerReport(devId);
+    while (true) {
+      await this.pollEvents(options);
+      const status = freshReportStatus(report, devId, requestedAt, "cloud");
+      if (status) return status;
+      if (Date.now() - requestedAt >= timeoutMs) {
+        throw new Error("Timed out waiting for a fresh cloud safety report with observed printer identity, state and errors; cached status cannot authorize an operation.");
+      }
+      await new Promise(resolve => setTimeout(resolve, 250));
     }
   }
 

@@ -2005,7 +2005,8 @@ export class BambuImplementation {
    * new task id with a printing state; a refusal or a failed start throws; otherwise "unconfirmed".
    */
   async confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string | string[], assertActive: () => void,
-    replies?: { poll: () => Promise<CommandReply | undefined>; reply?: CommandReply }): Promise<"started" | "unconfirmed"> {
+    replies?: { poll: () => Promise<CommandReply | undefined>; reply?: CommandReply },
+    readStatus: () => Promise<any> = () => this.getSafetyStatus(host, serial, token)): Promise<"started" | "unconfirmed"> {
     const deadline = Date.now() + dispatchCheckMs();
     const cancelled = () => { try { assertActive(); return false; } catch { return true; } };
     let verdict: DispatchVerdict | undefined;
@@ -2020,7 +2021,7 @@ export class BambuImplementation {
       if (cancelled()) break;
       await checkReply();
       if (verdict) break;
-      try { verdict = judgeDispatchReport((await this.getSafetyStatus(host, serial, token))?.raw, before?.raw, jobName); } catch { /* try again until the deadline */ }
+      try { verdict = judgeDispatchReport((await readStatus())?.raw, before?.raw, jobName); } catch { /* try again until the deadline */ }
     }
     if (!verdict && !cancelled()) await checkReply();
     return this.settleDispatch(host, serial, verdict, cancelled());

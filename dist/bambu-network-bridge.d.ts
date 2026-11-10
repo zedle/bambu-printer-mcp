@@ -69,6 +69,8 @@ export declare class BambuNetworkBridge {
     private recentReplies;
     /** Numbers the buffered replies, so a query only sees those that arrived after it sent. */
     private replyCount;
+    /** When each printer was last asked for a full push over the cloud (Studio sends at most one per 3 s). */
+    private lastCloudPushAll;
     resolveBridgeCommand(override?: string): string;
     resolveConfigDir(override?: string): string;
     resolveCountryCode(override?: string): string;
@@ -126,6 +128,13 @@ export declare class BambuNetworkBridge {
     private drainEvents;
     /** The printer's reply to `sequenceId` among the plugin's message events, polled until `waitMs` runs out. */
     awaitPrinterReply(devId: string, sequenceId: string, waitMs: number, options?: BambuNetworkBridgeOptions): Promise<CommandReply | undefined>;
+    /**
+     * A fresh safety report read through Bambu's cloud, for printers that take no LAN traffic: the same rules as the
+     * LAN read (safety/printer-state.ts freshReportStatus), fed by the printer's own pushes that the plug-in relays.
+     * Opens the cloud channel, asks for a full push and the version (Studio's command_request_push_all, get_version),
+     * and waits for a full report newer than the request. Cached state never authorizes an operation.
+     */
+    readFreshCloudStatus(devId: string, options?: BambuNetworkBridgeOptions, timeoutMs?: number): Promise<any>;
     /**
      * Open the cloud channel to a printer as Bambu Studio does, once per agent: sign-in check, cloud connection,
      * callbacks, machine selection, subscription, the printer's first messages, then the certificates the plugin

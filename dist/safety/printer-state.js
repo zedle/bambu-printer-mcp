@@ -50,6 +50,30 @@ function observedIdentity(raw, configuredSerial) {
     return { model, observedSerial: serials[0], identitySource: hasReportedModel ? "report" : "module-serial" };
 }
 /**
+ * The safety status a report gives once it is fresh for a request made at `requestedAt` (a full report at most one
+ * full-push interval older, a push merged after it, gcode_state, print_error and hms present, a known model), or
+ * undefined while it isn't yet. Throws when the report names another printer.
+ */
+export function freshReportStatus(report, serial, requestedAt, source) {
+    const minInterval = pushAllMinIntervalMs();
+    if (report.fullAt === undefined || report.receivedAt === undefined)
+        return undefined;
+    if (report.receivedAt < requestedAt || requestedAt - report.fullAt > minInterval)
+        return undefined;
+    const state = report.state();
+    if (!state || !Object.prototype.hasOwnProperty.call(state, "gcode_state") ||
+        !Object.prototype.hasOwnProperty.call(state, "print_error") || !Object.prototype.hasOwnProperty.call(state, "hms"))
+        return undefined;
+    const raw = report.modules && report.modulesAt !== undefined && requestedAt - report.modulesAt <= minInterval
+        ? { ...state, modules: report.modules } : state;
+    const identity = observedIdentity(raw, serial);
+    if (!identity.model)
+        return undefined;
+    return { connected: true, model: identity.model, status: raw.gcode_state, serial,
+        observedSerial: identity.observedSerial, raw,
+        observation: { source, requestedAt, receivedAt: report.receivedAt, fullAt: report.fullAt, identitySource: identity.identitySource } };
+}
+/**
  * A fresh report for a safety check: the printer's state restored the way Bambu Studio does it (printer-report.ts),
  * from a full report at most one full-push interval (3 s, Studio's REQUEST_PUSH_MIN_TIME) older than this request,
  * with at least one push merged after the request. Studio sends at most one full-push request per 3 s; a request
@@ -81,25 +105,15 @@ export function readFreshPrinterStatus(printer, serial, timeoutMs = 5000) {
             reject(error instanceof Error ? error : new Error(String(error)));
         };
         const maybeResolve = () => {
-            if (complete || !requestsPublished || report.fullAt === undefined || report.receivedAt === undefined)
+            if (complete || !requestsPublished)
                 return;
-            if (report.receivedAt < requestedAt || requestedAt - report.fullAt > minInterval)
-                return;
-            const state = report.state();
-            if (!state || !Object.prototype.hasOwnProperty.call(state, "gcode_state") ||
-                !Object.prototype.hasOwnProperty.call(state, "print_error") || !Object.prototype.hasOwnProperty.call(state, "hms"))
-                return;
-            const raw = report.modules && report.modulesAt !== undefined && requestedAt - report.modulesAt <= minInterval
-                ? { ...state, modules: report.modules } : state;
             try {
-                const identity = observedIdentity(raw, serial);
-                if (!identity.model)
+                const status = freshReportStatus(report, serial, requestedAt, "mqtt");
+                if (!status)
                     return;
                 complete = true;
                 cleanup();
-                resolve({ connected: true, model: identity.model, status: raw.gcode_state, serial,
-                    observedSerial: identity.observedSerial, raw,
-                    observation: { source: "mqtt", requestedAt, receivedAt: report.receivedAt, fullAt: report.fullAt, identitySource: identity.identitySource } });
+                resolve(status);
             }
             catch (error) {
                 fail(error);
@@ -502,7 +516,7 @@ export function validatePrinterState(status, requirements) {
     // Freshness, like Studio's MachineObject::is_info_ready (a full report, and a push within PUSHINFO_TIMEOUT) but per
     // check: the full report the state is restored from (fullAt) is at most one full-push interval older than the
     // request, a push was merged after the request (receivedAt), and the check runs within PUSHINFO_TIMEOUT (15 s).
-    if (!observation || observation.source !== "mqtt" || !Number.isFinite(observation.requestedAt) || !Number.isFinite(observation.receivedAt) ||
+    if (!observation || (observation.source !== "mqtt" && observation.source !== "cloud") || !Number.isFinite(observation.requestedAt) || !Number.isFinite(observation.receivedAt) ||
         !Number.isFinite(observation.fullAt) || observation.fullAt > observation.receivedAt ||
         observation.requestedAt - observation.fullAt > pushAllMinIntervalMs() ||
         observation.receivedAt < observation.requestedAt || observation.receivedAt > now ||

@@ -1,6 +1,6 @@
 import { HIDDEN_HMS } from "./hidden-hms.js";
 import { BambuClient, GetVersionCommand } from "bambu-node";
-import { PUSHINFO_TIMEOUT_MS, lanPrinterReport, lastPushAllAt, notePushAll, pushAllMessage, pushAllMinIntervalMs } from "../printer-report.js";
+import { PUSHINFO_TIMEOUT_MS, lanPrinterReport, lastPushAllAt, notePushAll, pushAllMessage, pushAllMinIntervalMs, type PrinterReport } from "../printer-report.js";
 import { nextSequenceId } from "../sequence-id.js";
 import { normalizeMaterial, normalizeModel } from "./limits.js";
 import { filamentProhibition } from "./filament-rules.js";
@@ -50,6 +50,30 @@ function observedIdentity(raw: Record<string, any>, configuredSerial: string) {
   return { model, observedSerial: serials[0], identitySource: hasReportedModel ? "report" : "module-serial" };
 }
 
+/** Where a safety report came from: the printer's LAN MQTT, or its own pushes relayed by Bambu's cloud (network plug-in). */
+export type ReportSource = "mqtt" | "cloud";
+
+/**
+ * The safety status a report gives once it is fresh for a request made at `requestedAt` (a full report at most one
+ * full-push interval older, a push merged after it, gcode_state, print_error and hms present, a known model), or
+ * undefined while it isn't yet. Throws when the report names another printer.
+ */
+export function freshReportStatus(report: PrinterReport, serial: string, requestedAt: number, source: ReportSource): any | undefined {
+  const minInterval = pushAllMinIntervalMs();
+  if (report.fullAt === undefined || report.receivedAt === undefined) return undefined;
+  if (report.receivedAt < requestedAt || requestedAt - report.fullAt > minInterval) return undefined;
+  const state = report.state();
+  if (!state || !Object.prototype.hasOwnProperty.call(state, "gcode_state") ||
+      !Object.prototype.hasOwnProperty.call(state, "print_error") || !Object.prototype.hasOwnProperty.call(state, "hms")) return undefined;
+  const raw: Record<string, any> = report.modules && report.modulesAt !== undefined && requestedAt - report.modulesAt <= minInterval
+    ? { ...state, modules: report.modules } : state;
+  const identity = observedIdentity(raw, serial);
+  if (!identity.model) return undefined;
+  return { connected: true, model: identity.model, status: raw.gcode_state, serial,
+    observedSerial: identity.observedSerial, raw,
+    observation: { source, requestedAt, receivedAt: report.receivedAt, fullAt: report.fullAt, identitySource: identity.identitySource } };
+}
+
 /**
  * A fresh report for a safety check: the printer's state restored the way Bambu Studio does it (printer-report.ts),
  * from a full report at most one full-push interval (3 s, Studio's REQUEST_PUSH_MIN_TIME) older than this request,
@@ -81,21 +105,13 @@ export function readFreshPrinterStatus(printer: BambuClient, serial: string, tim
       reject(error instanceof Error ? error : new Error(String(error)));
     };
     const maybeResolve = () => {
-      if (complete || !requestsPublished || report.fullAt === undefined || report.receivedAt === undefined) return;
-      if (report.receivedAt < requestedAt || requestedAt - report.fullAt > minInterval) return;
-      const state = report.state();
-      if (!state || !Object.prototype.hasOwnProperty.call(state, "gcode_state") ||
-          !Object.prototype.hasOwnProperty.call(state, "print_error") || !Object.prototype.hasOwnProperty.call(state, "hms")) return;
-      const raw: Record<string, any> = report.modules && report.modulesAt !== undefined && requestedAt - report.modulesAt <= minInterval
-        ? { ...state, modules: report.modules } : state;
+      if (complete || !requestsPublished) return;
       try {
-        const identity = observedIdentity(raw, serial);
-        if (!identity.model) return;
+        const status = freshReportStatus(report, serial, requestedAt, "mqtt");
+        if (!status) return;
         complete = true;
         cleanup();
-        resolve({ connected: true, model: identity.model, status: raw.gcode_state, serial,
-          observedSerial: identity.observedSerial, raw,
-          observation: { source: "mqtt", requestedAt, receivedAt: report.receivedAt, fullAt: report.fullAt, identitySource: identity.identitySource } });
+        resolve(status);
       } catch (error) { fail(error); }
     };
     const onRaw = (topic: string) => {
@@ -490,7 +506,7 @@ export function validatePrinterState(status: any, requirements: PrinterStateRequ
   // Freshness, like Studio's MachineObject::is_info_ready (a full report, and a push within PUSHINFO_TIMEOUT) but per
   // check: the full report the state is restored from (fullAt) is at most one full-push interval older than the
   // request, a push was merged after the request (receivedAt), and the check runs within PUSHINFO_TIMEOUT (15 s).
-  if (!observation || observation.source !== "mqtt" || !Number.isFinite(observation.requestedAt) || !Number.isFinite(observation.receivedAt) ||
+  if (!observation || (observation.source !== "mqtt" && observation.source !== "cloud") || !Number.isFinite(observation.requestedAt) || !Number.isFinite(observation.receivedAt) ||
       !Number.isFinite(observation.fullAt) || observation.fullAt > observation.receivedAt ||
       observation.requestedAt - observation.fullAt > pushAllMinIntervalMs() ||
       observation.receivedAt < observation.requestedAt || observation.receivedAt > now ||

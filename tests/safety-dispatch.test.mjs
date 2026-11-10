@@ -488,7 +488,7 @@ for (const [name, changes, error] of [
   });
 }
 
-async function interceptedMcp(t, { blockBridgeInitialization = false, realBridgeRequest = false, model = "p1s", nozzleDiameters = [0.4], ams, bridgeResponse = { ok: true, value: 0 }, env = {}, afterPrint, printUncertain = false } = {}) {
+async function interceptedMcp(t, { blockBridgeInitialization = false, realBridgeRequest = false, model = "p1s", nozzleDiameters = [0.4], ams, bridgeResponse = { ok: true, value: 0 }, env = {}, afterPrint, printUncertain = false, lanUnreachable = false } = {}) {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), "bambu-bridge-safety-"));
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const eventsPath = path.join(dir, "events.jsonl");
@@ -507,13 +507,16 @@ async function interceptedMcp(t, { blockBridgeInitialization = false, realBridge
     BambuImplementation.prototype.ftpDownload = async () => { throw new Error('Remote artifact unavailable for inspection'); };
     BambuImplementation.prototype.getPrinter = async () => ({publish: async payload => log({action:'publish', payload})});
     STLManipulator.prototype.sliceSTL = async () => { log({action:'slice'}); throw new Error('Test slicer must not be invoked'); };
-    BambuImplementation.prototype.getSafetyStatus = async () => {
+    // The printer's reported state, read over LAN MQTT or (cloud jobs) relayed by Bambu's cloud.
+    const reportedSafetyStatus = (source) => {
       const now = Date.now();
       const reported={...(fs.existsSync(${JSON.stringify(statusPath)}) ? JSON.parse(fs.readFileSync(${JSON.stringify(statusPath)},'utf8')) : {}), ...(printSent ? ${JSON.stringify(afterPrint ?? {})} : {})};
       return {connected:true, model:${JSON.stringify(model)}, status:reported.gcode_state??'IDLE', serial:${JSON.stringify(serial)},
         raw:{model:${JSON.stringify(model)},...${JSON.stringify(['h2d','h2dpro','h2c','x2d'].includes(model) ? {vir_slot:[{id:254,tray_type:'PLA'},{id:255,tray_type:'PLA'}]} : {})},gcode_state:'IDLE',nozzle_diameter:${JSON.stringify(String(nozzleDiameters[0]))},device:{nozzle:{info:${JSON.stringify(nozzleDiameters.map((diameter, id) => ({ id, diameter, type: "HH01", stat: 0 })))}}},print_error:0,hms:[],...${JSON.stringify(ams ? { ams } : {})},...reported},
-        observation:{source:'mqtt',requestedAt:now,receivedAt:now,fullAt:now,identitySource:'report'}};
+        observation:{source,requestedAt:now,receivedAt:now,fullAt:now,identitySource:'report'}};
     };
+    BambuImplementation.prototype.getSafetyStatus = async () => { ${lanUnreachable ? "throw new Error('LAN unreachable');" : ""} return reportedSafetyStatus('mqtt'); };
+    BambuNetworkBridge.prototype.readFreshCloudStatus = async () => reportedSafetyStatus('cloud');
     BambuNetworkBridge.prototype.ensurePrinterChannel = async (devId) => { log({ action: 'bridge-channel', devId }); };
     BambuNetworkBridge.prototype.ensureLocalChannel = async (devId, devIp) => { log({ action: 'bridge-local-channel', devId, devIp }); };
     BambuNetworkBridge.prototype.ensureAgent = async () => {
@@ -595,6 +598,18 @@ for (const [name, afterPrint, status, dispatch] of [
   assert.equal(body.dispatch, dispatch);
   if (dispatch === "unconfirmed") assert.match(body.message, /has not reported starting.*do not send it again/i);
   assert.equal((await readEvents(server.eventsPath)).filter(event => event.method === "net.start_print").length, 1);
+});
+
+test("a cloud bridge print checks and confirms the printer through the cloud, never over LAN", async (t) => {
+  const server = await interceptedMcp(t, { lanUnreachable: true, afterPrint: { gcode_state: "RUNNING", subtask_name: "x" }, env: { BAMBU_DISPATCH_CHECK_MS: "3500" } });
+  const file = await fixture(t);
+  const result = await server.client.callTool({ name: "print_3mf_bambu_network", arguments: { three_mf_path: file, bambu_model: "p1s", bed_type: "textured_plate", use_ams: false, connection_type: "cloud" } });
+  assert.notEqual(result.isError, true, result.content?.[0]?.text);
+  assert.equal((await readEvents(server.eventsPath)).filter(event => event.method === "net.start_print").length, 1);
+  // A LAN print through the bridge still needs the LAN report, so it stops before dispatch.
+  const lan = await server.client.callTool({ name: "print_3mf_bambu_network", arguments: { three_mf_path: file, bambu_model: "p1s", bed_type: "textured_plate", use_ams: false, connection_type: "lan" } });
+  assert.equal(lan.isError, true);
+  assert.match(lan.content[0].text, /LAN unreachable/);
 });
 
 test("a bridge print the printer reports FAILED for is an error, not a success", async (t) => {

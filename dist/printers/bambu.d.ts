@@ -281,7 +281,7 @@ export declare class BambuImplementation {
     confirmDispatchedJob(host: string, serial: string, token: string, before: any, jobName: string | string[], assertActive: () => void, replies?: {
         poll: () => Promise<CommandReply | undefined>;
         reply?: CommandReply;
-    }): Promise<"started" | "unconfirmed">;
+    }, readStatus?: () => Promise<any>): Promise<"started" | "unconfirmed">;
     startJob(host: string, serial: string, token: string, filename: string, bambuModel?: string): Promise<{
         message: string;
         printerReply?: ReturnType<typeof printerReplyField>;

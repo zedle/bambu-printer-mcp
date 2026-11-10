@@ -1830,7 +1830,7 @@ export class BambuImplementation {
      * pushall interval, 3 s) for up to BAMBU_DISPATCH_CHECK_MS. "started" needs this job's name in the report or a
      * new task id with a printing state; a refusal or a failed start throws; otherwise "unconfirmed".
      */
-    async confirmDispatchedJob(host, serial, token, before, jobName, assertActive, replies) {
+    async confirmDispatchedJob(host, serial, token, before, jobName, assertActive, replies, readStatus = () => this.getSafetyStatus(host, serial, token)) {
         const deadline = Date.now() + dispatchCheckMs();
         const cancelled = () => { try {
             assertActive();
@@ -1861,7 +1861,7 @@ export class BambuImplementation {
             if (verdict)
                 break;
             try {
-                verdict = judgeDispatchReport((await this.getSafetyStatus(host, serial, token))?.raw, before?.raw, jobName);
+                verdict = judgeDispatchReport((await readStatus())?.raw, before?.raw, jobName);
             }
             catch { /* try again until the deadline */ }
         }

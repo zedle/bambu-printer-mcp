@@ -246,6 +246,11 @@ type FilamentProfileIndex = {
   baseNameByFilamentId: Map<string, string>;
 };
 
+/** Reads a fresh safety status (LAN MQTT, or the cloud relay for cloud jobs). */
+type StatusReader = () => Promise<any>;
+/** How a print path reaches the printer; readStatus replaces the LAN read when set. */
+type PrinterAccess = { host: string; serial: string; token: string; readStatus?: StatusReader };
+
 type PrinterFilamentInventory = {
   current_slot: number | null;
   current_source: "ams" | "external" | null;
@@ -1350,7 +1355,8 @@ class BambuPrinterMCPServer {
     sliceModel: string,
     host: string,
     bambuSerial: string,
-    bambuToken: string
+    bambuToken: string,
+    readStatus?: StatusReader
   ): Promise<{ nozzleDiameter: string; options: Partial<BambuSliceOptions> }> {
     let extruderNozzles = parseExtruderNozzlesArg(args?.nozzles);
     const filamentMap = parseFilamentMapArg(args?.filament_map);
@@ -1376,10 +1382,10 @@ class BambuPrinterMCPServer {
     }
     let reportedExtruders: BambuSliceOptions["reportedExtruders"];
     if (fromPrinter) {
-      if (!bambuSerial || !bambuToken) {
+      if (!bambuSerial || (!bambuToken && !readStatus)) {
         throw new Error("nozzles_from_printer needs the printer's serial and access code (bambu_serial / bambu_token or their env defaults).");
       }
-      const status = await this.bambu.getSafetyStatus(host, bambuSerial, bambuToken);
+      const status = readStatus ? await readStatus() : await this.bambu.getSafetyStatus(host, bambuSerial, bambuToken);
       const reportedModel = normalizeModel(status?.model);
       if (!reportedModel || reportedModel !== normalizeModel(sliceModel)) {
         throw new Error(`The printer reports model "${String(status?.model)}", not ${sliceModel}; refusing to slice with its nozzles.`);
@@ -1544,13 +1550,13 @@ class BambuPrinterMCPServer {
     args: Record<string, any>,
     printModel: string,
     bedType: string | undefined,
-    printer: { host: string; serial: string; token: string }
+    printer: PrinterAccess
   ): Promise<{ printerPreset: string | undefined; nozzleDiameter: string; options: BambuSliceOptions }> {
     assertUniformCliNozzles(args);
     const requested = requestedPrintNozzles(args);
     const sliceExtruders = await this.resolveSliceExtruders(
       { ...args, nozzle_diameter: requested?.length ? String(requested[0]) : undefined },
-      printModel, printer.host, printer.serial, printer.token
+      printModel, printer.host, printer.serial, printer.token, printer.readStatus
     );
     return {
       printerPreset: BAMBU_MODEL_PRESETS[printModel]?.(sliceExtruders.nozzleDiameter),
@@ -1571,7 +1577,7 @@ class BambuPrinterMCPServer {
     args: Record<string, any>,
     printModel: string,
     bedType: string | undefined,
-    printer: { host: string; serial: string; token: string }
+    printer: PrinterAccess
   ): Promise<{ threeMFPath: string; autoSliced: boolean }> {
     const { slicerType, slicerPath, slicerProfile } =
       this.resolveSlicerConfigFromArgs(args, "print_3mf_bambu_network");
@@ -1606,7 +1612,8 @@ class BambuPrinterMCPServer {
     bambuSerial: string,
     bambuToken: string,
     printModel?: string,
-    printNozzle?: string
+    printNozzle?: string,
+    readStatus?: StatusReader
   ): Promise<{ useAMS: boolean; finalAmsMapping?: number[]; finalAmsSlots?: number[] }> {
     const parsed3MFData = await parse3MF(threeMFPath);
     let parsedAmsMapping: number[] | undefined;
@@ -1659,7 +1666,8 @@ class BambuPrinterMCPServer {
         bambuSerial,
         bambuToken,
         printModel,
-        printNozzle
+        printNozzle,
+        readStatus
       );
       const resolved = resolveAmsSlotsFromRequirements(requirements, inventory);
       if (resolved.missing.length > 0) {
@@ -1734,8 +1742,18 @@ class BambuPrinterMCPServer {
       throw new Error("bambu_token/access code is required for FULU BambuNetwork LAN/local print methods.");
     }
 
-    if (!bambuSerial || devId !== bambuSerial || !devIp || devIp === "localhost" || !(password || bambuToken)) {
-      throw new Error("Bridge printing requires a matching bambu_serial/dev_id, printer host, and LAN access token for fresh MQTT safety verification, including cloud dispatch.");
+    // A cloud job (start_print) is checked against the printer's own reports relayed by Bambu's cloud, so it needs no
+    // LAN access; LAN bridge jobs and the native route keep reading the printer over LAN MQTT.
+    const cloudSafety = !isLocalBridgePrint && !native;
+    const statusBridgeOptions = this.bridgeOptionsFromArgs(args, "print_3mf_bambu_network");
+    const readSafetyStatus: StatusReader = cloudSafety
+      ? () => this.bambuNetwork.readFreshCloudStatus(devId, statusBridgeOptions)
+      : () => this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
+    if (!bambuSerial || devId !== bambuSerial) {
+      throw new Error("Bridge printing requires a bambu_serial matching dev_id for fresh printer safety verification.");
+    }
+    if (!cloudSafety && (!devIp || devIp === "localhost" || !(password || bambuToken))) {
+      throw new Error("LAN bridge printing requires the printer host and LAN access token for fresh MQTT safety verification.");
     }
     for (const field of ["config_filename", "ftp_file", "ftp_file_md5", "ams_mapping_bridge", "ams_mapping2", "ams_mapping_info", "nozzle_mapping", "nozzles_info", "extra_options"]) {
       if (args[field] !== undefined && args[field] !== "") throw new Error(`${field} cannot override a verified print. Use the structured plate, nozzle, and AMS arguments.`);
@@ -1745,7 +1763,7 @@ class BambuPrinterMCPServer {
       args,
       printModel,
       printBedType,
-      { host: devIp, serial: bambuSerial, token: password || bambuToken }
+      { host: devIp, serial: bambuSerial, token: password || bambuToken, ...(cloudSafety ? { readStatus: readSafetyStatus } : {}) }
     );
     const { useAMS, finalAmsMapping, finalAmsSlots } = await this.resolveAmsPrintSettings(
       threeMFPath,
@@ -1754,7 +1772,8 @@ class BambuPrinterMCPServer {
       bambuSerial,
       bambuToken,
       printModel,
-      printNozzle
+      printNozzle,
+      cloudSafety ? readSafetyStatus : undefined
     );
     if (native && args.use_ams !== false && !useAMS) {
       throw new Error("Native X2D printing requires ams_mapping, ams_slots, auto_match_ams, or explicit use_ams: false for an external spool.");
@@ -1782,10 +1801,10 @@ class BambuPrinterMCPServer {
       // External-only: an explicit holder choice stays (and is checked against its nozzle); otherwise each filament's.
       if (!useAMS && !mapping) mapping = externalSpoolMapping(inspection.model, inspection);
       const requirements = { ...inspection, amsMapping: mapping, useAMS, printStart: true, timelapse: args?.timelapse !== undefined ? Boolean(args.timelapse) : false };
-      const initialStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
+      const initialStatus = await readSafetyStatus();
       validatePrinterState(initialStatus, requirements);
       const bedClearance = await this.bambu.confirmPrintPreflight(devId, initialStatus, inspection);
-      const confirmedStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
+      const confirmedStatus = await readSafetyStatus();
       // The warnings reported are those of the last check before dispatch.
       let { hmsWarnings } = validatePrinterState(confirmedStatus, requirements);
       this.bambu.assertBedClearance(confirmedStatus, bedClearance);
@@ -1918,7 +1937,7 @@ class BambuPrinterMCPServer {
             beforeDispatch: async method => {
               if (method !== bridgeMethod) return;
               assertActive();
-              dispatchStatus = await this.bambu.getSafetyStatus(devIp, devId, password || bambuToken);
+              dispatchStatus = await readSafetyStatus();
               ({ hmsWarnings } = validatePrinterState(dispatchStatus, requirements));
               this.bambu.assertBedClearance(dispatchStatus, bedClearance);
             },
@@ -1930,7 +1949,7 @@ class BambuPrinterMCPServer {
         if (!(error instanceof BridgeDispatchUncertainError)) throw error;
         // Never resend: the job may still start. Look at the printer instead.
         this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements, reportedNames);
-        if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, [remoteFileName, ...reportedNames], assertActive, replies) === "started") {
+        if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, [remoteFileName, ...reportedNames], assertActive, replies, readSafetyStatus) === "started") {
           return withHmsWarnings({ status: "success", dispatch: "started", message: `Bambu's network plugin did not answer, but the printer reports ${threeMfFilename} printing. It was not sent again.`, ...dispatchReplyField(replies.reply), bridgeMethod, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params), ...(nozzleMapping ? { nozzleMapping: { mapping: nozzleMapping.mapping, hotends: nozzleMapping.assignments } } : {}) }, [...hmsWarnings, ...mappingWarnings]);
         }
         throw error;
@@ -1949,7 +1968,7 @@ class BambuPrinterMCPServer {
         if (BRIDGE_PRINT_MAYBE_STARTED.has(value)) {
           // The cloud task exists but the printer's ack didn't arrive in time: it may still start.
           this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements, reportedNames);
-          if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, [remoteFileName, ...reportedNames], assertActive, replies) === "started") {
+          if (await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, [remoteFileName, ...reportedNames], assertActive, replies, readSafetyStatus) === "started") {
             return withHmsWarnings({ status: "success", dispatch: "started", message: `The plugin reported ${value} (${bridgePrintErrorText(value)}), but the printer reports ${threeMfFilename} printing. It was not sent again.`, ...dispatchReplyField(replies.reply), bridgeMethod, bridgeResult, clientJobId, autoSliced, projectName, plateIndex, useAMS, amsMapping: mapping, params: redactPrintParams(params), ...(nozzleMapping ? { nozzleMapping: { mapping: nozzleMapping.mapping, hotends: nozzleMapping.assignments } } : {}) }, [...hmsWarnings, ...mappingWarnings]);
           }
           throw new Error(`FULU BambuNetwork bridge method ${bridgeMethod} returned ${value} (${bridgePrintErrorText(value)}). The job was posted and may still start. Do not send it again: check get_printer_status (gcode_state and the job name) first.`);
@@ -1961,7 +1980,7 @@ class BambuPrinterMCPServer {
       this.bambu.recordCheckedJob(devIp, devId, remoteFileName, requirements, reportedNames);
       // A 0 from the plugin isn't proof (start_local_print returns ~3 s after publishing, with no printer ack):
       // confirm the job from the printer's own reports.
-      const dispatch = await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, [remoteFileName, ...reportedNames], assertActive, replies);
+      const dispatch = await this.bambu.confirmDispatchedJob(devIp, devId, password || bambuToken, dispatchStatus, [remoteFileName, ...reportedNames], assertActive, replies, readSafetyStatus);
 
       return withHmsWarnings({
         status: dispatchStatusLabel(dispatch),
@@ -2086,8 +2105,11 @@ class BambuPrinterMCPServer {
     bambuSerial: string,
     bambuToken: string,
     bambuModel?: string,
-    nozzleDiameter?: string
+    nozzleDiameter?: string,
+    readStatus?: StatusReader
   ): Promise<PrinterFilamentInventory> {
+    // A fresh full report already carries the AMS; no second read is needed.
+    if (readStatus) return normalizePrinterFilamentInventory(await readStatus(), bambuModel, nozzleDiameter);
     const status = await this.bambu.getStatus(host, bambuSerial, bambuToken);
     let inventory = normalizePrinterFilamentInventory(status, bambuModel, nozzleDiameter);
     // The first MQTT push from an idle printer is sparse (model/modules

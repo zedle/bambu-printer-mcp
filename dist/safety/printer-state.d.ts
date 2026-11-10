@@ -1,8 +1,17 @@
 import { BambuClient } from "bambu-node";
+import { type PrinterReport } from "../printer-report.js";
 import type { SliceNozzlePlan } from "./slice-info.js";
 export declare const SERIAL_MODELS: Record<string, string>;
 /** The model a serial prefix belongs to (Studio's sn_prefix). Identity evidence only together with a fresh report. */
 export declare function serialModel(serial: string): string | undefined;
+/** Where a safety report came from: the printer's LAN MQTT, or its own pushes relayed by Bambu's cloud (network plug-in). */
+export type ReportSource = "mqtt" | "cloud";
+/**
+ * The safety status a report gives once it is fresh for a request made at `requestedAt` (a full report at most one
+ * full-push interval older, a push merged after it, gcode_state, print_error and hms present, a known model), or
+ * undefined while it isn't yet. Throws when the report names another printer.
+ */
+export declare function freshReportStatus(report: PrinterReport, serial: string, requestedAt: number, source: ReportSource): any | undefined;
 /**
  * A fresh report for a safety check: the printer's state restored the way Bambu Studio does it (printer-report.ts),
  * from a full report at most one full-push interval (3 s, Studio's REQUEST_PUSH_MIN_TIME) older than this request,
